@@ -74,6 +74,7 @@ impl T3 for FakeT3 {
             }
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
+            "t3_thread_launch" => json!({ "threadId": "new1" }),
             "t3_project_list" => json!({ "projects": [{ "id": "p1", "title": "app" }] }),
             "t3_thread_list" => {
                 if args["settled"] == true {
@@ -920,4 +921,35 @@ fn a_question_that_cant_be_read_once_stays_a_question() {
     let view = rig.bridge.snapshot()["view"].clone();
     assert!(view["ask"].is_object(), "{view}");
     assert!(view["approval"].is_null(), "not shown as an approval: {view}");
+}
+
+#[test]
+fn the_game_learns_which_commands_failed_and_which_thread_a_start_opened() {
+    let mut rig = Rig::new(26_000_000);
+    rig.t3.failing.lock().unwrap().insert("t3_thread_send".into(), "T3 refused the message".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [
+        { "s": 1, "t": "ui", "o": true },
+        { "s": 2, "t": "send", "e": "mac", "id": "t1", "m": "hello" },
+        { "s": 3, "t": "new", "e": "mac", "p": "p1", "m": "Build it" },
+        { "s": 4, "t": "answer", "id": "t1", "k": "00000000", "a": [1] },
+    ] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["out"], json!([
+        { "s": 2, "ok": false, "x": "T3 refused the message" },
+        { "s": 3, "ok": true, "env": "mac", "id": "new1" },
+        { "s": 4, "ok": false, "x": "that question was already answered or has changed" },
+    ]));
+    assert_eq!(snapshot["view"]["id"], "new1", "the companion opens the new thread");
+    assert!(rig.slot(1).contains("out={{s=2,ok=false,"), "{}", rig.slot(1));
+
+    // They stay a minute, then go; a new UI session starts without them.
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["out"].is_null());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 5, "t": "send", "id": "t1", "m": "again" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["out"].as_array().unwrap().len(), 1);
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [{ "s": 6, "t": "hello", "o": false }] }));
+    assert!(rig.bridge.snapshot()["out"].is_null());
 }

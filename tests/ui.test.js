@@ -22,6 +22,8 @@ function inboxWith(envs, extra)
   for _, t in ipairs(extra and extra.threads or {}) do data.threads[#data.threads + 1] = t end
   for _, p in ipairs(extra and extra.projects or {}) do data.projects[#data.projects + 1] = p end
   data.view, data.out = extra and extra.view, extra and extra.out
+  -- The companion has taken every command sent so far.
+  T3WoWDB.queue = {}
   UI.OnInbox(data)
 end
 ENVS = { LOCAL, MAC }
@@ -73,6 +75,91 @@ local before = #T3WoWDB.queue
 click("Start")
 assert(#T3WoWDB.queue == before, "started with a project that's gone")
 assert(typed() == "again", typed())
+return "ok"
+`);
+});
+
+test("a message T3 refused comes back to the box and its '(sending)' line goes", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Hi" } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+typeText("please fix it")
+click("Send")
+local s = sent().s
+assert(typed() == "", "box not cleared")
+assert(showing("%(sending%)"), "no echo")
+inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "T3 refused the message" } } })
+assert(typed() == "please fix it", "text not back: " .. typed())
+assert(not showing("%(sending%)"), "echo still there")
+assert(showing("Not sent: T3 refused the message"), "no notice")
+-- The same outcome again (it stays in updates for a minute) changes nothing.
+typeText("")
+inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "T3 refused the message" } } })
+assert(typed() == "", "text put back twice")
+return "ok"
+`);
+});
+
+test("Send answer comes back after a failed answer, or after a while with no word", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" }, { l = "Blue", d = "" } } } } }
+local view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+click("Red")
+click("Send answer")
+local s = sent().s
+assert(sent().t == "answer", sent().t)
+assert(find("Button", "Sending…"), "not sending")
+inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "timed out" } } })
+assert(find("Button", "Send answer") and find("Button", "Send answer"):IsShown(), "still stuck")
+assert(showing("Answer not sent: timed out"), "no notice")
+
+-- An older companion says nothing: the button comes back after the timeout.
+click("Send answer")
+assert(find("Button", "Sending…"), "not sending again")
+inboxWith(ENVS, { threads = { thread }, view = view })
+tick(50)
+assert(find("Button", "Send answer"), "stuck without word")
+return "ok"
+`);
+});
+
+test("a started thread opens in place of the New Thread composer", () => {
+  run(`
+inboxWith(ENVS, { projects = { { e = 2, id = "pm", t = "mac app" } } })
+click("New Thread")
+click("Machine: PC")
+typeText("Build it")
+click("Start")
+local s = sent().s
+assert(sent().t == "new" and sent().e == "mac", tostring(sent().e))
+local started = { e = 2, id = "new1", t = "Build it", s = "running", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { started }, view = { e = 2, id = "new1", t = "Build it", s = "running", items = {} },
+  out = { { s = s, ok = true, env = "mac", id = "new1" } } })
+assert(find("Button", "Send") and not find("Button", "Start"), "still in the composer")
+typeText("and test it")
+click("Send")
+assert(sent().t == "send" and sent().id == "new1" and sent().e == "mac", tostring(sent().t) .. " " .. tostring(sent().id))
+return "ok"
+`);
+});
+
+test("an overlong message stays in the box instead of being dropped", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+-- 2400 bytes (the box's limit) of quotes: each one doubles once escaped.
+local long = string.rep('"', 2400)
+typeText(long)
+local before = #T3WoWDB.queue
+click("Send")
+assert(#T3WoWDB.queue == before, "sent")
+assert(typed() == long, "box cleared")
 return "ok"
 `);
 });
