@@ -26,10 +26,21 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 ![A thread waiting for approval, with the Open in T3 button](https://media.forgecdn.net/attachments/2159/873/approval-png.png)
 
+## Themes
+
+The window comes in three themes with the same layout. Only the colors, fonts and corners change:
+
+- **T3** (the default) looks like the T3 Code app: dark rounded cards, status pills, your messages in bubbles, and the Inter font, which ships with the addon.
+- **Flat** is square and pixel-bordered, with the game's Arial Narrow. If you run ElvUI, it uses ElvUI's colors, font and pixel size, so the window matches the rest of your screen.
+- **Classic** keeps the game's own feel: gold Friz Quadrata headings and grey bevelled edges.
+
+**Compact thread list** fits each thread on one line, in any theme. Hover a thread to see its machine and project.
+
 ## Settings
 
 Right-click the minimap button, type /t3 settings, or press **Settings** in the window.
 
+- **Theme** picks T3, Flat or Classic, and **Compact thread list** fits each thread on one line. Both apply at once.
 - Turn the line in chat, the sound and the on-screen notification on or off.
 - **Stay on screen** sets how long a notification stays up: 5, 8, 15 or 30 seconds, or until you click it.
 - **At most** sets how many notifications stay on screen at once, from 1 to 10. The oldest one closes to make room, and a newer notification for the same thread replaces the old one.
