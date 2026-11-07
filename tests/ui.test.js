@@ -444,3 +444,63 @@ assert(not moreRow("open") and not moreRow("settled"), "rows stayed")
 return "ok"
 `);
 });
+
+test("Stop shows Stopping… until the run has stopped, and clears on every other outcome too", () => {
+  run(`
+local running = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }
+local function stopButton() return find("Button", "Stop") or find("Button", "Stopping…") end
+inboxWith(ENVS, { threads = { running } })
+UI.Select(running)
+
+-- T3 takes the interrupt: Stopping… while the run winds down, then Stop again once it stopped.
+click("Stop")
+local s = sent().s
+assert(sent().t == "stop" and sent().id == "t1" and sent().e == "local", tostring(sent().t))
+assert(stopButton().text == "Stopping…" and not stopButton().enabled, "pressed: " .. stopButton().text)
+inboxWith(ENVS, { threads = { running }, out = { { s = s, ok = true, st = "stopping" } } })
+assert(stopButton().text == "Stopping…", "taken: " .. stopButton().text)
+local stopped = { e = 1, id = "t1", t = "Thread", s = "interrupted", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { stopped } })
+assert(stopButton().text == "Stop" and not stopButton().enabled, "stopped: " .. stopButton().text)
+
+-- Already stopped (the list hadn't caught up): Stop comes back, and the window says so.
+inboxWith(ENVS, { threads = { running } })
+click("Stop")
+s = sent().s
+inboxWith(ENVS, { threads = { running }, out = { { s = s, ok = true, st = "idle" } } })
+assert(stopButton().text == "Stop" and stopButton().enabled, "already stopped: " .. stopButton().text)
+assert(showing("Nothing to stop"), "no word that it had already stopped")
+
+-- Refused: Stop comes back with T3's reason.
+click("Stop")
+s = sent().s
+inboxWith(ENVS, { threads = { running }, out = { { s = s, ok = false, x = "thread_not_interruptible" } } })
+assert(stopButton().text == "Stop" and stopButton().enabled, "refused: " .. stopButton().text)
+assert(showing("Couldn't stop: thread_not_interruptible"), "no reason given")
+
+-- Taken, but the run never ends: Stop comes back after a while.
+click("Stop")
+s = sent().s
+inboxWith(ENVS, { threads = { running }, out = { { s = s, ok = true, st = "stopping" } } })
+tick(65)
+assert(stopButton().text == "Stop" and stopButton().enabled, "stuck while still running: " .. stopButton().text)
+assert(showing("Still running"), "no word that it's still running")
+
+-- No word back at all (an older companion, or one not answering): the same.
+click("Stop")
+inboxWith(ENVS, { threads = { running } })
+tick(65)
+assert(stopButton().text == "Stop" and stopButton().enabled, "stuck without word: " .. stopButton().text)
+assert(showing("No word back on Stop"), "no word about the timeout")
+
+-- Stopping is one thread's: another thread shows its own Stop.
+local other = { e = 2, id = "t2", t = "Other", s = "running", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { running, other } })
+click("Stop")
+UI.Select(other)
+assert(stopButton().text == "Stop" and stopButton().enabled, "another thread: " .. stopButton().text)
+UI.Select(running)
+assert(stopButton().text == "Stopping…", "back on the first: " .. stopButton().text)
+return "ok"
+`);
+});

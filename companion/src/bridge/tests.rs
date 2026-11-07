@@ -92,6 +92,17 @@ impl T3 for FakeT3 {
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
             "t3_thread_launch" => json!({ "threadId": "new1" }),
+            // As T3 answers: the interrupt is requested for a run under way; with none, it
+            // says so (or names how the last run ended).
+            "t3_thread_interrupt" => {
+                let status = str_of(&self.thread(&args["threadId"])["status"]).to_string();
+                let answer = match status.as_str() {
+                    s if working(s) => "interrupt_requested",
+                    s @ ("completed" | "failed" | "cancelled" | "interrupted" | "rolled_back") => s,
+                    _ => "no_active_run",
+                };
+                json!({ "threadId": args["threadId"], "runId": null, "status": answer })
+            }
             "t3_project_list" => json!({ "projects": [{ "id": "p1", "title": "app" }] }),
             "t3_thread_list" => {
                 let mut threads = if args["settled"] == true { self.settled.lock().unwrap().clone() } else { self.threads.lock().unwrap().clone() };
@@ -1272,4 +1283,59 @@ fn show_more_lists_more_of_a_group_up_to_its_cap_for_the_ui_session() {
     assert_eq!(settled_shown(&rig), 25);
     assert_eq!(rig.bridge.snapshot()["more"], json!({ "settled": true }));
     assert!(rig.slot(rig.bridge.link.slot - 1).contains("more={settled=true}"), "{}", rig.slot(rig.bridge.link.slot - 1));
+}
+
+#[test]
+fn every_stop_tells_the_game_how_it_went_and_stopping_ends_once_the_run_has() {
+    let mut rig = Rig::new(31_000_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    let last_note = |rig: &Rig| str_of(&rig.bridge.snapshot()["notes"].as_array().unwrap().last().unwrap()["x"]).to_string();
+    let outcome = |rig: &Rig, s: u64| rig.bridge.snapshot()["out"].as_array().into_iter().flatten().find(|o| o["s"] == s).cloned();
+    let poll = |rig: &mut Rig| {
+        rig.advance(5_000);
+        for _ in 0..10 {
+            rig.bridge.tick();
+        }
+    };
+
+    // Running: T3 takes the interrupt, and the game hears so.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 2, "t": "stop", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 2), Some(json!({ "s": 2, "ok": true, "st": "stopping" })));
+    assert_eq!(last_note(&rig), "Stopping.");
+    // Still winding down: still stopping.
+    poll(&mut rig);
+    assert_eq!(last_note(&rig), "Stopping.");
+    // The run ended: the note says so, instead of "Stopping." until it ages out.
+    rig.t3.set("interrupted", "2026-11-06T10:05:00Z");
+    poll(&mut rig);
+    assert_eq!(last_note(&rig), "Stopped.");
+    // Later lists don't say it again.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 3, "t": "refresh" }] }));
+    poll(&mut rig);
+    assert_eq!(rig.bridge.snapshot()["notes"].as_array().unwrap().iter().filter(|n| n["x"] == "Stopped.").count(), 1);
+
+    // Already stopped: nothing to interrupt, and the game hears that rather than "Stopping.".
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 4, "t": "stop", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 4), Some(json!({ "s": 4, "ok": true, "st": "idle" })));
+    assert_eq!(last_note(&rig), "Nothing to stop: the run had already ended.");
+    rig.t3.set("idle", "2026-11-06T10:06:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 5, "t": "stop", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 5), Some(json!({ "s": 5, "ok": true, "st": "idle" })));
+
+    // Refused (or failed, or timed out): a failure with T3's reason, like any command.
+    rig.t3.set("running", "2026-11-06T10:07:00Z");
+    rig.t3.failing.lock().unwrap().insert("t3_thread_interrupt".into(), "thread_not_interruptible: it runs elsewhere".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 6, "t": "stop", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 6), Some(json!({ "s": 6, "ok": false, "x": "thread_not_interruptible: it runs elsewhere" })));
+    assert_eq!(last_note(&rig), "stop failed: thread_not_interruptible: it runs elsewhere");
+    // A refused stop isn't waited on: the run ending later isn't "Stopped." by the game.
+    rig.t3.set("completed", "2026-11-06T10:08:00Z");
+    poll(&mut rig);
+    assert_eq!(last_note(&rig), "stop failed: thread_not_interruptible: it runs elsewhere");
 }
