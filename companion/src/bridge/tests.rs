@@ -6,6 +6,8 @@ struct FakeT3 {
     threads: Mutex<Vec<Value>>,
     /// false: what's pending is an approval, which T3's pending list leaves out.
     questions: Mutex<bool>,
+    /// The server's own environment id; "local" also links a Mac.
+    env_id: Mutex<String>,
 }
 
 impl FakeT3 {
@@ -17,6 +19,7 @@ impl FakeT3 {
                 "settled": false, "updatedAt": "2026-11-06T10:00:00Z", "itemCount": 3
             })]),
             questions: Mutex::new(true),
+            env_id: Mutex::new("local".into()),
         })
     }
 
@@ -41,7 +44,13 @@ impl T3 for FakeT3 {
     fn call(&self, name: &str, args: Value) -> Result<Value, T3Error> {
         self.calls.lock().unwrap().push((name.to_string(), args.clone()));
         Ok(match name {
-            "t3_environment_links" => json!({ "environmentId": "local", "links": [{ "environmentId": "mac", "label": "Mac", "status": "reachable" }] }),
+            "t3_environment_links" => {
+                let env_id = self.env_id.lock().unwrap().clone();
+                let links = if env_id == "local" { json!([{ "environmentId": "mac", "label": "Mac", "status": "reachable" }]) } else { json!([]) };
+                json!({ "environmentId": env_id, "links": links })
+            }
+            // The "local" server leaves its name out, as an older T3 might.
+            "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
             "t3_project_list" => json!({ "projects": [{ "id": "p1", "title": "app" }] }),
             "t3_thread_list" => {
                 if args["settled"] == true {
@@ -450,4 +459,36 @@ fn typed_text_answers_a_question_in_your_own_words() {
     };
     assert_eq!(Bridge::answers_for(&ask, &json!(["  my own words "])), json!({ "Name?": "my own words" }).as_object().unwrap().clone());
     assert!(Bridge::answers_for(&ask, &json!([9])).is_empty(), "an index past the options is ignored");
+}
+
+#[test]
+fn pointed_at_another_server_the_old_servers_threads_and_open_thread_go() {
+    let mut rig = Rig::new(9_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["threads"].as_array().unwrap().len(), 2, "t1 on this server and on the Mac");
+    assert!(snapshot["view"].is_object());
+
+    // The same server again (T3 restarted on another port): the open thread stays.
+    rig.bridge.set_client(rig.t3.clone());
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["view"].is_object());
+
+    // Another server, with one thread of its own and no linked machines.
+    let other = FakeT3::new();
+    *other.env_id.lock().unwrap() = "other".into();
+    other.threads.lock().unwrap()[0]["threadId"] = json!("b1");
+    rig.bridge.set_client(other.clone());
+    rig.advance(5000);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    let ids: Vec<&str> = snapshot["threads"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["b1"]);
+    // Its threads go under its own name, not this PC's.
+    assert_eq!(snapshot["envs"], json!([{ "id": "other", "name": "Server B", "ok": true }]));
+    assert!(snapshot["view"].is_null(), "{}", snapshot["view"]);
+    assert!(other.calls_to("t3_thread_read").iter().all(|args| args["threadId"] != "t1"));
+    assert!(rig.bridge.status().t3_ok);
 }

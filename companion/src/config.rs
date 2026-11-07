@@ -52,13 +52,21 @@ impl Config {
         fs::read_to_string(Self::file()).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
+    /// Writes a temporary file and renames it over the old one, so a reader never sees half.
+    fn save(&self) -> std::io::Result<()> {
         fs::create_dir_all(config_dir())?;
-        fs::write(Self::file(), serde_json::to_string_pretty(self).unwrap_or_default())
+        let temp = Self::file().with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string_pretty(self).unwrap_or_default())?;
+        fs::rename(&temp, Self::file())
     }
 
-    /// Reads the file, applies `change`, and writes it back (other fields untouched).
+    /// Reads the file, applies `change`, and writes it back (other fields untouched). The tray
+    /// app and a `t3wow.exe login` in a terminal can both write: a lock file keeps one from
+    /// undoing the other's change.
     pub fn update(change: impl FnOnce(&mut Config)) -> Config {
+        let _ = fs::create_dir_all(config_dir());
+        let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(config_dir().join("config.lock"));
+        let _guard = lock.ok().filter(|file| file.lock().is_ok());
         let mut config = Config::load();
         change(&mut config);
         let _ = config.save();

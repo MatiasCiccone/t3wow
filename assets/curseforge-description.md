@@ -49,7 +49,7 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 ## What you need
 
 - Windows, with WoW: Forever in windowed or borderless windowed mode (exclusive fullscreen blocks screen capture).
-- T3 Code desktop running on the same PC. Threads on other machines appear when you link those machines to it in T3.
+- T3 Code desktop running on the same PC, or on another machine this PC can reach over the network (run t3wow.exe login --origin http://<host>:<port> once to point the companion at it). Threads on other machines also appear when you link those machines to T3.
 - The T3 WoW companion, t3wow.exe, from https://github.com/MatiasCiccone/t3wow-releases.
 
 ## Setting up

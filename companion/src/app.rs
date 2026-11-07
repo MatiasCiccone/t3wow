@@ -130,10 +130,14 @@ impl App {
         }
         let app = Arc::clone(self);
         std::thread::spawn(move || {
-            let config = Config::load();
-            match config.origin.clone().or_else(t3::discover_origin) {
+            match t3::origin() {
                 None => log::line("Can't sign in: T3 Code is not running on this PC."),
                 Some(origin) => match t3::login(&origin, &|m| log::line(m)) {
+                    // `login --origin` changed where T3 is while the browser was open: this
+                    // token is for the old one.
+                    Ok(_) if t3::origin().as_deref() != Some(origin.as_str()) => {
+                        log::line(&format!("T3 moved away from {origin} during the sign-in: sign in again."));
+                    }
                     Ok(signed) => {
                         Config::update(|c| {
                             c.token = Some(signed.token.clone());
@@ -195,7 +199,7 @@ pub fn run(app: Arc<App>) {
 
     // 3. T3 on this PC.
     let origin = loop {
-        if let Some(origin) = Config::load().origin.or_else(t3::discover_origin) {
+        if let Some(origin) = t3::origin() {
             break origin;
         }
         app.set("T3 Code isn't running on this PC", "WoW: waiting for T3", true, Config::load().token().is_some());
@@ -215,7 +219,7 @@ pub fn run(app: Arc<App>) {
     };
 
     // 5. The bridge, fed by the screen capture.
-    let client = Arc::new(McpClient::new(&origin, &token));
+    let mut client = Arc::new(McpClient::new(&origin, &token));
     let mut bridge = Bridge::new(
         client.clone() as Arc<dyn T3>,
         Box::new(Slots::for_wow(&wow_dir, &interface)),
@@ -261,14 +265,23 @@ pub fn run(app: Arc<App>) {
         }
         bridge.tick();
         let s = bridge.status();
-        // T3 may have restarted on another port: look again now and then while it fails.
-        if !s.t3_ok && checked_origin.elapsed() > Duration::from_secs(30) {
+        // Look again now and then: `t3wow.exe login` may have changed (or cleared) the saved
+        // origin or signed in, or the T3 on this PC restarted on another port. A saved origin
+        // always wins.
+        if checked_origin.elapsed() > Duration::from_secs(30) {
             checked_origin = Instant::now();
-            if let Some(found) = t3::discover_origin().filter(|o| *o != origin) {
+            let token = Config::load().token().unwrap_or_default();
+            if let Some(found) = t3::origin().filter(|o| *o != origin) {
                 log::line(&format!("T3 moved to {found}"));
                 origin = found;
-                let token = Config::load().token().unwrap_or_default();
-                bridge.set_client(Arc::new(McpClient::new(&origin, &token)));
+                client = Arc::new(McpClient::new(&origin, &token));
+                bridge.set_client(client.clone());
+            } else if !token.is_empty() && token != client.token() {
+                // A sign-in from the terminal: use its token (it also ends a tray sign-out).
+                log::line("Using the new T3 sign-in.");
+                signed_out = false;
+                client.set_token(&token);
+                bridge.set_client(client.clone());
             }
         }
         let t3_line = if signed_out {

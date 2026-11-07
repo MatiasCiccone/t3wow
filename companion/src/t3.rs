@@ -43,6 +43,11 @@ pub fn discover_origin() -> Option<String> {
     origin.starts_with("http").then(|| origin.trim_end_matches('/').to_string())
 }
 
+/// Where to reach T3: the origin saved by `login --origin`, else the T3 running on this PC.
+pub fn origin() -> Option<String> {
+    crate::config::Config::load().origin.or_else(discover_origin)
+}
+
 fn random_url_safe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).expect("random bytes");
@@ -284,6 +289,10 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             http: agent(),
         }
+    }
+
+    pub fn token(&self) -> String {
+        self.token.lock().unwrap().clone()
     }
 
     pub fn set_token(&self, token: &str) {

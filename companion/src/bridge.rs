@@ -308,6 +308,23 @@ impl Bridge {
         self.slow_at = 0;
     }
 
+    /// T3 answers as a different server than before (`login --origin` pointed the companion
+    /// elsewhere): drop what was read from the old one (its machines, threads, projects, the
+    /// open thread), which the new one may not have.
+    fn forget_server(&mut self) {
+        self.view = None;
+        self.view_data = None;
+        self.view_key = None;
+        self.pending_ask = None;
+        self.threads.clear();
+        self.projects.clear();
+        self.settled_totals.clear();
+        self.last_status.clear();
+        self.pending_counts.clear();
+        self.launchers.clear();
+        self.listed_envs.clear();
+    }
+
     fn now_ms(&self) -> i64 {
         (self.now)()
     }
@@ -582,8 +599,19 @@ impl Bridge {
 
     fn refresh_environments(&mut self) -> Result<(), T3Error> {
         let result = self.client.call("t3_environment_links", json!({}))?;
-        self.local_env_id = result["environmentId"].as_str().map(str::to_string);
-        let mut envs = vec![Env { id: self.local_env_id.clone().unwrap_or_default(), name: hostname(), ok: true }];
+        let local_env_id = result["environmentId"].as_str().map(str::to_string);
+        if self.local_env_id.is_some() && local_env_id != self.local_env_id {
+            self.log(&format!("T3 is now {}: forgetting the previous server's threads", local_env_id.as_deref().unwrap_or("another server")));
+            self.forget_server();
+        }
+        self.local_env_id = local_env_id;
+        // The server's own name: not this PC's when `login --origin` points at another machine.
+        let name = match self.client.call("t3_environment_read", json!({})) {
+            Ok(read) => read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string),
+            Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+            Err(T3Error::Other(_)) => None,
+        };
+        let mut envs = vec![Env { id: self.local_env_id.clone().unwrap_or_default(), name: name.unwrap_or_else(hostname), ok: true }];
         for link in result["links"].as_array().into_iter().flatten() {
             let id = str_of(&link["environmentId"]).to_string();
             let name = link["label"].as_str().map(str::to_string).unwrap_or_else(|| id.chars().take(8).collect());
