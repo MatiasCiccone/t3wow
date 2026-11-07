@@ -8,8 +8,19 @@ import { AuthError } from "./t3.js";
 
 const WORKING = new Set(["preparing", "queued", "starting", "running"]);
 const MIN_PUBLISH_GAP_MS = 1500;
+// Routine changes while the window is open: one update at most this often (200 slots
+// then last about 35 minutes of watching a busy thread, not 15).
+const ROUTINE_GAP_MS = 10_000;
+// While waiting, the game moves to the next signal file every SIGNAL_PERIOD seconds (it
+// stops noticing a file it has checked for too long). Same clock, same arithmetic: keep
+// in step with addon/T3WoW/Link.lua.
+export const SIGNAL_PERIOD = 25;
 const VIEW_MESSAGES = 24;
 const VIEW_CHARS = 40_000;
+const THREAD_LIST = { allProjects: true, includeSubagents: false };
+// T3's sidebar files subagent threads, and threads an agent launched, under the thread
+// they came from. Linked machines don't always apply includeSubagents, so check here too.
+const onSidebar = (t) => !t.parentThreadId && t.createdBy !== "agent";
 
 const seconds = (iso) => (iso ? Math.floor(Date.parse(iso) / 1000) : 0);
 const plain = (text, max = 200) => String(text ?? "").replace(/\|/g, "||").replace(/\s+/g, " ").trim().slice(0, max);
@@ -21,13 +32,15 @@ export class Bridge {
     this.stateFile = stateFile;
     this.log = log;
     this.now = now;
-    this.link = { wowKey: null, uiSession: null, slot: 1, signal: 1, acked: {}, clientKey: null, ...this.loadState() };
+    // signal / signalTime: where the game's current wait started (file number, epoch s).
+    this.link = { wowKey: null, uiSession: null, slot: 1, signal: 1, signalTime: 0, acked: {}, clientKey: null, ...this.loadState() };
     this.windowOpen = false;
     this.view = null; // { env, id, depth }
     this.envs = [{ id: "", name: hostname(), ok: true }];
     this.localEnvId = null;
     this.threads = new Map(); // env id -> thread list
     this.projects = new Map(); // env id -> project list
+    this.settledTotals = new Map(); // env id -> settled thread count, listed or not
     this.viewData = null;
     this.viewKey = null;
     this.notes = [];
@@ -50,6 +63,16 @@ export class Bridge {
     }
   }
 
+  nowSeconds() {
+    return Math.floor(this.now() / 1000);
+  }
+
+  /** The signal file the game watches at nowS, by the same arithmetic as Link.lua. */
+  watchedSignal(nowS = this.nowSeconds()) {
+    const since = nowS - (this.link.signalTime || nowS);
+    return this.link.signal + Math.max(0, Math.floor(since / SIGNAL_PERIOD));
+  }
+
   saveState() {
     try {
       writeFileSync(this.stateFile, JSON.stringify(this.link));
@@ -66,8 +89,11 @@ export class Bridge {
     if (message.type === "wow") {
       if (message.key !== this.link.wowKey) {
         this.log(message.key ? `WoW running (${message.key})` : "WoW not running");
-        // A new client process forgot every signal; clearing is safe either way.
+        // A new client process hasn't loaded any signal font: all start blank again.
         this.slots.clearSignals();
+        this.slots.flipProbe?.(false);
+        this.link.signal = 1;
+        this.link.signalTime = this.nowSeconds();
         this.link.wowKey = message.key;
         this.link.uiSession = null;
         this.saveState();
@@ -87,19 +113,32 @@ export class Bridge {
     }
   }
 
-  onFrame({ k, u, n, l, q }) {
+  onFrame({ k, u, n, l, p, q }) {
     if (typeof k !== "string" || typeof u !== "string") return;
+    // Until the game watches signals (it learns the next one from its first update, and
+    // some clients can't use them at all) it loads slots on a schedule and reports where it is.
+    const polling = p === 1;
     if (u !== this.link.uiSession || k !== this.link.clientKey) {
-      // New UI session (login or /reload): every slot can load again.
+      // New UI session (login or /reload): every slot can load again. Signal files raised
+      // earlier in this game process stay real, so the new wait starts past all of them.
       this.link.uiSession = u;
       this.link.clientKey = k;
       this.link.slot = Number(l) || 1;
-      this.link.signal = Number(n) || 1;
+      this.link.signal = this.watchedSignal() + 2;
+      this.link.signalTime = this.nowSeconds();
       this.lastPublishedHash = null;
-      this.log(`Game UI connected (session ${u}, next slot ${this.link.slot}, next signal ${this.link.signal})`);
-    } else {
-      this.link.slot = Math.max(this.link.slot, Number(l) || 1);
-      this.link.signal = Math.max(this.link.signal, Number(n) || 1);
+      this.lastUrgentHash = null;
+      this.link.polling = undefined;
+      this.log(`Game UI connected (session ${u}, next slot ${this.link.slot})`);
+    } else if (Number(l) > 0) {
+      // The game draws a frame with its current slot count, so it is the authority on
+      // where it loads next (it may have loaded extra slots on its own).
+      this.link.slot = Number(l);
+    }
+    if (polling !== this.link.polling) {
+      if (!polling) this.log(`Game watching signals (file ${Number(n) || "?"}): updates arrive in about a second`);
+      else if (this.link.polling === false) this.log("Game stopped watching signals: it checks for updates on a timer");
+      this.link.polling = polling;
     }
     const acked = this.link.acked[k] ?? 0;
     for (const command of Array.isArray(q) ? q : []) {
@@ -178,6 +217,11 @@ export class Bridge {
           });
           this.note("Stopping.");
           break;
+        case "probe": {
+          const changed = this.slots.flipProbe(true);
+          this.log(changed.length ? `probe: made ${changed.join(", ")} files real` : "probe: no probe files; run t3wow install");
+          break;
+        }
         case "refresh":
           this.viewKey = null;
           break;
@@ -229,13 +273,20 @@ export class Bridge {
 
   async refreshThreads(env) {
     try {
-      const [open, settled] = await Promise.all([
-        this.client.call("t3_thread_list", { allProjects: true, settled: false, limit: 60, ...this.envArg(env) }),
-        this.client.call("t3_thread_list", { allProjects: true, settled: true, limit: 15, ...this.envArg(env) }),
+      const list = (args) => this.client.call("t3_thread_list", { ...THREAD_LIST, ...args, ...this.envArg(env) });
+      const [open, snoozed, settled] = await Promise.all([
+        list({ settled: false, snoozed: false, limit: 60 }),
+        list({ settled: false, snoozed: true, limit: 15 }),
+        list({ settled: true, limit: 15 }),
       ]);
-      const threads = [...(open.threads ?? []), ...(settled.threads ?? [])];
+      const threads = [
+        ...(open.threads ?? []).filter((t) => t.snoozed !== true),
+        ...(snoozed.threads ?? []).filter((t) => t.snoozed === true),
+        ...(settled.threads ?? []),
+      ].filter(onSidebar);
       for (const thread of threads) this.trackStatus(env, thread);
       this.threads.set(env, threads);
+      this.settledTotals.set(env, Math.max(settled.total ?? 0, (settled.threads ?? []).filter(onSidebar).length));
       const target = this.envs.find((e) => e.id === env);
       if (target) target.ok = true;
     } catch (error) {
@@ -329,6 +380,7 @@ export class Bridge {
           t: plain(t.title, 90),
           s: t.status,
           set: t.settled === true,
+          sn: t.snoozed === true || undefined,
           at: seconds(t.updatedAt),
           p: plain(projectTitle.get(`${env}:${t.projectId}`) ?? "", 40),
         });
@@ -346,6 +398,7 @@ export class Bridge {
       ack: this.link.acked[this.link.clientKey] ?? 0,
       envs: this.envs.map((e) => ({ id: e.id, name: plain(e.name, 40), ok: e.ok })),
       threads,
+      settledTotal: [...this.settledTotals.values()].reduce((a, b) => a + b, 0),
       projects,
       view,
       notes: this.notes,
@@ -359,22 +412,51 @@ export class Bridge {
     const t = this.now();
     if (t - this.lastPublishAt < MIN_PUBLISH_GAP_MS) return;
     const data = this.snapshot();
-    // With the window closed only acks, alerts and errors are worth a slot.
-    const relevant = this.windowOpen ? data : { ack: data.ack, events: data.events, notes: data.notes, auth: data.auth };
-    const hash = createHash("sha1").update(JSON.stringify(relevant)).digest("hex");
+    // Each update spends one of the UI session's 200 slots. Urgent: what answers you
+    // (acks, notes, a thread you just opened), alerts and errors; with the window closed
+    // nothing else is worth a slot. Everything else (list times, a running agent's new
+    // messages) waits until ROUTINE_GAP_MS after the last update.
+    const urgent = {
+      ack: data.ack,
+      events: data.events,
+      notes: data.notes,
+      auth: data.auth,
+      open: this.windowOpen,
+      view: data.view ? [data.view.id, data.view.more] : null,
+    };
+    const hash = createHash("sha1").update(JSON.stringify(this.windowOpen ? data : urgent)).digest("hex");
     if (hash === this.lastPublishedHash) return;
-    if (this.link.slot > SLOT_COUNT || this.link.signal > SIGNAL_COUNT) return;
-    const lua = (slot) =>
-      `T3WoW_Inbox = ${toLua({ ...data, now: Math.floor(t / 1000), slot, sig: this.link.signal })}\n`;
-    // Write a few slots ahead so a missed count on either side still finds fresh data.
+    const urgentHash = createHash("sha1").update(JSON.stringify(urgent)).digest("hex");
+    if (urgentHash === this.lastUrgentHash && t - this.lastPublishAt < ROUTINE_GAP_MS) return;
+    const polling = this.link.polling === true;
+    if (this.link.slot > SLOT_COUNT) return;
+    const nowS = Math.floor(t / 1000);
+    // ns/nt: where and when the game's next wait starts. Polling doesn't move it.
+    let wait = { ns: this.link.signal, nt: this.link.signalTime };
+    const raise = [];
+    if (!polling) {
+      // The game may be a moment either side of moving to its next file, so raise the
+      // file it should be watching now and both neighbours.
+      const watched = this.watchedSignal(nowS);
+      if (watched + 1 > SIGNAL_COUNT) return;
+      for (let n = Math.max(this.link.signal, watched - 1); n <= watched + 1; n++) raise.push(n);
+      wait = { ns: watched + 2, nt: nowS };
+    }
+    const lua = (slot) => `T3WoW_Inbox = ${toLua({ ...data, now: nowS, slot, ns: wait.ns, nt: wait.nt })}\n`;
+    // Write a few slots ahead so a missed count on either side still finds fresh data,
+    // and only then raise the signals that send the game to read them.
     for (let slot = this.link.slot; slot < this.link.slot + 3 && slot <= SLOT_COUNT; slot++) {
       this.slots.writeSlot(slot, lua(slot));
     }
-    this.slots.raiseSignal(this.link.signal);
-    this.link.slot += 1;
-    this.link.signal += 1;
+    if (!polling) {
+      for (const n of raise) this.slots.raiseSignal(n);
+      this.link.slot += 1;
+      this.link.signal = wait.ns;
+      this.link.signalTime = wait.nt;
+    }
     this.lastPublishAt = t;
     this.lastPublishedHash = hash;
+    this.lastUrgentHash = urgentHash;
     this.saveState();
   }
 

@@ -1,26 +1,20 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { addonVersion, captureScript, isExe } from "../src/assets.js";
 import { Bridge } from "../src/bridge.js";
 import { decodeCells, encodeFrame, magicCells } from "../src/codec.js";
 import { Slots } from "../src/slots.js";
 import { McpClient, discoverOrigin, login } from "../src/t3.js";
+import { findWowDir, looksLikeClient, normalizeWowDir } from "../src/wow.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = process.env.APPDATA ? join(process.env.APPDATA, "t3wow") : join(homedir(), ".config", "t3wow");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const DEFAULT_INTERFACE = "16001";
-const WOW_GUESSES = [
-  "C:\\Program Files (x86)\\World of Warcraft\\_forever_",
-  "C:\\Program Files\\World of Warcraft\\_forever_",
-  "D:\\World of Warcraft\\_forever_",
-  "D:\\Games\\World of Warcraft\\_forever_",
-];
 
 const { values: flags, positionals } = parseArgs({
   allowPositionals: true,
@@ -31,6 +25,11 @@ const { values: flags, positionals } = parseArgs({
     help: { type: "boolean", short: "h" },
   },
 });
+
+// Started by double-clicking t3wow.exe: a console window that closes the moment we exit,
+// so errors wait for a key press.
+const DOUBLE_CLICKED = isExe && process.argv.length <= 2;
+if (isExe) process.title = "T3 WoW companion";
 
 function readConfig() {
   try {
@@ -47,14 +46,35 @@ function writeConfig(config) {
 
 function fail(message) {
   console.error(message);
+  if (DOUBLE_CLICKED) {
+    try {
+      execFileSync("cmd.exe", ["/c", "pause"], { stdio: "inherit" });
+    } catch {}
+  }
   process.exit(1);
 }
 
-function wowDir(config) {
-  // PowerShell passes a trailing `\"` through as a literal quote.
-  const given = flags.wow?.replace(/["']/g, "").trim().replace(/[\\/]+$/, "");
-  const dir = given ?? config.wowDir ?? WOW_GUESSES.find((guess) => existsSync(guess));
-  if (!dir) fail("Could not find WoW: Forever. Pass --wow \"C:\\...\\World of Warcraft\\_forever_\".");
+function ask(question) {
+  if (!process.stdin.isTTY) return Promise.resolve("");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => rl.question(question, (answer) => (rl.close(), resolve(answer))));
+}
+
+/** The _forever_ folder: --wow, then the saved one, then a search, then asking. Saved for next time. */
+async function wowDir(config) {
+  let dir = flags.wow ? normalizeWowDir(flags.wow) : null;
+  if (!dir && looksLikeClient(config.wowDir)) dir = config.wowDir;
+  if (!dir) dir = findWowDir();
+  while (!dir) {
+    const answer = await ask("Where is WoW: Forever installed? Paste its _forever_ folder (or press Enter to quit): ");
+    if (!answer.trim()) fail('Could not find WoW: Forever. Pass --wow "C:\\...\\World of Warcraft\\_forever_".');
+    dir = normalizeWowDir(answer);
+    if (!looksLikeClient(dir)) {
+      console.log(`  No Wow.exe or Interface folder in ${dir}.`);
+      dir = null;
+    }
+  }
+  if (dir !== config.wowDir) writeConfig({ ...readConfig(), wowDir: dir });
   return dir;
 }
 
@@ -64,32 +84,31 @@ function origin(config) {
   return value.replace(/\/+$/, "");
 }
 
+const signedIn = (config) =>
+  Boolean(process.env.T3WOW_TOKEN) || (Boolean(config.token) && !(config.tokenExpiresAt && config.tokenExpiresAt < Date.now()));
+
 function token(config) {
-  const value = process.env.T3WOW_TOKEN ?? config.token;
-  if (!value) fail("Not signed in. Run: t3wow login");
-  if (!process.env.T3WOW_TOKEN && config.tokenExpiresAt && config.tokenExpiresAt < Date.now()) {
-    fail("The T3 sign-in expired. Run: t3wow login");
-  }
-  return value;
+  if (!signedIn(config)) fail(config.token ? "The T3 sign-in expired. Run: t3wow login" : "Not signed in. Run: t3wow login");
+  return process.env.T3WOW_TOKEN ?? config.token;
 }
 
-const slotsFor = (config) => {
-  const dir = wowDir(config);
+async function slotsFor(config) {
+  const dir = await wowDir(config);
   return { dir, slots: new Slots(join(dir, "Interface", "AddOns"), flags.interface ?? config.interface ?? DEFAULT_INTERFACE) };
-};
+}
 
 async function install() {
   const config = readConfig();
-  const { dir, slots } = slotsFor(config);
+  const { dir, slots } = await slotsFor(config);
   slots.install();
-  writeConfig({ ...config, wowDir: dir, interface: slots.interfaceVersion });
+  writeConfig({ ...readConfig(), wowDir: dir, interface: slots.interfaceVersion });
   console.log(`Installed the T3WoW addon and its reply slots into ${slots.addonsDir}.`);
   console.log("Restart WoW (a full restart, not /reload) so the game sees the new files.");
 }
 
 async function uninstall() {
   const config = readConfig();
-  slotsFor(config).slots.uninstall();
+  (await slotsFor(config)).slots.uninstall();
   console.log("Removed the T3WoW addon and its slots. Your sign-in stays in " + CONFIG_FILE);
 }
 
@@ -97,14 +116,14 @@ async function signIn() {
   const config = readConfig();
   const at = origin(config);
   const result = await login(at);
-  writeConfig({ ...config, origin: flags.origin ?? config.origin, token: result.token, tokenExpiresAt: result.expiresAt });
+  writeConfig({ ...readConfig(), origin: flags.origin ?? config.origin, token: result.token, tokenExpiresAt: result.expiresAt });
   console.log(`Signed in to ${at} (${result.scope || "no scope reported"}). Expires ${new Date(result.expiresAt).toLocaleString()}.`);
 }
 
 async function status() {
   const config = readConfig();
-  const { dir, slots } = slotsFor(config);
-  console.log(`WoW: ${dir} (addon ${slots.installed() ? "installed" : "NOT installed: run t3wow install"})`);
+  const { dir, slots } = await slotsFor(config);
+  console.log(`WoW: ${dir} (addon ${slots.installed() ? `installed, ${slots.installedVersion()}` : "NOT installed: run t3wow install"})`);
   if (process.platform === "win32") console.log(`Capture: ${await checkCapture()}`);
   const at = origin(config);
   const client = new McpClient(at, token(config));
@@ -124,7 +143,7 @@ async function checkCapture() {
   const file = join(tmpdir(), `t3wow-capture-${process.pid}.bmp`);
   writeFileSync(file, bitmap(encodeFrame(42, payload), 3, 2));
   const output = await new Promise((resolve) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(HERE, "..", "src", "capture.ps1"),
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", captureScript(CONFIG_DIR),
       "-MagicCells", magicCells().join(""), "-ImageFile", file], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let text = "";
     child.stdout.on("data", (chunk) => (text += chunk));
@@ -172,15 +191,30 @@ function bitmap(cells, dx, dy) {
   return out;
 }
 
+/** Everything a first start needs: find WoW, put the addon files in place, sign in, run. */
 async function run() {
-  const config = readConfig();
-  const { dir, slots } = slotsFor(config);
-  if (!slots.installed()) fail("The addon is not installed. Run: t3wow install");
-  const at = origin(config);
-  const client = new McpClient(at, token(config));
   const log = (message) => console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
+  let config = readConfig();
+  const { dir, slots } = await slotsFor(config);
+  if (!config.interface) writeConfig({ ...readConfig(), interface: slots.interfaceVersion });
+  // Addon managers replace addon folders on update and cleanups delete "unknown" ones;
+  // put back whatever is missing, and install or update the addon this companion ships.
+  const repaired = slots.repair();
+  if (repaired.addon) log(`Addon ${repaired.addon} in ${slots.addonDir}`);
+  if (repaired.created > 0) log(`Created ${repaired.created} missing addon files`);
+  if (repaired.addon || repaired.created > 0) {
+    log("If WoW is running, restart it completely (not /reload) so it sees the new files.");
+  }
+  const at = origin(config);
+  if (!signedIn(config)) {
+    log(config.token ? "The T3 sign-in expired; signing in again." : "Not signed in to T3 yet; opening the sign-in page.");
+    await signIn();
+    config = readConfig();
+  }
+  const client = new McpClient(at, token(config));
   const bridge = new Bridge({ client, slots, stateFile: join(CONFIG_DIR, "state.json"), log });
-  log(`T3 WoW companion: T3 at ${at}, WoW at ${dir}`);
+  log(`T3 WoW companion ${addonVersion() ?? ""}: T3 at ${at}, WoW at ${dir}`);
+  log("Leave this window open while you play. In the game: /t3");
   if (process.platform !== "win32") log("Screen capture runs only on Windows; T3 polling still runs.");
   else startCapture(dir, (message) => bridge.onCapture(message), log);
 
@@ -197,7 +231,7 @@ async function run() {
 }
 
 function startCapture(dir, onMessage, log) {
-  const script = join(HERE, "..", "src", "capture.ps1");
+  const script = captureScript(CONFIG_DIR);
   let delay = 1000;
   let child = null;
   process.once("exit", () => child?.kill());
@@ -229,9 +263,10 @@ const command = positionals[0] ?? "run";
 if (flags.help || !commands[command]) {
   console.log(`t3wow: T3 Code inside World of Warcraft: Forever
 
-  t3wow install [--wow <_forever_ folder>] [--interface ${DEFAULT_INTERFACE}]
+  t3wow run     start the companion (default; double-clicking t3wow.exe does this).
+                Finds WoW, puts the addon in place, signs in to T3 if needed.
+  t3wow install [--wow <_forever_ folder>] [--interface ${DEFAULT_INTERFACE}]   reinstall from scratch
   t3wow login   [--origin http://127.0.0.1:3773]
-  t3wow run     start the companion (default)
   t3wow status  check the T3 connection and the addon install
   t3wow uninstall`);
   process.exit(flags.help ? 0 : 1);

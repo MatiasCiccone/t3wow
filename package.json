@@ -1,6 +1,6 @@
 {
   "name": "t3wow",
-  "version": "0.1.0",
+  "version": "0.2.7",
   "private": true,
   "description": "T3 Code inside World of Warcraft: Forever.",
   "type": "module",
@@ -12,9 +12,12 @@
   },
   "scripts": {
     "start": "node companion/bin/t3wow.js run",
-    "test": "node --test companion/test/*.test.js"
+    "test": "node --test companion/test/*.test.js",
+    "build:exe": "node companion/build/build-exe.mjs"
   },
   "devDependencies": {
-    "fengari": "^0.1.4"
+    "esbuild": "^0.25.12",
+    "fengari": "^0.1.4",
+    "postject": "^1.0.0-alpha.6"
   }
 }

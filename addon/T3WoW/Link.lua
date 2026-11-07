@@ -1,30 +1,64 @@
 -- The two doors out of the sandbox.
 -- Out: commands drawn as a strip of colored 4px cells at the screen's top-left; the
 --      companion screen-captures and decodes it.
--- In:  the companion writes state into load-on-demand slot addons and flips
---      sig/NNNN.wav from empty to playable; seeing it playable, we load the next slot.
+-- In:  the companion writes state into load-on-demand slot addons and turns the blank
+--      font sig/NNNN.ttf into a real one; seeing that font load, we load the next slot.
+--      Fonts load a moment after SetFont, so every check is started, then read later.
+--      The game seems to give up on a font file it has tried a few dozen times, so we
+--      never watch one file for long: while waiting we move to the next signal file every
+--      SIGNAL_PERIOD seconds, timed from the update that named the starting file. The
+--      companion runs on this PC, shares the clock, and raises the files around ours.
 local _, ns = ...
 local Codec = ns.Codec
 local Link = {}
 ns.Link = Link
 
-local SLOT_COUNT, SIGNAL_COUNT = 200, 2000
+local SLOT_COUNT, SIGNAL_COUNT = 200, 4000
+local SIGNAL_PERIOD = 25 -- keep in step with companion/src/bridge.js
 local ROOT = "Interface\\AddOns\\T3WoW\\"
 local ACK_PATIENCE = 20
+-- Without signals the companion can't see which slot we load next unless we tell it,
+-- so after each polled load the strip shows a header-only frame this long.
+local SYNC_SECONDS = 1.5
+-- How often to start a new check of the watched signal file: often right after any
+-- activity, less once things have been quiet for QUIET_AFTER seconds (each check costs a
+-- font string that is never freed).
+local RECHECK_SECONDS, RECHECK_QUIET_SECONDS, QUIET_AFTER = 0.75, 2.5, 60
+-- A command waiting this long also gets a slot loaded directly, in case a signal was missed.
+local NUDGE_AFTER = 6
 
 local floor, format = math.floor, string.format
 local db
 local state = {
     nextSlot = 1,
-    nextSignal = nil,
-    signalsOk = false,
+    signalBase = nil, -- first signal file of the current wait (inbox.ns)
+    signalTime = nil, -- when that wait started, epoch seconds (inbox.nt)
+    adoptedAt = 0, -- inbox.nt of the update we took signalBase from
+    signals = "checking", -- "checking", "on" or "off"
+    capability = nil,
+    recentAlerts = {}, -- newest first, for /t3 status
+    trace = {},
     inbox = nil,
     inboxAt = nil,
     loadError = nil,
     pollAt = 0,
     queueSince = nil,
+    syncUntil = 0,
+    signalCheck = nil,
 }
 Link.state = state
+
+-- ---------------------------------------------------------------- trace
+-- What the link did, newest last, for debugging: /t3 trace prints it, and it is saved
+-- with the addon's saved variables (on /reload or logout) as T3WoWDB.trace.
+local TRACE_MAX = 120
+local function trace(text)
+    local t = state.trace
+    t[#t + 1] = format("%s.%d %s", date("%H:%M:%S"), floor((GetTime() % 1) * 10), text)
+    if #t > TRACE_MAX then table.remove(t, 1) end
+end
+Link.Trace = function() return state.trace end
+
 
 local LoadAddOnFn = (C_AddOns and C_AddOns.LoadAddOn) or LoadAddOn
 
@@ -34,23 +68,54 @@ local function randomHex(digits)
     return table.concat(out)
 end
 
-local function playable(path)
-    local ok, willPlay, handle = pcall(PlaySoundFile, path, "Master")
-    if ok and willPlay and handle then pcall(StopSound, handle) end
-    return ok and willPlay and true or false
+local function signalPath(n) return format("%ssig\\%04d.ttf", ROOT, n) end
+
+-- Font checks. A blank font file never loads; a real one loads shortly after SetFont,
+-- and the font string's GetFont() then names it. Fonts only load for drawn text, so the
+-- font strings sit in a near-invisible speck.
+-- A font string that once failed to load a font never loads one later (seen in traces:
+-- reused font strings missed real signal files for minutes, fresh ones saw them at
+-- once), so every check gets a new font string. They can't be destroyed; finished ones
+-- are hidden and emptied, and checks slow down when nothing is happening.
+-- A real font can take a moment to load, so the last FONT_RECENT checks keep being read.
+local FONT_RECENT = 12
+local fontHolder = CreateFrame("Frame", nil, UIParent)
+fontHolder:SetSize(2, 2)
+fontHolder:SetPoint("BOTTOMRIGHT")
+fontHolder:SetAlpha(0.05)
+local fontPool, fontSize = {}, 10 -- fontPool: recent checks, oldest first
+state.fontStrings = 0
+
+-- index: the signal file number this check is for (nil for other checks).
+local function startFontCheck(path, index)
+    local text = fontHolder:CreateFontString(nil, "OVERLAY")
+    state.fontStrings = state.fontStrings + 1
+    text:SetPoint("BOTTOMRIGHT")
+    fontSize = fontSize % 40 + 10 -- a new size each time, in case the game caches by size
+    text:SetFont(STANDARD_TEXT_FONT, fontSize, "")
+    text:SetText("MW")
+    local check = { text = text, before = text:GetFont(), index = index, at = GetTime() }
+    pcall(text.SetFont, text, path, fontSize, "")
+    fontPool[#fontPool + 1] = check
+    if #fontPool > FONT_RECENT then
+        local old = table.remove(fontPool, 1)
+        old.text:SetText("")
+        old.text:Hide()
+    end
+    return check
 end
 
-local function signalPath(n) return format("%ssig\\%04d.wav", ROOT, n) end
+local function fontLoaded(check)
+    local after = check.text:GetFont()
+    return after ~= nil and after ~= check.before
+end
 
--- Signals the companion raised in this client process stay playable, and it raises
--- them in order, so the playable ones form a prefix we can binary-search.
-local function findNextSignal()
-    local lo, hi = 0, SIGNAL_COUNT
-    while lo < hi do
-        local mid = floor((lo + hi + 1) / 2)
-        if playable(signalPath(mid)) then lo = mid else hi = mid - 1 end
-    end
-    return lo + 1
+local function signalling() return state.signals == "on" and state.signalBase ~= nil end
+
+-- The signal file to watch right now.
+local function watchedSignal()
+    if not state.signalBase then return nil end
+    return state.signalBase + math.max(0, floor((time() - state.signalTime) / SIGNAL_PERIOD))
 end
 
 -- ---------------------------------------------------------------- strip
@@ -85,14 +150,18 @@ end
 
 local frameSeq = 0
 function Link.Render()
-    if not db or #db.queue == 0 then
-        strip:Hide()
+    if not db then return strip:Hide() end
+    if #db.queue == 0 then
         state.queueSince = nil
-        return
+        if GetTime() >= state.syncUntil then return strip:Hide() end
+    else
+        state.queueSince = state.queueSince or GetTime()
     end
-    state.queueSince = state.queueSince or GetTime()
-    local header = { k = db.client, u = state.uiSession, n = state.nextSignal or 0, l = state.nextSlot }
-    local commands, payload = {}, nil
+    local header = { k = db.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
+        p = (not signalling()) and 1 or nil }
+    -- An empty queue still sends a header-only sync frame.
+    local commands = {}
+    local payload = (#db.queue == 0) and Codec.Json(header) or nil
     for _, command in ipairs(db.queue) do
         commands[#commands + 1] = command
         header.q = commands
@@ -116,6 +185,8 @@ end
 function Link.Send(command)
     db.seq = db.seq + 1
     command.s = db.seq
+    trace(format("send #%d %s", command.s, tostring(command.t)))
+    state.lastSentAt = GetTime()
     db.queue[#db.queue + 1] = command
     Link.Render()
 end
@@ -135,23 +206,40 @@ local function receive(inbox)
             if command.s > inbox.ack then kept[#kept + 1] = command end
         end
         if #kept ~= #db.queue then
+            trace(format("  acked to #%d, %d command(s) left", inbox.ack, #kept))
             db.queue = kept
             state.queueSince = nil
             Link.Render()
         end
     end
+    -- Each update names where the next wait starts (ns) and when (nt). Slots are written a
+    -- few ahead, so an older update can arrive after a newer one: only move forward.
+    local adopted = type(inbox.ns) == "number" and type(inbox.nt) == "number" and inbox.nt > state.adoptedAt
+    if adopted then
+        state.signalBase, state.signalTime, state.adoptedAt = inbox.ns, inbox.nt, inbox.nt
+    end
+    trace(format("  update from %s: wait %s @%s (%s), %d event(s)", date("%H:%M:%S", inbox.now or 0), tostring(inbox.ns),
+        inbox.nt and date("%H:%M:%S", inbox.nt) or "?", adopted and "taken" or "older, ignored", #(inbox.events or {})))
     state.inbox = inbox
     state.inboxAt = GetTime()
     for _, event in ipairs(inbox.events or {}) do
         if event.n > (db.lastEvent or 0) then
             db.lastEvent = event.n
-            ns.UI.Alert(event)
+            local result = ns.UI.Alert(event)
+            -- Kept for /t3 status: when it happened, how late and how it got here, what we did.
+            table.insert(state.recentAlerts, 1, {
+                title = event.t, status = event.s, happened = floor(event.n / 1000), arrived = time(),
+                via = state.loadVia or "?", result = result or "?",
+            })
+            state.recentAlerts[6] = nil
         end
     end
     ns.UI.OnInbox(inbox)
 end
 
-local function loadNextSlot()
+-- via: how this load was triggered ("a signal", "the timer", "the fallback for a waiting command").
+local function loadNextSlot(via)
+    state.loadVia = via
     if state.nextSlot > SLOT_COUNT then
         state.exhausted = true
         ns.UI.Refresh()
@@ -159,6 +247,7 @@ local function loadNextSlot()
     end
     local name = format("T3WoW_S%03d", state.nextSlot)
     state.nextSlot = state.nextSlot + 1
+    trace(format("load %s via %s", name, via or "?"))
     _G.T3WoW_Inbox = nil
     local loaded, reason = LoadAddOnFn(name)
     local inbox = _G.T3WoW_Inbox
@@ -169,10 +258,47 @@ local function loadNextSlot()
         return
     end
     state.loadError = nil
-    if type(inbox) == "table" then receive(inbox) end
+    if type(inbox) == "table" then receive(inbox) else trace("  slot was empty") end
 end
 
 function Link.Exhausted() return state.exhausted end
+
+-- Decides once per UI session whether font signals work: the real test font must load
+-- and the blank one must not. Right after the game starts (cold disk, every addon
+-- loading) the test font can take a while, so a slow check is retried, never taken as
+-- "fonts don't work"; only a blank font loading rules signals out. Until then slots
+-- load on the timer.
+local CAPABILITY_TIMEOUT, CAPABILITY_RETRY = 4, 3
+local function updateCapability(now)
+    if state.signals ~= "checking" then return end
+    local c = state.capability
+    if not c then
+        if now < (state.capabilityRetryAt or 0) then return end
+        -- Started on the first drawn frame: fonts don't load during the loading screen.
+        state.capabilityAttempts = (state.capabilityAttempts or 0) + 1
+        state.capability = {
+            empty = startFontCheck(ROOT .. "ctl\\probe\\empty.ttf"),
+            valid = startFontCheck(ROOT .. "ctl\\probe\\valid.ttf"),
+            at = now,
+        }
+        return
+    end
+    if fontLoaded(c.empty) then
+        state.signals = "off"
+        state.signalCheck = "this game client loads even a blank font file, so it can't tell when an update is ready"
+        trace("font check: a blank font loaded, signals off")
+    elseif fontLoaded(c.valid) and now - c.at > 0.5 then
+        state.signals = "on"
+        state.signalCheck = nil
+        trace(format("font check passed (attempt %d, %.1fs)", state.capabilityAttempts, now - c.at))
+    elseif now - c.at > CAPABILITY_TIMEOUT then
+        trace(format("font check attempt %d: test font not loaded after %ds, retrying",
+            state.capabilityAttempts, CAPABILITY_TIMEOUT))
+        state.capability, state.capabilityRetryAt = nil, now + CAPABILITY_RETRY
+        state.signalCheck = format("still checking that fonts load (attempt %d); until then updates come on a timer",
+            state.capabilityAttempts)
+    end
+end
 
 local elapsed = 0
 local poller = CreateFrame("Frame")
@@ -180,20 +306,57 @@ poller:SetScript("OnUpdate", function(_, delta)
     elapsed = elapsed + delta
     if elapsed < 0.25 or not db then return end
     elapsed = 0
-    if state.signalsOk then
-        if state.nextSignal <= SIGNAL_COUNT and playable(signalPath(state.nextSignal)) then
-            state.nextSignal = state.nextSignal + 1
-            loadNextSlot()
-            if #db.queue > 0 then Link.Render() end
-        end
-        return
-    end
-    -- No sound signal on this client: poll slots on a schedule instead.
     local now = GetTime()
+    if strip:IsShown() and #db.queue == 0 and now >= state.syncUntil then strip:Hide() end
+    updateCapability(now)
+    local watching = signalling()
+    if watching ~= state.wasSignalling then
+        -- Tell the companion right away: it raises signals only once it sees we watch them.
+        state.wasSignalling = watching
+        state.syncUntil = now + SYNC_SECONDS
+        Link.Render()
+    end
+    if watching then
+        -- Any recent check of a file in the current wait that has loaded means an update:
+        -- the companion only makes files real when it publishes.
+        for _, check in ipairs(fontPool) do
+            if check.index and check.index >= state.signalBase and fontLoaded(check) then
+                local index = check.index
+                trace(format("signal %d noticed (that check started %.1fs ago; %d check(s) of it; base was %d)",
+                    index, now - check.at, state.checksOfWatched or 0, state.signalBase))
+                for _, other in ipairs(fontPool) do other.index = nil end
+                state.lastCheckAt, state.lastSignalAt, state.signalsSeen = nil, now, (state.signalsSeen or 0) + 1
+                -- The update we load names the next wait; until then, assume the companion
+                -- moved past every file it raised for this one (ours and its neighbours).
+                state.signalBase, state.signalTime = index + 2, time()
+                loadNextSlot("a signal")
+                if #db.queue > 0 then Link.Render() end
+                return
+            end
+        end
+        local watched = watchedSignal()
+        if watched ~= state.lastWatched then
+            trace(format("watch %d (base %d @%s)%s", watched, state.signalBase, date("%H:%M:%S", state.signalTime),
+                state.lastWatched and format("; %d check(s) of %d", state.checksOfWatched or 0, state.lastWatched) or ""))
+            state.lastWatched, state.checksOfWatched = watched, 0
+        end
+        local quiet = #db.queue == 0 and now - math.max(state.inboxAt or 0, state.lastSentAt or 0) > QUIET_AFTER
+        local every = quiet and RECHECK_QUIET_SECONDS or RECHECK_SECONDS
+        if watched <= SIGNAL_COUNT and (not state.lastCheckAt or now - state.lastCheckAt >= every) then
+            startFontCheck(signalPath(watched), watched)
+            state.lastCheckAt = now
+            state.checksOfWatched = (state.checksOfWatched or 0) + 1
+        end
+        if not (state.queueSince and now - state.queueSince > NUDGE_AFTER) then return end
+    end
+    -- No signal yet (or none on this client, or a command waits too long): load slots on
+    -- a schedule, and tell the companion where we are after each one.
     if now < state.pollAt then return end
-    local interval = (#db.queue > 0 and 3) or (ns.UI.IsShown() and 10) or 60
+    local interval = (signalling() and 5) or (#db.queue > 0 and 3) or (ns.UI.IsShown() and 10) or 60
     state.pollAt = now + interval
-    loadNextSlot()
+    loadNextSlot(signalling() and "the fallback for a waiting command" or "the timer")
+    state.syncUntil = GetTime() + SYNC_SECONDS
+    Link.Render()
 end)
 
 function Link.Init()
@@ -202,21 +365,26 @@ function Link.Init()
     db.client = db.client or randomHex(12)
     db.seq = db.seq or 0
     db.queue = db.queue or {}
+    -- Keep the previous UI session's record too: problems often show up just before a /reload.
+    db.previousTrace = db.trace
+    db.trace = state.trace
     state.uiSession = format("%x%s", time(), randomHex(4))
-    state.signalsOk = type(PlaySoundFile) == "function"
-        and not playable(ROOT .. "ctl\\empty.wav")
-        and playable(ROOT .. "ctl\\valid.wav")
-    state.nextSignal = state.signalsOk and findNextSignal() or 1
+    trace("UI session " .. state.uiSession .. " started")
     Link.Send({ t = "hello", o = false })
 end
 
 function Link.Status()
     return {
-        signalsOk = state.signalsOk,
-        nextSignal = state.nextSignal,
+        signals = state.signals,
+        nextSignal = watchedSignal(),
         nextSlot = state.nextSlot,
         queue = db and #db.queue or 0,
         loadError = state.loadError,
+        signalCheck = state.signalCheck,
         inboxAge = state.inboxAt and (GetTime() - state.inboxAt) or nil,
+        signalsSeen = state.signalsSeen or 0,
+        fontStrings = state.fontStrings,
+        signalAge = state.lastSignalAt and (GetTime() - state.lastSignalAt) or nil,
+        recentAlerts = state.recentAlerts,
     }
 end

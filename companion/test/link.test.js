@@ -98,21 +98,191 @@ test("commands from a frame run once, reach the linked machine, and are acked th
   const sends = calls.filter(([name]) => name === "t3_thread_send");
   assert.equal(sends.length, 1);
   assert.deepEqual(sends[0][1], { threadId: "t1", message: "go", mode: "auto", clientRequestId: "t3wow:c1:2", environmentId: "mac" });
-  assert.deepEqual(slots.raised, [5]);
+  // The game watches file 3 (past anything raised before this UI session); we raise it
+  // and its later neighbour.
+  assert.deepEqual(slots.raised, [3, 4]);
   const inbox = runLua(`${slots.written.get(1).replace("T3WoW_Inbox =", "local T3WoW_Inbox =")}
-return T3WoW_Inbox.ack .. "|" .. T3WoW_Inbox.envs[2].name .. "|" .. T3WoW_Inbox.view.items[2].x .. "|" .. T3WoW_Inbox.slot .. "|" .. T3WoW_Inbox.sig`);
+return T3WoW_Inbox.ack .. "|" .. T3WoW_Inbox.envs[2].name .. "|" .. T3WoW_Inbox.view.items[2].x .. "|" .. T3WoW_Inbox.slot .. "|" .. T3WoW_Inbox.ns`);
   assert.equal(inbox, "2|Mac|done|1|5");
 
   // Nothing changed: no slot is spent.
   now += 5000;
   await bridge.tick();
-  assert.deepEqual(slots.raised, [5]);
+  assert.deepEqual(slots.raised, [3, 4]);
 
   // The thread finishes: the next slot carries the change and an alert.
   t3.threads[0].status = "completed";
   t3.threads[0].updatedAt = "2026-11-06T10:05:00Z";
   now += 5000;
   await bridge.tick();
-  assert.deepEqual(slots.raised, [5, 6]);
+  assert.deepEqual(slots.raised, [3, 4, 5, 6]);
   assert.match(slots.written.get(2), /\{n=\d+,e="mac",id="t1",t="Fix tests",s="completed"\}/);
+});
+
+test("without sound signals the game's own slot count drives where updates go", async () => {
+  const calls = [];
+  let now = 2_000_000;
+  const t3 = fakeT3(calls);
+  const slots = fakeSlots();
+  const bridge = new Bridge({ client: t3, slots, stateFile: join(tmpdir(), `t3wow-test-poll-${process.pid}.json`), log: () => {}, now: () => now });
+  bridge.link = { wowKey: null, uiSession: null, slot: 1, signal: 1, acked: {}, clientKey: null };
+  bridge.onCapture({ type: "wow", key: "123@1" });
+  const frame = (l, q = []) => ({ type: "strip", cells: encodeFrame(l, JSON.stringify({ k: "c1", u: "ui1", n: 1, l, p: 1, q })).join("") });
+
+  bridge.onCapture(frame(1, [{ s: 1, t: "ui", o: true }]));
+  await bridge.queue;
+  await bridge.tick();
+  assert.deepEqual(slots.raised, []);
+  assert.deepEqual([...slots.written.keys()], [1, 2, 3]);
+
+  // The game polled ahead on its own (slots 1..6) and reports slot 7 in a sync frame.
+  bridge.onCapture(frame(7));
+  t3.threads[0].status = "completed";
+  t3.threads[0].updatedAt = "2026-11-06T10:05:00Z";
+  now += 5000;
+  await bridge.tick();
+  assert.deepEqual(slots.raised, []);
+  assert.match(slots.written.get(7), /s="completed"/);
+  assert.equal(bridge.link.slot, 7);
+});
+
+test("the list follows T3's sidebar: no subagent or agent-launched threads, snoozed kept apart", async () => {
+  const calls = [];
+  const t3 = fakeT3(calls);
+  t3.threads.push(
+    { threadId: "child", projectId: "p1", title: "Review", status: "completed", parentThreadId: "t1", updatedAt: "2026-11-06T10:00:00Z" },
+    { threadId: "launched", projectId: "p1", title: "Test it", status: "completed", createdBy: "agent", updatedAt: "2026-11-06T10:00:00Z" },
+    { threadId: "nap", projectId: "p1", title: "Later", status: "completed", snoozed: true, updatedAt: "2026-11-06T10:00:00Z" },
+  );
+  const bridge = new Bridge({ client: t3, slots: fakeSlots(), stateFile: join(tmpdir(), `t3wow-test-list-${process.pid}.json`), log: () => {} });
+  await bridge.refreshThreads("local");
+  assert.deepEqual(bridge.threads.get("local").map((t) => t.threadId), ["t1", "nap"]);
+  const snapshot = bridge.snapshot();
+  assert.deepEqual(snapshot.threads.map((t) => [t.id, t.sn ?? false]), [["t1", false], ["nap", true]]);
+  for (const [name, args] of calls) if (name === "t3_thread_list") assert.equal(args.includeSubagents, false);
+});
+
+test("the game polls until its first update names a signal file, then follows the clock between updates", async () => {
+  const calls = [];
+  let now = 3_000_000; // 3000 s
+  const t3 = fakeT3(calls);
+  const slots = fakeSlots();
+  const bridge = new Bridge({ client: t3, slots, stateFile: join(tmpdir(), `t3wow-test-sig-${process.pid}.json`), log: () => {}, now: () => now });
+  bridge.link = { wowKey: null, uiSession: null, slot: 1, signal: 1, signalTime: 0, acked: {}, clientKey: null };
+  bridge.onCapture({ type: "wow", key: "123@1" });
+  const frame = (u, l, p, q = []) => ({ type: "strip", cells: encodeFrame(l, JSON.stringify({ k: "c1", u, n: 0, l, ...(p ? { p: 1 } : {}), q })).join("") });
+  const waitIn = (slot) => {
+    const lua = slots.written.get(slot);
+    return [Number(/ns=([0-9]+)/.exec(lua)[1]), Number(/nt=([0-9]+)/.exec(lua)[1])];
+  };
+  // Link.lua's arithmetic: the file the game watches at time t for a wait (ns, nt).
+  const gameWatches = ([ns, nt], t) => ns + Math.max(0, Math.floor((t - nt) / 25));
+  const change = (status) => {
+    t3.threads[0].status = status;
+    t3.threads[0].updatedAt = new Date(now).toISOString();
+  };
+
+  // Fresh UI, still polling: nothing raised, the update names the wait.
+  bridge.onCapture(frame("ui1", 1, true, [{ s: 1, t: "hello", o: false }]));
+  await bridge.queue;
+  await bridge.tick();
+  assert.deepEqual(slots.raised, []);
+  const firstWait = waitIn(1);
+
+  // The game took that wait and watches signals. 15 s later a thread finishes.
+  bridge.onCapture(frame("ui1", 2, false));
+  change("completed");
+  now += 15_000;
+  await bridge.tick();
+  assert.ok(slots.raised.includes(gameWatches(firstWait, now / 1000)));
+
+  // Five quiet minutes: the game has moved on 12 files; the next update raises the right one.
+  const secondWait = waitIn(2);
+  slots.raised = [];
+  change("running"); // seen on the next poll, but with the window closed not worth a slot
+  now += 15_000;
+  await bridge.tick();
+  assert.deepEqual(slots.raised, []);
+  change("completed");
+  now += 285_000;
+  await bridge.tick();
+  const watched = gameWatches(secondWait, now / 1000);
+  assert.equal(watched, secondWait[0] + 12);
+  assert.deepEqual(slots.raised, [watched - 1, watched, watched + 1]);
+
+  // /reload: the new wait starts past every file raised in this game process.
+  bridge.onCapture(frame("ui2", 1, true, [{ s: 2, t: "hello", o: false }]));
+  await bridge.queue;
+  now += 5000;
+  await bridge.tick();
+  assert.ok(waitIn(1)[0] > watched + 1);
+});
+
+test("with the window open, routine changes wait 10 s but answers to you go out at once", async () => {
+  const calls = [];
+  let now = 4_000_000;
+  const t3 = fakeT3(calls);
+  const slots = fakeSlots();
+  const bridge = new Bridge({ client: t3, slots, stateFile: join(tmpdir(), `t3wow-test-gap-${process.pid}.json`), log: () => {}, now: () => now });
+  bridge.link = { wowKey: null, uiSession: null, slot: 1, signal: 1, signalTime: 0, acked: {}, clientKey: null };
+  bridge.onCapture({ type: "wow", key: "123@1" });
+  // l: the slot the game loads next (it has read one slot per update by then).
+  const frame = (q, l = 1) => ({ type: "strip", cells: encodeFrame(l, JSON.stringify({ k: "c1", u: "ui1", n: 0, l, q })).join("") });
+  const publishes = () => slots.written.size === 0 ? 0 : new Set([...slots.written.values()].map((lua) => /now=(\d+)/.exec(lua)[1])).size;
+
+  bridge.onCapture(frame([{ s: 1, t: "ui", o: true }]));
+  await bridge.queue;
+  await bridge.tick();
+  assert.equal(publishes(), 1);
+
+  // A running agent touches the thread: routine, held back.
+  t3.threads[0].updatedAt = new Date(now + 1000).toISOString();
+  now += 4_000;
+  await bridge.tick();
+  assert.equal(publishes(), 1);
+
+  // You send a message: its ack goes out right away.
+  bridge.onCapture(frame([{ s: 2, t: "send", id: "t1", m: "hi" }], 2));
+  await bridge.queue;
+  now += 2_000;
+  await bridge.tick();
+  assert.equal(publishes(), 2);
+
+  // Another routine change, then the 10 s gap passes.
+  t3.threads[0].updatedAt = new Date(now + 1000).toISOString();
+  now += 4_000;
+  await bridge.tick();
+  assert.equal(publishes(), 2);
+  now += 7_000;
+  await bridge.tick();
+  assert.equal(publishes(), 3);
+});
+
+test("repair puts back missing files and updates an older addon, leaving the rest alone", async () => {
+  const { mkdtempSync, rmSync: rm, existsSync, writeFileSync: write, readFileSync: read } = await import("node:fs");
+  const { Slots, slotName } = await import("../src/slots.js");
+  const dir = mkdtempSync(join(tmpdir(), "t3wow-repair-"));
+  try {
+    const slots = new Slots(dir, "16001");
+    const first = slots.repair();
+    assert.match(first.addon, /^installed /);
+    assert.ok(first.created > 4000);
+    assert.ok(slots.installed());
+
+    // An addon manager removed a slot and a signal file; nothing else changed.
+    rm(join(dir, slotName(7)), { recursive: true });
+    rm(join(dir, "T3WoW", "sig", "0042.ttf"));
+    const second = slots.repair();
+    assert.equal(second.addon, null);
+    assert.equal(second.created, 3); // the slot's toc and Inbox.lua, and the signal file
+    assert.ok(existsSync(join(dir, slotName(7), "Inbox.lua")));
+
+    // An older addon gets the shipped one.
+    const toc = join(dir, "T3WoW", "T3WoW.toc");
+    write(toc, read(toc, "utf8").replace(/^## Version:.*$/m, "## Version: 0.0.1"));
+    assert.match(slots.repair().addon, /^updated 0\.0\.1 to /);
+    assert.match(read(toc, "utf8"), /^## Interface: 16001$/m);
+  } finally {
+    rm(dir, { recursive: true, force: true });
+  }
 });

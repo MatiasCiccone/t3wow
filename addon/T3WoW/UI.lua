@@ -4,6 +4,7 @@ ns.UI = UI
 
 local format, floor = string.format, math.floor
 local WIDTH, HEIGHT, LIST_WIDTH = 940, 580, 300
+local MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT = 720, 420, 2400, 1600
 local WORKING = { preparing = true, queued = true, starting = true, running = true }
 local STATUS = {
     preparing = { "Working", "ffd100" }, queued = { "Queued", "ffd100" }, starting = { "Working", "ffd100" },
@@ -14,7 +15,7 @@ local STATUS = {
 
 local inbox
 local selected -- { e = envIndex, id = threadId } or { new = true, e = envIndex, p = projectIndex }
-local collapsed = { settled = true }
+local collapsed = { settled = true, snoozed = true }
 local echo -- { id, text } shown until the thread view catches up
 local notice
 
@@ -44,7 +45,38 @@ frame:SetMovable(true)
 frame:EnableMouse(true)
 frame:RegisterForDrag("LeftButton")
 frame:SetScript("OnDragStart", frame.StartMoving)
-frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+frame:SetResizable(true)
+if frame.SetResizeBounds then
+    frame:SetResizeBounds(MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT)
+else
+    frame:SetMinResize(MIN_WIDTH, MIN_HEIGHT)
+    frame:SetMaxResize(MAX_WIDTH, MAX_HEIGHT)
+end
+
+-- Size and position live in T3WoWDB.window, restored the first time the window opens.
+local function saveLayout()
+    if not T3WoWDB then return end
+    local point, _, relativePoint, x, y = frame:GetPoint()
+    T3WoWDB.window = { w = frame:GetWidth(), h = frame:GetHeight(), point = point, relativePoint = relativePoint, x = x, y = y }
+end
+
+local layoutRestored = false
+local function restoreLayout()
+    if layoutRestored or not T3WoWDB then return end
+    layoutRestored = true
+    local saved = T3WoWDB.window
+    if not saved then return end
+    frame:SetSize(math.max(MIN_WIDTH, saved.w or WIDTH), math.max(MIN_HEIGHT, saved.h or HEIGHT))
+    if saved.point then
+        frame:ClearAllPoints()
+        frame:SetPoint(saved.point, UIParent, saved.relativePoint or saved.point, saved.x or 0, saved.y or 0)
+    end
+end
+
+frame:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    saveLayout()
+end)
 frame:SetClampedToScreen(true)
 frame:SetBackdrop({
     bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -57,7 +89,7 @@ tinsert(UISpecialFrames, "T3WoWFrame")
 
 local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 title:SetPoint("TOP", 0, -18)
-title:SetText("T3 Code")
+title:SetText("T3 WoW")
 
 local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
 close:SetPoint("TOPRIGHT", -6, -6)
@@ -135,17 +167,20 @@ end
 local function renderList()
     for _, r in ipairs(rows) do r:Hide() end
     for _, h in ipairs(headers) do h:Hide() end
-    local groups = { working = {}, open = {}, settled = {} }
+    local groups = { working = {}, open = {}, snoozed = {}, settled = {} }
     for _, t in ipairs(inbox and inbox.threads or {}) do
-        local key = t.set and "settled" or (WORKING[t.s] and "working") or "open"
+        local key = (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open"
         table.insert(groups[key], t)
     end
     local y, rowIndex, headerIndex = 0, 0, 0
-    for _, group in ipairs({ { "working", "Working" }, { "open", "Open" }, { "settled", "Settled" } }) do
+    for _, group in ipairs({ { "open", "Open" }, { "working", "Working" }, { "snoozed", "Snoozed" }, { "settled", "Settled" } }) do
         local key, label = group[1], group[2]
         headerIndex = headerIndex + 1
         local h = header(headerIndex)
-        h.text:SetText(format("%s %s (%d)", collapsed[key] and "+" or "-", label, #groups[key]))
+        -- Only recent settled threads are listed; the count is all of them, as in T3.
+        local count = #groups[key]
+        if key == "settled" and inbox and inbox.settledTotal then count = math.max(count, inbox.settledTotal) end
+        h.text:SetText(format("%s %s (%d)", collapsed[key] and "+" or "-", label, count))
         h:SetPoint("TOPLEFT", 0, -y)
         h:SetScript("OnClick", function()
             collapsed[key] = not collapsed[key]
@@ -189,8 +224,9 @@ local viewMeta = right:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"
 viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -3)
 viewMeta:SetJustifyH("LEFT")
 
-local MESSAGE_WIDTH = WIDTH - LIST_WIDTH - 70
-local messageScroll, messageChild = makeScroll(right, MESSAGE_WIDTH)
+-- The conversation takes whatever width the list leaves; it follows the window's size.
+local function messageWidth() return frame:GetWidth() - LIST_WIDTH - 70 end
+local messageScroll, messageChild = makeScroll(right, messageWidth())
 messageScroll:SetPoint("TOPLEFT", 0, -40)
 messageScroll:SetPoint("BOTTOMRIGHT", -24, 92)
 local messageStrings = {}
@@ -200,7 +236,7 @@ local function messageString(index)
     local fs = messageStrings[index]
     if not fs then
         fs = messageChild:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
-        fs:SetWidth(MESSAGE_WIDTH - 8)
+        fs:SetWidth(messageWidth() - 8)
         fs:SetJustifyH("LEFT")
         fs:SetWordWrap(true)
         fs:SetSpacing(2)
@@ -240,11 +276,23 @@ function UI.ProjectsFor(envIndex)
     return list
 end
 
-local shownThread
+-- A thread opens scrolled to its latest message. The messages arrive a moment after the
+-- click, so the wish is kept until they are drawn.
+local scrollToEnd = false
+local function scrollToBottom()
+    messageScroll:UpdateScrollChildRect()
+    messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange())
+    -- Text heights can settle a frame later; scroll again then.
+    C_Timer.After(0, function()
+        messageScroll:UpdateScrollChildRect()
+        messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange())
+    end)
+end
+
 local function renderView()
-    local range = messageScroll:GetVerticalScrollRange()
-    local stickToBottom = messageScroll:GetVerticalScroll() >= range - 8 or shownThread ~= (selected and selected.id)
-    shownThread = selected and selected.id
+    -- Stay at the end while new messages come in, unless you scrolled up to read.
+    local stickToBottom = scrollToEnd
+        or messageScroll:GetVerticalScroll() >= messageScroll:GetVerticalScrollRange() - 8
     for _, fs in ipairs(messageStrings) do fs:Hide() end
     earlier:Hide()
     if selected and selected.new then
@@ -300,8 +348,17 @@ local function renderView()
         y = y + fs:GetStringHeight() + 14
     end
     if echo and echo.id == selected.id then
-        local last = items[count]
-        if last and last.r == "u" and last.x:sub(1, 20) == echo.text:sub(1, 20) then
+        -- Your message is in once any recent message of yours matches it: the agent may
+        -- already have answered, so it needn't be the last one. Compare letters and digits
+        -- only, since the thread view reformats text (markdown, escaped pipes).
+        local function key(text)
+            return (text or ""):gsub("||", ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("[^%w]", ""):lower():sub(1, 40)
+        end
+        local wanted, arrived = key(echo.text), false
+        for i = count, math.max(1, count - 7), -1 do
+            if items[i].r == "u" and key(items[i].x) == wanted then arrived = true break end
+        end
+        if arrived then
             echo = nil
         else
             local fs = messageString(count + 1)
@@ -320,7 +377,8 @@ local function renderView()
     end
     messageChild:SetHeight(math.max(y, 1))
     if stickToBottom then
-        C_Timer.After(0, function() messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange()) end)
+        scrollToEnd = false
+        scrollToBottom()
     end
 end
 
@@ -346,7 +404,7 @@ local input = CreateFrame("EditBox", nil, inputScroll)
 input:SetMultiLine(true)
 input:SetAutoFocus(false)
 input:SetFontObject(ChatFontNormal)
-input:SetWidth(MESSAGE_WIDTH - 30)
+input:SetWidth(messageWidth() - 30)
 input:SetMaxBytes(2400)
 inputScroll:SetScrollChild(input)
 input:SetScript("OnEscapePressed", input.ClearFocus)
@@ -458,6 +516,324 @@ local function renderStatus()
     send:SetEnabled(selected ~= nil)
 end
 
+-- ---------------------------------------------------------------- settings
+
+local DEFAULTS = {
+    toasts = true, chat = true, sound = true, duration = 8,
+    onCompleted = true, onWaiting = true, onFailed = true, onStopped = false,
+}
+local EVENT_SETTING = {
+    completed = "onCompleted", idle = "onCompleted", rolled_back = "onCompleted",
+    waiting = "onWaiting", failed = "onFailed", interrupted = "onStopped", cancelled = "onStopped",
+}
+local DURATIONS = { 5, 8, 15, 30, 0 } -- 0: until clicked
+
+local function settings()
+    T3WoWDB = T3WoWDB or {}
+    local s = T3WoWDB.settings or {}
+    T3WoWDB.settings = s
+    for key, value in pairs(DEFAULTS) do
+        if s[key] == nil then s[key] = value end
+    end
+    return s
+end
+
+local function hexColor(hex)
+    return tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255, tonumber(hex:sub(5, 6), 16) / 255
+end
+
+local function envIndexById(id)
+    for index, e in ipairs(inbox and inbox.envs or {}) do
+        if e.id == id then return index end
+    end
+end
+
+function UI.OpenThread(threadId, envId)
+    frame:Show()
+    UI.Select({ e = envIndexById(envId) or 1, id = threadId })
+end
+
+-- ---------------------------------------------------------------- notifications
+
+local TOAST_WIDTH, TOAST_HEIGHT, TOAST_GAP, TOAST_MAX = 320, 60, 6, 4
+local STATUS_ICON = {
+    completed = "Interface\\RaidFrame\\ReadyCheck-Ready",
+    waiting = "Interface\\RaidFrame\\ReadyCheck-Waiting",
+    failed = "Interface\\RaidFrame\\ReadyCheck-NotReady",
+    interrupted = "Interface\\RaidFrame\\ReadyCheck-NotReady",
+    cancelled = "Interface\\RaidFrame\\ReadyCheck-NotReady",
+}
+
+-- Notifications stack down from this anchor; "Move notifications" in settings shows it.
+local toastAnchor = CreateFrame("Frame", "T3WoWToastAnchor", UIParent, "BackdropTemplate")
+toastAnchor:SetSize(TOAST_WIDTH, 24)
+toastAnchor:SetFrameStrata("DIALOG")
+toastAnchor:SetClampedToScreen(true)
+toastAnchor:SetMovable(true)
+toastAnchor:RegisterForDrag("LeftButton")
+toastAnchor:SetBackdrop({
+    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true, tileSize = 16, edgeSize = 12,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+})
+toastAnchor:SetBackdropColor(0.1, 0.4, 0.8, 0.8)
+toastAnchor:SetAlpha(0)
+toastAnchor:EnableMouse(false)
+local anchorLabel = toastAnchor:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+anchorLabel:SetPoint("CENTER")
+anchorLabel:SetText("T3 WoW notifications: drag to move")
+toastAnchor:SetScript("OnDragStart", toastAnchor.StartMoving)
+toastAnchor:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    local point, _, relativePoint, x, y = self:GetPoint()
+    settings().toastPoint = { point, relativePoint, x, y }
+end)
+
+local function placeAnchor()
+    local p = settings().toastPoint
+    toastAnchor:ClearAllPoints()
+    if p then
+        toastAnchor:SetPoint(p[1], UIParent, p[2], p[3], p[4])
+    else
+        toastAnchor:SetPoint("TOP", UIParent, "TOP", 0, -150)
+    end
+end
+
+local toasts, toastPool = {}, {}
+
+local function layoutToasts()
+    for index, toast in ipairs(toasts) do
+        toast:ClearAllPoints()
+        toast:SetPoint("TOP", toastAnchor, "TOP", 0, -(index - 1) * (TOAST_HEIGHT + TOAST_GAP))
+    end
+end
+
+local function removeToast(toast)
+    for index, other in ipairs(toasts) do
+        if other == toast then
+            table.remove(toasts, index)
+            break
+        end
+    end
+    toast:SetScript("OnUpdate", nil)
+    toast:Hide()
+    toastPool[#toastPool + 1] = toast
+    layoutToasts()
+end
+
+local function newToast()
+    local toast = table.remove(toastPool)
+    if toast then return toast end
+    toast = CreateFrame("Button", nil, UIParent, "BackdropTemplate")
+    toast:SetSize(TOAST_WIDTH, TOAST_HEIGHT)
+    toast:SetFrameStrata("DIALOG")
+    toast:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    toast:SetBackdropColor(0.04, 0.04, 0.07, 0.94)
+    toast.icon = toast:CreateTexture(nil, "ARTWORK")
+    toast.icon:SetSize(32, 32)
+    toast.icon:SetPoint("LEFT", 12, 0)
+    toast.head = toast:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    toast.head:SetPoint("TOPLEFT", toast.icon, "TOPRIGHT", 10, 2)
+    toast.head:SetPoint("RIGHT", -10, 0)
+    toast.head:SetJustifyH("LEFT")
+    toast.title = toast:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    toast.title:SetPoint("TOPLEFT", toast.head, "BOTTOMLEFT", 0, -3)
+    toast.title:SetPoint("RIGHT", -10, 0)
+    toast.title:SetJustifyH("LEFT")
+    toast.title:SetWordWrap(false)
+    toast.sub = toast:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    toast.sub:SetPoint("TOPLEFT", toast.title, "BOTTOMLEFT", 0, -3)
+    toast.sub:SetPoint("RIGHT", -10, 0)
+    toast.sub:SetJustifyH("LEFT")
+    toast:EnableMouse(true)
+    toast:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    toast:SetScript("OnClick", function(self, mouse)
+        -- Left-click opens the thread in the T3 WoW window; right-click only dismisses.
+        local threadId, envId = self.threadId, self.envId
+        removeToast(self)
+        if mouse == "LeftButton" and threadId then UI.OpenThread(threadId, envId) end
+    end)
+    toast:SetScript("OnEnter", function(self) self.hovered = true end)
+    toast:SetScript("OnLeave", function(self) self.hovered = false end)
+    return toast
+end
+
+local function toastUpdate(self)
+    local now = GetTime()
+    local shown = now - self.shownAt
+    if shown < 0.2 then return self:SetAlpha(shown / 0.2) end
+    if self.duration == 0 then return self:SetAlpha(1) end -- "until clicked" never fades
+    if self.hovered then
+        -- Hovering holds it on screen.
+        self.shownAt = math.max(self.shownAt, now - self.duration)
+        return self:SetAlpha(1)
+    end
+    local fading = shown - self.duration
+    if fading <= 0 then return self:SetAlpha(1) end
+    if fading >= 0.6 then return removeToast(self) end
+    self:SetAlpha(1 - fading / 0.6)
+end
+
+local function showToast(event)
+    placeAnchor()
+    local s = STATUS[event.s] or { event.s or "Done", "ffffff" }
+    local toast = newToast()
+    local machineIndex = envIndexById(event.e)
+    local machine = machineIndex and env(machineIndex)
+    toast.threadId, toast.envId = event.id, event.e
+    toast.icon:SetTexture(STATUS_ICON[event.s] or STATUS_ICON.completed)
+    toast.head:SetText(format("T3 WoW · |cff%s%s|r", s[2], s[1]))
+    toast.title:SetText(event.t ~= "" and event.t or "Thread")
+    toast.sub:SetText((machine and machine.name or "") .. (event.id and "  ·  click to open" or ""))
+    toast:SetBackdropBorderColor(hexColor(s[2]))
+    toast.duration = settings().duration
+    toast.shownAt = GetTime()
+    toast.hovered = false
+    table.insert(toasts, 1, toast)
+    while #toasts > TOAST_MAX do removeToast(toasts[#toasts]) end
+    layoutToasts()
+    toast:SetAlpha(0)
+    toast:SetScript("OnUpdate", toastUpdate)
+    toast:Show()
+end
+
+-- Returns what happened, for /t3 status.
+function UI.Alert(event)
+    local s = settings()
+    -- Nothing to announce about the thread you're reading.
+    if frame:IsShown() and selected and selected.id == event.id then return "not shown: you were reading that thread" end
+    if not s[EVENT_SETTING[event.s] or "onCompleted"] then return "not shown: turned off in Settings" end
+    local status = STATUS[event.s] or { event.s, "ffffff" }
+    if s.chat then
+        print(format("|cff8f8fffT3|r %s: |cff%s%s|r", event.t ~= "" and event.t or "Thread", status[2], status[1]))
+    end
+    if s.sound and SOUNDKIT and SOUNDKIT.TELL_MESSAGE then PlaySound(SOUNDKIT.TELL_MESSAGE) end
+    if s.toasts then showToast(event) end
+    return s.toasts and "shown" or "chat line only (notifications off in Settings)"
+end
+
+-- ---------------------------------------------------------------- settings panel
+
+local settingsPanel = CreateFrame("Frame", "T3WoWSettings", frame, "BackdropTemplate")
+settingsPanel:SetSize(270, 420)
+settingsPanel:SetPoint("TOPLEFT", frame, "TOPRIGHT", -4, 0)
+settingsPanel:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 11, right = 12, top = 12, bottom = 11 },
+})
+settingsPanel:EnableMouse(true)
+settingsPanel:Hide()
+
+local settingsTitle = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+settingsTitle:SetPoint("TOP", 0, -18)
+settingsTitle:SetText("Settings")
+local settingsClose = CreateFrame("Button", nil, settingsPanel, "UIPanelCloseButton")
+settingsClose:SetPoint("TOPRIGHT", -6, -6)
+
+local checks = {}
+local layoutY = -48
+
+local function sectionLabel(text)
+    local label = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    label:SetPoint("TOPLEFT", 20, layoutY)
+    label:SetText(text)
+    layoutY = layoutY - 22
+end
+
+-- get/set default to the settings table entry named key.
+local function checkbox(text, key, get, set)
+    local check = CreateFrame("CheckButton", nil, settingsPanel, "UICheckButtonTemplate")
+    check:SetSize(24, 24)
+    check:SetPoint("TOPLEFT", 18, layoutY)
+    local label = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    label:SetPoint("LEFT", check, "RIGHT", 4, 0)
+    label:SetText(text)
+    check.get = get or function() return settings()[key] end
+    check.set = set or function(value) settings()[key] = value end
+    check:SetScript("OnClick", function(self) self.set(self:GetChecked() and true or false) end)
+    checks[#checks + 1] = check
+    layoutY = layoutY - 26
+    return check
+end
+
+local function durationText()
+    local d = settings().duration
+    return "Stay on screen: " .. (d == 0 and "until clicked" or (d .. " seconds"))
+end
+
+sectionLabel("Notifications")
+checkbox("On-screen notification", "toasts")
+checkbox("Line in chat", "chat")
+checkbox("Sound", "sound")
+local durationButton = button(settingsPanel, durationText(), 226, nil)
+durationButton:SetPoint("TOPLEFT", 22, layoutY - 2)
+durationButton:SetScript("OnClick", function(self)
+    local s, nextIndex = settings(), 1
+    for index, d in ipairs(DURATIONS) do
+        if d == s.duration then nextIndex = index % #DURATIONS + 1 end
+    end
+    s.duration = DURATIONS[nextIndex]
+    self:SetText(durationText())
+end)
+layoutY = layoutY - 30
+local moveButton = button(settingsPanel, "Move notifications", 110, nil)
+moveButton:SetPoint("TOPLEFT", 22, layoutY - 2)
+local testButton = button(settingsPanel, "Test", 110, function()
+    -- Uses your most recent thread, so clicking the sample opens a real thread too.
+    local latest = inbox and inbox.threads and inbox.threads[1]
+    local latestEnv = latest and env(latest.e)
+    showToast({
+        s = "completed",
+        t = latest and ("Test: " .. latest.t) or "Test notification",
+        id = latest and latest.id,
+        e = latestEnv and latestEnv.id,
+    })
+end)
+testButton:SetPoint("LEFT", moveButton, "RIGHT", 6, 0)
+layoutY = layoutY - 38
+
+local function setAnchorUnlocked(unlocked)
+    placeAnchor()
+    toastAnchor:SetAlpha(unlocked and 1 or 0)
+    toastAnchor:EnableMouse(unlocked)
+    moveButton:SetText(unlocked and "Done moving" or "Move notifications")
+end
+moveButton:SetScript("OnClick", function() setAnchorUnlocked(toastAnchor:GetAlpha() == 0) end)
+
+sectionLabel("Notify when a thread")
+checkbox("Finishes", "onCompleted")
+checkbox("Needs you", "onWaiting")
+checkbox("Fails", "onFailed")
+checkbox("Is stopped", "onStopped")
+layoutY = layoutY - 8
+
+sectionLabel("Minimap")
+checkbox("Show minimap button", nil,
+    function() return not (T3WoWDB and T3WoWDB.minimap and T3WoWDB.minimap.hide) end,
+    function(value) if ns.Minimap and ns.Minimap.Show then ns.Minimap.Show(value) end end)
+
+settingsPanel:SetScript("OnShow", function()
+    for _, check in ipairs(checks) do check:SetChecked(check.get() and true or false) end
+    durationButton:SetText(durationText())
+end)
+settingsPanel:SetScript("OnHide", function() setAnchorUnlocked(false) end)
+
+local settingsButton = button(frame, "Settings", 80, function() settingsPanel:SetShown(not settingsPanel:IsShown()) end)
+settingsButton:SetPoint("TOPRIGHT", -36, -12)
+
+function UI.ShowSettings()
+    frame:Show()
+    settingsPanel:Show()
+end
+
 -- ---------------------------------------------------------------- API used by Link
 
 function UI.Refresh()
@@ -478,23 +854,64 @@ function UI.Notice(text)
     UI.Refresh()
 end
 
-function UI.Alert(event)
-    local s = STATUS[event.s] or { event.s, "ffffff" }
-    print(format("|cff8f8fffT3|r %s: |cff%s%s|r", event.t ~= "" and event.t or "Thread", s[2], s[1]))
-    if SOUNDKIT and SOUNDKIT.TELL_MESSAGE then PlaySound(SOUNDKIT.TELL_MESSAGE) end
-end
-
 function UI.IsShown() return frame:IsShown() end
 
 function UI.Select(thread)
     selected = { e = thread.e, id = thread.id }
+    scrollToEnd = true
     local e = env(thread.e)
     ns.Link.Send({ t = "open", e = e and e.id or "", id = thread.id })
     UI.Refresh()
 end
 
+-- ---------------------------------------------------------------- resizing
+
+-- Text wraps to the conversation's width, so a new width means laying the messages out again.
+local function applyWidth()
+    local width = messageWidth()
+    messageChild:SetWidth(width)
+    for _, fs in ipairs(messageStrings) do fs:SetWidth(width - 8) end
+    input:SetWidth(width - 30)
+end
+
+frame:SetScript("OnSizeChanged", function()
+    applyWidth()
+    if frame:IsShown() then renderView() end
+end)
+
+local grip = CreateFrame("Button", nil, frame)
+grip:SetSize(16, 16)
+grip:SetPoint("BOTTOMRIGHT", -2, 2)
+grip:SetFrameLevel(frame:GetFrameLevel() + 10)
+grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+grip:SetScript("OnMouseDown", function(_, mouse)
+    if mouse == "LeftButton" then frame:StartSizing("BOTTOMRIGHT") end
+end)
+grip:SetScript("OnMouseUp", function()
+    frame:StopMovingOrSizing()
+    saveLayout()
+    UI.Refresh()
+end)
+grip:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Drag to resize")
+    GameTooltip:AddLine("Right-click to reset the size", 0.7, 0.7, 0.7)
+    GameTooltip:Show()
+end)
+grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+grip:RegisterForClicks("RightButtonUp")
+grip:SetScript("OnClick", function()
+    frame:SetSize(WIDTH, HEIGHT)
+    saveLayout()
+    UI.Refresh()
+end)
+
 frame:SetScript("OnShow", function()
+    restoreLayout()
     ns.Link.Send({ t = "ui", o = true })
+    scrollToEnd = true -- reopening the window also lands on the latest message
     UI.Refresh()
 end)
 frame:SetScript("OnHide", function() ns.Link.Send({ t = "ui", o = false }) end)
