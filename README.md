@@ -13,7 +13,7 @@ More screenshots are in [`assets/screenshots`](assets/screenshots).
 ## What you need
 
 - Windows, with WoW: Forever in **windowed** or **borderless windowed** mode (exclusive fullscreen blocks screen capture).
-- T3 Code desktop running on the same PC. Threads on other machines show up when they are linked to it under **Settings → Environments → Linked environments**.
+- T3 Code desktop running on the same PC, or on another machine this PC can reach over the network: run `t3wow.exe login --origin http://<host>:<port>` once to point the companion at it (over a LAN, prefer Tailscale or HTTPS, since plain HTTP sends the sign-in token unencrypted). Threads on other machines also show up when they are linked to T3 under **Settings → Environments → Linked environments**.
 
 ## Set up
 
@@ -27,7 +27,7 @@ Every start checks the addon files: anything an addon manager or a cleanup remov
 
 **Updates.** The companion looks for a newer GitHub release when it starts and every 6 hours; the tray menu then offers **Update to x.y.z**, which downloads the new `t3wow.exe`, checks it against the release's SHA-256, swaps it in and restarts. The addon is part of the exe, so it updates along with it (restart WoW afterwards). An addon installed from CurseForge updates there; the companion never replaces a newer addon with an older one. `t3wow.exe update` does the same from a terminal. Releases are published to the public [t3wow-releases](https://github.com/MatiasCiccone/t3wow-releases) repository while this one stays private.
 
-`t3wow.exe` also works from a terminal: `run` runs in that console instead of the tray, `install` reinstalls the addon from scratch (`--wow "<path to _forever_>"` if WoW lives somewhere unusual), `login` signs in again, `status` checks the addon install and the T3 connection, and `uninstall` removes the addon.
+`t3wow.exe` also works from a terminal: `run` runs in that console instead of the tray, `install` reinstalls the addon from scratch (`--wow "<path to _forever_>"` if WoW lives somewhere unusual), `login` signs in again (`--origin <url>` points it at a T3 on another machine, `--origin local` goes back to the T3 on this PC once it's running; a running companion picks up the new T3 and sign-in within 30 seconds), `status` checks the addon install and the T3 connection, and `uninstall` removes the addon.
 
 ## In the game
 
