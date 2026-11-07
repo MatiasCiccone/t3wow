@@ -10,13 +10,13 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 ![The T3 WoW window with the thread list and a conversation](https://media.forgecdn.net/attachments/2159/857/window-png.png)
 
-**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). If the thread is busy, your message steers it or queues, as in T3. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled.
+**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled.
 
-**Start threads.** **New Thread** asks for the machine and project, then starts a thread with your message as its task.
+**Start threads.** **New Thread** asks for the machine and project, then starts a thread with your message as its task and opens it.
 
 ![Choosing the machine and project for a new thread](https://media.forgecdn.net/attachments/2159/886/new-thread-png.png)
 
-**Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Send answer**. You can also type your own answer and press Enter.
+**Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Send answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
 
 **Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and a sound. Click it to open the thread, or right-click to dismiss it.
 
@@ -57,15 +57,27 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 1. Download t3wow.exe and run it. It runs in the system tray. The app isn't signed, so Windows may warn about an unrecognized app the first time. Choose More info, then Run anyway.
 2. It finds WoW: Forever, installs this addon and its update slots, and opens T3's sign-in page. Approve the sign-in, which lasts 30 days.
 3. Restart WoW completely the first time (not /reload). In the AddOns list, keep T3 WoW and the grey T3 WoW slot entries enabled.
-4. Leave the companion running while you play. Its tray menu shows the T3 and WoW status, and has sign in and out, Start with Windows, Reinstall addon, Open log and the update check.
+4. Leave the companion running while you play. Its tray menu shows the T3 and WoW status, and has sign in and out, Choose WoW folder, Reinstall addon, Match WoW's interface version, Commands from the game, Open log, Start with Windows and the update check.
 
-The companion checks for a new version when it starts and every 6 hours, and updates itself from the tray menu. The companion includes the addon, so the addon updates with it. If you install the addon from CurseForge, it updates here, and the companion never replaces a newer addon with an older one.
+The companion checks for a new version when it starts and every 6 hours, and updates itself from the tray menu. It installs an update only when the release is signed with the project's release key and the download matches its checksum. The companion includes the addon, so the addon updates with it. If you install the addon from CurseForge, it updates here, and the companion never replaces a newer addon with an older one.
+
+## Trust and streaming
+
+Any addon you install can draw the same strip of squares T3 WoW draws, and the companion can't tell them apart. With the default setting, another addon could message your threads or start a new thread with any task, with the access you granted T3 when you signed in. The companion's tray menu has **Commands from the game**:
+
+- **Full** (the default): everything the window offers.
+- **No new threads**: everything but starting threads.
+- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, Stop or Settle).
+
+It applies at once. The window greys out what the setting blocks and says why. Install addons you trust, or pick a stricter setting.
+
+If you stream or record your game: the strip encodes what you send from the game as plain data, not encrypted, so anyone with a recording of the top-left corner of the screen can decode your messages. Crop or cover that corner.
 
 ## How it works
 
 Addons can't talk to other programs, so the companion connects the two. While a command is waiting, the addon draws it as a small strip of colored squares in the top-left corner of the screen. The companion reads that corner of the WoW window and sends answers back as files in the AddOns folder, which the game loads. The companion never sends input to the game or reads its memory, and the addon uses only the documented addon API.
 
-Each UI session has 200 updates. When they run out, the window offers Reload UI.
+Each UI session has 200 updates, and the companion only spends one when something you can see changed. From 190, the window and a chat line say to Reload UI soon. After 200, notifications stop until you Reload UI. While the companion isn't running, the addon checks for updates less and less often, so it doesn't use them up.
 
 ## Commands
 
@@ -73,10 +85,13 @@ Each UI session has 200 updates. When they run out, the window offers Reload UI.
 - /t3 settings opens the settings.
 - /t3 status prints the connection state in chat.
 - /t3 minimap shows or hides the minimap button.
+- /t3 probe tests which file checks work on your client. Include its output in a bug report.
+- /t3 trace prints the addon's latest trace lines, for debugging.
 
 ## Troubleshooting
 
 - If you see "Waiting for the companion…", check that T3 WoW is running in the tray, that the game is windowed, and that nothing covers the top-left corner. **Open log** in the tray menu shows what the companion sees.
-- If you see "Slot addons blocked", enable the T3 WoW slot addons in the AddOns list.
+- If you see "Slot addons blocked", enable the T3 WoW slot addons in the AddOns list. If a game patch changed the interface version, choose Match WoW's interface version in the companion's tray menu, then restart WoW.
+- If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu.
 
 T3 WoW is MIT licensed.
