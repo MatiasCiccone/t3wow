@@ -50,6 +50,7 @@ local function fontString()
   function fs:Show() self.hidden = false end
   function fs:Hide() self.hidden = true end
   function fs:IsShown() return not self.hidden end
+  function fs:SetShown(shown) self.hidden = not shown end
   function fs:SetPoint(...) self.point = { ... } end
   function fs:ClearAllPoints() self.point = nil end
   fontStrings[#fontStrings + 1] = fs
@@ -95,6 +96,7 @@ local function frame(kind, name)
     return function() return f end
   end })
 end
+function CreateFont(name) return frame("Font", name) end
 function CreateFrame(kind, name, parent)
   local f = frame(kind, name)
   f.parent = parent
@@ -152,7 +154,8 @@ const STUB_UI = `ns.UI = {
 // Runs `script` after loading Codec.lua and Link.lua (and UI.lua with { ui: true }); its
 // return value comes back as a string. T3WoWDB starts as `db` (a Lua table literal), and
 // `before` runs ahead of the addon's files (to give the game an API it doesn't have here).
-export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }`, before = "" } = {}) {
+// theme: false leaves Theme.lua out, as a game started before an update added it would.
+export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }`, before = "", theme = true } = {}) {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
   const load = (name) => `assert(load(${JSON.stringify(read(name))}, "${name}"))("T3WoW", ns)`;
@@ -161,6 +164,7 @@ ${before}
 local ns = {}
 ${ui ? "" : STUB_UI}
 ${load("Codec.lua")}
+${ui && theme ? load("Theme.lua") : ""}
 ${ui ? load("UI.lua") : ""}
 ${load("Link.lua")}
 T3WoWDB = ${db}

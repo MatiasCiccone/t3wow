@@ -581,3 +581,86 @@ assert(not shownString("Working…").hit.shown, "Working… is clickable")
 return "ok"
 `);
 });
+
+test("Settings picks the theme, which applies at once and is saved", () => {
+  for (const [, modern] of MENUS) {
+    run(`
+local Skin = ns.Skin
+assert(Skin.ThemeKey() == "t3", "doesn't start in T3")
+UI.ShowSettings()
+assert(menuTexts("T3WoWThemeMenu") == "T3|Flat|Classic", menuTexts("T3WoWThemeMenu"))
+assert(menuEntries("T3WoWThemeMenu")[1].checked, "T3 isn't checked")
+pick("T3WoWThemeMenu", "Classic")
+assert(Skin.ThemeKey() == "classic" and T3WoWDB.settings.theme == "classic", "Classic not applied or not saved")
+assert(shown("T3WoWThemeMenu") == "Classic", shown("T3WoWThemeMenu"))
+assert(menuEntries("T3WoWThemeMenu")[3].checked, "Classic isn't checked")
+-- The window still draws a thread in it.
+inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Classic thread", s = "completed", set = false, at = time(), p = "" } } })
+assert(showing("Classic thread"), "the list didn't draw")
+return "ok"
+`, { modern });
+  }
+});
+
+test("the saved theme is drawn from login, and an unknown one falls back to T3", () => {
+  run(`
+T3WoWDB.settings = { theme = "flat" }
+fire("PLAYER_LOGIN")
+assert(ns.Skin.ThemeKey() == "flat", ns.Skin.ThemeKey())
+T3WoWDB.settings.theme = "neon"
+fire("PLAYER_LOGIN")
+assert(ns.Skin.ThemeKey() == "t3", ns.Skin.ThemeKey())
+return "ok"
+`);
+});
+
+test("Flat takes ElvUI's colors and font when ElvUI runs", () => {
+  run(`
+ElvUI = { { media = { bordercolor = { 0.1, 0.2, 0.3 }, backdropcolor = { 0.05, 0.05, 0.05 },
+  rgbvaluecolor = { r = 1, g = 0.5, b = 0 }, normFont = "ElvUI-PT-Sans.ttf" }, mult = 0.71 } }
+ns.Skin.Set("flat")
+local r, g, b = ns.Skin.Color("border")
+assert(r == 0.1 and g == 0.2 and b == 0.3, "border isn't ElvUI's")
+r, g, b = ns.Skin.Color("accent")
+assert(r == 1 and g == 0.5 and b == 0, "accent isn't ElvUI's")
+assert(ns.Skin.px == 0.71, "pixel size isn't ElvUI's")
+assert(ns.Skin.Theme().fonts.regular == "ElvUI-PT-Sans.ttf", "font isn't ElvUI's")
+-- Other themes ignore it.
+ns.Skin.Set("t3")
+r = ns.Skin.Color("border")
+assert(r ~= 0.1, "T3 took ElvUI's border")
+return "ok"
+`);
+});
+
+test("the compact list puts each thread on one line, its machine in the tooltip", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Fix the build", s = "completed", set = false, at = time(), p = "web" }
+inboxWith(ENVS, { threads = { thread } })
+assert(showing("^PC · web$"), "comfortable rows show the machine and project")
+UI.ShowSettings()
+-- The Compact thread list check is the first in Settings.
+local compact
+for _, f in ipairs(frames) do
+  if f.kind == "CheckButton" and f.get then compact = f break end
+end
+compact.GetChecked = function() return true end
+compact.scripts.OnClick(compact)
+assert(T3WoWDB.settings.compact == true, "not saved")
+assert(not showing("^PC · web$"), "compact rows still show the machine line")
+assert(showing("Fix the build"), "compact rows lost the title")
+return "ok"
+`);
+});
+
+test("after an update installed while the game ran, the window says to restart instead of breaking", () => {
+  const out = runGame(`
+UI.Toggle()
+UI.Toggle()
+-- The rest of the addon can still call into the window.
+UI.OnInbox({ k = "c1", envs = {}, threads = {} })
+UI.Refresh()
+return tostring(#printed) .. " " .. printed[1]
+`, { ui: true, theme: false, before: `printed = {}; function print(text) printed[#printed + 1] = text end` });
+  assert.match(out, /^1 .*restart WoW to load it/);
+});
