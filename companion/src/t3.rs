@@ -5,8 +5,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -203,12 +203,37 @@ pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
     })
 }
 
-/// Serves the loopback redirect until the browser brings back the code.
+/// The most of a request (line and headers) the loopback listener reads.
+const MAX_REQUEST_HEAD: u64 = 16 * 1024;
+
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn respond(mut stream: &TcpStream, status: &str, page: &str) {
+    let _ = stream.write_all(
+        format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes(),
+    );
+}
+
+/// Serves the loopback redirect until the browser brings back the code. A callback without
+/// this sign-in's state (another program, an old tab) is turned away and the wait goes on.
 fn wait_for_code(listener: &TcpListener, state: &str, timeout: Duration) -> Result<String, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        let mut stream = match listener.accept() {
+        let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -218,32 +243,44 @@ fn wait_for_code(listener: &TcpListener, state: &str, timeout: Duration) -> Resu
         };
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut reader = BufReader::new((&stream).take(MAX_REQUEST_HEAD));
         let mut line = String::new();
-        let _ = BufReader::new(&stream).read_line(&mut line);
+        let _ = reader.read_line(&mut line);
+        // Read the headers too: closing with them unread can reset the connection before the
+        // browser reads the page.
+        loop {
+            let mut header = String::new();
+            match reader.read_line(&mut header) {
+                Ok(n) if n > 0 && !header.trim().is_empty() => continue,
+                _ => break,
+            }
+        }
+        if !line.ends_with('\n') {
+            respond(&stream, "400 Bad Request", "");
+            continue;
+        }
         let target = line.split_whitespace().nth(1).unwrap_or("");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         if path != "/callback" {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            respond(&stream, "404 Not Found", "");
             continue;
         }
-        let error = query_param(query, "error");
-        let code = query_param(query, "code").filter(|_| error.is_none() && query_param(query, "state").as_deref() == Some(state));
-        let page = match &code {
-            Some(_) => "<h2>T3 WoW is signed in.</h2><p>You can close this tab and go back to the game.</p>".to_string(),
-            None => format!("<h2>Sign-in failed</h2><p>{}</p>", error.clone().unwrap_or_else(|| "state mismatch".into())),
-        };
-        let status = if code.is_some() { "200 OK" } else { "400 Bad Request" };
-        let _ = stream.write_all(
-            format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len())
-                .as_bytes(),
-        );
-        return match code {
-            Some(code) => Ok(code),
-            None => Err(format!(
-                "Sign-in failed: {}",
-                query_param(query, "error_description").or(error).unwrap_or_else(|| "state mismatch".into())
-            )),
-        };
+        if query_param(query, "state").as_deref() != Some(state) {
+            respond(&stream, "400 Bad Request", "<h2>This sign-in link is out of date.</h2><p>Finish the sign-in in the newest T3 tab.</p>");
+            continue;
+        }
+        if let Some(error) = query_param(query, "error") {
+            let reason = query_param(query, "error_description").unwrap_or(error);
+            respond(&stream, "400 Bad Request", &format!("<h2>Sign-in failed</h2><p>{}</p>", html_escape(&reason)));
+            return Err(format!("Sign-in failed: {reason}"));
+        }
+        match query_param(query, "code") {
+            Some(code) => {
+                respond(&stream, "200 OK", "<h2>T3 WoW is signed in.</h2><p>You can close this tab and go back to the game.</p>");
+                return Ok(code);
+            }
+            None => respond(&stream, "400 Bad Request", "<h2>Sign-in failed</h2><p>T3 sent no code.</p>"),
+        }
     }
     Err("Timed out waiting for approval (10 min).".into())
 }
@@ -429,5 +466,50 @@ mod tests {
     fn event_streams_yield_the_reply_with_our_id() {
         let text = "event: message\ndata: {\"id\":1,\"result\":{}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\n\ndata: {\"id\":7,\"result\":{\"ok\":true}}\n\n";
         assert_eq!(parse_event_stream(text, 7).unwrap()["result"]["ok"], true);
+    }
+
+    /// A loopback listener waiting for `state`, and a way to send it raw requests.
+    fn callback_server(state: &'static str) -> (u16, std::thread::JoinHandle<Result<String, String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let waiting = std::thread::spawn(move || wait_for_code(&listener, state, Duration::from_secs(10)));
+        (port, waiting)
+    }
+
+    fn request(port: u16, raw: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let _ = stream.write_all(raw.as_bytes());
+        let mut reply = String::new();
+        let _ = stream.read_to_string(&mut reply);
+        reply
+    }
+
+    fn get(port: u16, target: &str) -> String {
+        request(port, &format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    }
+
+    #[test]
+    fn callbacks_with_another_state_are_turned_away_and_the_wait_goes_on() {
+        let (port, waiting) = callback_server("good");
+        assert!(get(port, "/favicon.ico").starts_with("HTTP/1.1 404"));
+        assert!(get(port, "/callback?code=stolen&state=bad").starts_with("HTTP/1.1 400"));
+        assert!(get(port, "/callback?error=access_denied").starts_with("HTTP/1.1 400"));
+        assert!(get(port, "/callback?code=stolen").starts_with("HTTP/1.1 400"));
+        // Too long to read: refused (the reply may be lost to a reset), and the wait goes on.
+        let long = format!("GET /callback?state=good&code={} HTTP/1.1\r\n\r\n", "x".repeat(20_000));
+        assert!(!request(port, &long).starts_with("HTTP/1.1 200"));
+        let reply = get(port, "/callback?code=the%20code&state=good");
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert_eq!(waiting.join().unwrap().as_deref(), Ok("the code"));
+    }
+
+    #[test]
+    fn an_error_with_this_state_ends_the_sign_in_and_is_shown_escaped() {
+        let (port, waiting) = callback_server("good");
+        let reply = get(port, "/callback?error=access_denied&error_description=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state=good");
+        assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+        assert!(reply.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{reply}");
+        assert!(!reply.contains("<script>"), "{reply}");
+        assert_eq!(waiting.join().unwrap(), Err("Sign-in failed: <script>alert(1)</script>".to_string()));
     }
 }
