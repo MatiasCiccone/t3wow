@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { insideRepo } from "../scripts/gen-signing-key.mjs";
-import { embeddedPublicKey, rawPublicKey, releaseKey, rustKeyLiteral, signatureFile } from "../scripts/release-key.mjs";
+import { embeddedPublicKey, rawPublicKey, releaseKey, rustKeyLiteral, signatureFile, signingKey } from "../scripts/release-key.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const fixture = JSON.parse(readFileSync(new URL("../companion/tests/fixtures/signed-release.json", import.meta.url), "utf8"));
@@ -50,12 +50,31 @@ test("updater.rs holds the placeholder or a 32-byte key", () => {
   assert.throws(() => embeddedPublicKey("const RELEASE_PUBLIC_KEY: [u8; 32] = [1, 2, 3];"), /isn't 32 bytes/);
 });
 
-test("signing without the secret fails clearly", () => {
+test("a release goes out unsigned only while signing isn't set up at all", () => {
+  const placeholder = "const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];";
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ format: "pem", type: "pkcs8" });
+  const raw = rawPublicKey(privateKey);
+  assert.equal(signingKey("", placeholder), null);
+  assert.equal(signingKey(undefined, placeholder), null);
+  // Half set up: the secret without the key, or the key without the secret.
+  assert.throws(() => signingKey(pem, placeholder), /placeholder/);
+  assert.throws(() => signingKey("", updaterWith(raw)), /T3WOW_SIGNING_KEY is not set/);
+  assert.ok(signingKey(pem, updaterWith(raw)));
+});
+
+test("the workflow's key check without the secret: a warning before the key is set up, an error after", () => {
   const env = { ...process.env, GITHUB_ACTIONS: "true" };
   delete env.T3WOW_SIGNING_KEY;
   const run = spawnSync(process.execPath, [join(ROOT, "scripts", "sign-release.mjs"), "--check"], { env, encoding: "utf8" });
-  assert.equal(run.status, 1);
-  assert.match(run.stderr, /^::error::T3WOW_SIGNING_KEY is not set/);
+  const embedded = embeddedPublicKey(readFileSync(new URL("../companion/src/updater.rs", import.meta.url), "utf8"));
+  if (embedded === null) {
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /^::warning::Release signing isn't set up/);
+  } else {
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /^::error::T3WOW_SIGNING_KEY is not set/);
+  }
 });
 
 test("the key generator keeps the private key out of the repository", () => {

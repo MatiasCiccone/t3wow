@@ -2,16 +2,22 @@
 //
 //   T3WOW_SIGNING_KEY="<PKCS#8 PEM>" node scripts/sign-release.mjs release/t3wow.exe.sha256
 //
-// writes release/t3wow.exe.sha256.sig, which the companion's updater requires. With
-// --check it only checks the key (set, Ed25519, and the public half the companion embeds),
-// so the workflow can fail before building anything.
+// writes release/t3wow.exe.sha256.sig, which the companion's updater requires once it
+// embeds the real public key. With --check it only checks the key (set, Ed25519, and the
+// public half the companion embeds), so the workflow can fail before building anything.
+// While signing isn't set up at all (no secret, placeholder public key), both say so as a
+// warning and succeed: the release goes out with its SHA-256 only.
 import { readFileSync, writeFileSync } from "node:fs";
-import { releaseKey, signatureFile } from "./release-key.mjs";
+import { signatureFile, signingKey } from "./release-key.mjs";
 
 const args = process.argv.slice(2);
 try {
-  const key = releaseKey(process.env.T3WOW_SIGNING_KEY);
-  if (args[0] === "--check") {
+  const key = signingKey(process.env.T3WOW_SIGNING_KEY);
+  if (!key && (args[0] === "--check" || args.length === 1)) {
+    const message =
+      "Release signing isn't set up (no T3WOW_SIGNING_KEY, placeholder RELEASE_PUBLIC_KEY): this release goes out with its SHA-256 only. See scripts/gen-signing-key.mjs.";
+    console.log(process.env.GITHUB_ACTIONS ? `::warning::${message}` : message);
+  } else if (args[0] === "--check") {
     console.log("The release key is set and matches the companion's public key.");
   } else if (args.length === 1) {
     writeFileSync(`${args[0]}.sig`, signatureFile(key, readFileSync(args[0])));
