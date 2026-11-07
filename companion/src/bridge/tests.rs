@@ -8,6 +8,8 @@ struct FakeT3 {
     questions: Mutex<bool>,
     /// The server's own environment id; "local" also links a Mac.
     env_id: Mutex<String>,
+    /// The machines the "local" server links.
+    links: Mutex<Value>,
 }
 
 impl FakeT3 {
@@ -20,6 +22,7 @@ impl FakeT3 {
             })]),
             questions: Mutex::new(true),
             env_id: Mutex::new("local".into()),
+            links: Mutex::new(json!([{ "environmentId": "mac", "label": "Mac", "status": "reachable" }])),
         })
     }
 
@@ -46,7 +49,7 @@ impl T3 for FakeT3 {
         Ok(match name {
             "t3_environment_links" => {
                 let env_id = self.env_id.lock().unwrap().clone();
-                let links = if env_id == "local" { json!([{ "environmentId": "mac", "label": "Mac", "status": "reachable" }]) } else { json!([]) };
+                let links = if env_id == "local" { self.links.lock().unwrap().clone() } else { json!([]) };
                 json!({ "environmentId": env_id, "links": links })
             }
             // The "local" server leaves its name out, as an older T3 might.
@@ -639,4 +642,39 @@ fn after_a_reinstall_the_state_goes_out_again() {
     rig.bridge.republish();
     rig.bridge.tick();
     assert_eq!(rig.bridge.link.slot, 3);
+}
+
+#[test]
+fn a_machine_no_longer_linked_leaves_the_list_and_a_reorder_keeps_ids_straight() {
+    let mut rig = Rig::new(17_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let machines = |rig: &Rig| -> Vec<(i64, String)> {
+        let snapshot = rig.bridge.snapshot();
+        let names: Vec<String> = snapshot["envs"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_string()).collect();
+        snapshot["threads"].as_array().unwrap().iter().map(|t| {
+            let e = t["e"].as_i64().unwrap();
+            (e, names[e as usize - 1].clone())
+        }).collect()
+    };
+    assert_eq!(machines(&rig), vec![(1, "local".into()), (2, "mac".into())]);
+
+    // Another machine is linked ahead of the Mac: the Mac's threads follow it to index 3.
+    *rig.t3.links.lock().unwrap() = json!([
+        { "environmentId": "linux", "label": "Linux", "status": "unreachable" },
+        { "environmentId": "mac", "label": "Mac", "status": "reachable" },
+    ]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(machines(&rig), vec![(1, "local".into()), (3, "mac".into())]);
+    assert_eq!(rig.bridge.snapshot()["view"]["e"], 3);
+
+    // The Mac is unlinked: its threads, projects and open thread go, instead of showing under this PC.
+    *rig.t3.links.lock().unwrap() = json!([{ "environmentId": "linux", "label": "Linux", "status": "unreachable" }]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(machines(&rig), vec![(1, "local".into())]);
+    assert!(snapshot["projects"].as_array().unwrap().iter().all(|p| p["e"] == 1), "{}", snapshot["projects"]);
+    assert!(snapshot["view"].is_null());
 }
