@@ -10,6 +10,30 @@ use std::time::Duration;
 
 const SEARCH: usize = 12;
 
+/// What the capture knows about the client between frames.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum Watch {
+    /// The window it watches is still the live client's.
+    Valid,
+    /// It watched a window that is gone (the client quit, or made a new window).
+    Lost,
+    /// No client found.
+    Nothing,
+}
+
+/// Whether to run the full search (a process snapshot and a walk of every window), which
+/// is too heavy for four times a second: at once when the watched window is lost, every
+/// 2 seconds while no client runs, and every 10 seconds anyway while one is watched.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn search_due(watch: Watch, since_search: Duration) -> bool {
+    match watch {
+        Watch::Valid => since_search >= Duration::from_secs(10),
+        Watch::Lost => true,
+        Watch::Nothing => since_search >= Duration::from_secs(2),
+    }
+}
+
 /// Cell value (0..=7) at pixel (x, y) of a BGRA image, or None outside it.
 fn cell(px: &[u8], stride: usize, w: usize, h: usize, x: usize, y: usize) -> Option<u8> {
     if x >= w || y >= h {
@@ -57,7 +81,7 @@ mod win {
     use std::mem::{size_of, zeroed};
     use std::ptr::null_mut;
     use windows_sys::core::BOOL;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT, WAIT_TIMEOUT};
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
     use windows_sys::Win32::System::Threading::*;
@@ -67,6 +91,30 @@ mod win {
         /// "pid@creation-filetime": stays the same for one client process.
         pub key: String,
         pub hwnd: HWND,
+        pid: u32,
+        /// Kept open so the pid can't be reused while it's watched, and to see it exit.
+        process: HANDLE,
+    }
+
+    impl WowProcess {
+        /// Still the live client and its window: a few cheap calls, no snapshot. Needs a
+        /// real client, so it isn't unit-tested.
+        pub fn still_valid(&self) -> bool {
+            unsafe {
+                if WaitForSingleObject(self.process, 0) != WAIT_TIMEOUT || IsWindow(self.hwnd) == 0 || IsWindowVisible(self.hwnd) == 0 {
+                    return false;
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(self.hwnd, &mut pid);
+                pid == self.pid
+            }
+        }
+    }
+
+    impl Drop for WowProcess {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.process) };
+        }
     }
 
     fn wide_to_string(wide: &[u16]) -> String {
@@ -146,7 +194,11 @@ mod win {
                 return None;
             }
             let hwnd = main_window(pid)?;
-            Some(WowProcess { key: format!("{pid}@{started}"), hwnd })
+            let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if process.is_null() {
+                return None;
+            }
+            Some(WowProcess { key: format!("{pid}@{started}"), hwnd, pid, process })
         })
     }
 
@@ -255,8 +307,18 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
             let magic = magic_cells();
             let mut last_key: Option<Option<String>> = None;
             let mut last_cells: Vec<u8> = Vec::new();
+            let mut wow: Option<win::WowProcess> = None;
+            let mut searched: Option<std::time::Instant> = None;
             loop {
-                let wow = win::find_wow(&client_folder);
+                let watch = match &wow {
+                    Some(w) if w.still_valid() => Watch::Valid,
+                    Some(_) => Watch::Lost,
+                    None => Watch::Nothing,
+                };
+                if searched.is_none_or(|at| search_due(watch, at.elapsed())) {
+                    wow = win::find_wow(&client_folder);
+                    searched = Some(std::time::Instant::now());
+                }
                 let key = wow.as_ref().map(|w| w.key.clone());
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key.clone());
@@ -264,7 +326,7 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                         return;
                     }
                 }
-                if let Some(wow) = wow {
+                if let Some(wow) = &wow {
                     match win::sample_window(wow.hwnd, &magic) {
                         win::Sampled::NotCapturable => {}
                         win::Sampled::NoStrip => last_cells.clear(),
@@ -314,6 +376,17 @@ mod tests {
         let (px, w, h) = draw(&encode_frame(42, payload), 3, 2);
         let cells = sample(&px, w * 4, w, h, &magic_cells()).expect("strip found");
         assert_eq!(decode_cells(&cells).unwrap().payload, payload);
+    }
+
+    #[test]
+    fn the_full_window_search_runs_only_when_needed() {
+        let s = Duration::from_secs;
+        assert!(!search_due(Watch::Valid, Duration::from_millis(250)));
+        assert!(!search_due(Watch::Valid, s(9)));
+        assert!(search_due(Watch::Valid, s(10)));
+        assert!(search_due(Watch::Lost, Duration::ZERO));
+        assert!(!search_due(Watch::Nothing, s(1)));
+        assert!(search_due(Watch::Nothing, s(2)));
     }
 
     #[test]
