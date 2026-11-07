@@ -194,7 +194,15 @@ pub struct Bridge {
     last_publish_at: i64,
     last_published_hash: Option<u64>,
     last_urgent_hash: Option<u64>,
+    /// When the next poll starts, and the one under way (if any).
     poll_at: i64,
+    poll_run: Option<PollRun>,
+    /// A command ran during a poll: poll again once it ends.
+    repoll: bool,
+    /// Failed polls in a row, which space the next ones out.
+    poll_failures: u32,
+    /// The last thread-list error per machine, logged once.
+    list_errors: HashMap<String, String>,
     slow_at: i64,
     auth_error: Option<String>,
     poll_error: Option<String>,
@@ -254,6 +262,31 @@ fn with_args(base: Value, extra: &Map<String, Value>) -> Value {
 
 /// A machine's sidebar threads and its settled count.
 type ThreadLists = Result<(Vec<Value>, u64), T3Error>;
+
+/// A whole poll gets this long; past it, optional reads wait for the next one.
+const POLL_DEADLINE_MS: i64 = 20_000;
+/// How long one tick runs poll steps before it returns.
+const TICK_BUDGET_MS: i64 = 300;
+/// Mid-poll, publish only once the poll has run this long.
+const PUBLISH_MIDPOLL_MS: i64 = 2000;
+
+/// A poll of T3, one step at a time.
+struct PollRun {
+    started: i64,
+    steps: VecDeque<Step>,
+}
+
+enum Step {
+    /// The linked machines (then each one's projects).
+    Machines,
+    Projects(String),
+    /// Every machine's thread lists at once (then each one's, taken in turn).
+    Lists,
+    Machine(String, ThreadLists),
+    /// The open thread.
+    View,
+}
+
 
 /// The three thread lists T3's sidebar is made of, for one machine.
 fn fetch_threads(client: &dyn T3, env_arg: &Map<String, Value>) -> ThreadLists {
@@ -316,6 +349,10 @@ impl Bridge {
             last_published_hash: None,
             last_urgent_hash: None,
             poll_at: 0,
+            poll_run: None,
+            repoll: false,
+            poll_failures: 0,
+            list_errors: HashMap::new(),
             slow_at: 0,
             auth_error: None,
             poll_error: None,
@@ -331,6 +368,8 @@ impl Bridge {
     pub fn set_client(&mut self, client: Arc<dyn T3>) {
         self.client = client;
         self.auth_error = None;
+        self.poll_run = None;
+        self.poll_failures = 0;
         self.poll_at = 0;
         self.slow_at = 0;
     }
@@ -586,22 +625,114 @@ impl Bridge {
             self.log(&format!("{kind} failed: {error}"));
             self.note(&format!("{kind} failed: {error}"));
         }
+        // Look at T3 again now (or as soon as the poll under way ends).
         self.poll_at = 0;
+        self.repoll = self.poll_run.is_some();
     }
 
     // ---- reading T3 ----
 
-    fn poll(&mut self) -> Result<(), T3Error> {
+    /// Starts a poll: its steps run from `tick`, a few at a time.
+    fn start_poll(&mut self) {
         let t = self.now_ms();
+        let mut steps = VecDeque::new();
         if t >= self.slow_at {
             self.slow_at = t + 60_000;
-            self.refresh_environments()?;
-            self.refresh_projects();
+            steps.push_back(Step::Machines);
         }
+        steps.push_back(Step::Lists);
+        steps.push_back(Step::View);
+        self.poll_run = Some(PollRun { started: t, steps });
+        // This poll covers whatever asked for one.
+        self.repoll = false;
+    }
+
+    /// Past the poll's deadline, optional reads (question checks, launchers, projects) wait
+    /// for the next poll.
+    fn out_of_time(&self) -> bool {
+        self.poll_run.as_ref().is_some_and(|run| self.now_ms() - run.started > POLL_DEADLINE_MS)
+    }
+
+    /// Runs the poll's next step; the last one, or a failed one, ends the poll.
+    fn poll_step(&mut self) {
+        let Some(step) = self.poll_run.as_mut().and_then(|run| run.steps.pop_front()) else {
+            return self.finish_poll(Ok(()));
+        };
+        let result = match step {
+            Step::Machines => self.refresh_environments().map(|()| {
+                // Each machine's projects next, before the thread lists.
+                let envs: Vec<String> = self.envs.iter().filter(|e| e.ok).map(|e| e.id.clone()).collect();
+                if let Some(run) = self.poll_run.as_mut() {
+                    for env in envs.into_iter().rev() {
+                        run.steps.push_front(Step::Projects(env));
+                    }
+                }
+            }),
+            Step::Projects(env) => {
+                self.refresh_projects(&env);
+                Ok(())
+            }
+            Step::Lists => {
+                let results = self.fetch_lists();
+                if let Some(run) = self.poll_run.as_mut() {
+                    for (env, result) in results.into_iter().rev() {
+                        run.steps.push_front(Step::Machine(env, result));
+                    }
+                }
+                Ok(())
+            }
+            Step::Machine(env, result) => self.take_lists(env, result),
+            Step::View => self.refresh_view(),
+        };
+        match result {
+            Err(error) => self.finish_poll(Err(error)),
+            Ok(()) if self.poll_run.as_ref().is_some_and(|run| run.steps.is_empty()) => self.finish_poll(Ok(())),
+            Ok(()) => {}
+        }
+    }
+
+    /// Ends the poll and schedules the next one from now: sooner with the window open,
+    /// later after each failure in a row.
+    fn finish_poll(&mut self, result: Result<(), T3Error>) {
+        self.poll_run = None;
+        let t = self.now_ms();
+        let every = if self.window_open { 4000 } else { 12_000 };
+        match result {
+            Ok(()) => {
+                self.polled_ok = true;
+                self.poll_error = None;
+                self.auth_error = None;
+                self.poll_failures = 0;
+                self.poll_at = t + every;
+            }
+            Err(T3Error::Auth(message)) => {
+                if self.auth_error.as_ref() != Some(&message) {
+                    self.log(&message);
+                }
+                self.auth_error = Some(message);
+                self.poll_at = t + 30_000;
+            }
+            Err(T3Error::Other(message)) => {
+                if self.poll_error.as_ref() != Some(&message) {
+                    self.log(&format!("poll: {message}"));
+                }
+                self.poll_error = Some(message);
+                self.poll_failures += 1;
+                self.poll_at = t + (every << self.poll_failures.min(4)).min(60_000);
+            }
+        }
+        // A command ran meanwhile: look again right away.
+        if std::mem::take(&mut self.repoll) {
+            self.poll_at = 0;
+        }
+    }
+
+    /// Every reachable machine's thread lists: one machine's lists at a time each, all
+    /// machines at once.
+    fn fetch_lists(&self) -> Vec<(String, ThreadLists)> {
         let envs: Vec<(String, Map<String, Value>)> = self.envs.iter().filter(|e| e.ok).map(|e| (e.id.clone(), self.env_arg(&e.id))).collect();
         let client = Arc::clone(&self.client);
-        // One machine's lists at a time each, all machines at once.
-        let results: Vec<(String, ThreadLists)> = std::thread::scope(|scope| {
+        std::thread::scope(|scope| {
             let handles: Vec<_> = envs
                 .iter()
                 .map(|(env, arg)| {
@@ -610,35 +741,48 @@ impl Bridge {
                 })
                 .collect();
             handles.into_iter().map(|(env, h)| (env, h.join().unwrap_or_else(|_| Err(T3Error::Other("thread list panicked".into()))))).collect()
-        });
-        for (env, result) in results {
-            match result {
-                Ok((mut threads, settled_total)) => {
-                    self.mark_questions(&env, &mut threads)?;
-                    self.find_launchers(&env, &mut threads)?;
-                    for thread in &threads {
-                        self.track_status(&env, thread);
-                    }
-                    self.listed_envs.insert(env.clone());
-                    self.threads.insert(env.clone(), threads);
-                    self.settled_totals.insert(env.clone(), settled_total);
-                    if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
-                        target.ok = true;
-                    }
+        })
+    }
+
+    /// One machine's lists, as fetched: questions and launchers are read where needed,
+    /// status changes notify.
+    fn take_lists(&mut self, env: String, result: ThreadLists) -> Result<(), T3Error> {
+        let name = if env.is_empty() { "local".to_string() } else { env.clone() };
+        match result {
+            Ok((mut threads, settled_total)) => {
+                self.mark_questions(&env, &mut threads)?;
+                self.find_launchers(&env, &mut threads)?;
+                for thread in &threads {
+                    self.track_status(&env, thread);
                 }
-                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-                Err(T3Error::Other(message)) => {
-                    let local = self.local_env_id.clone();
-                    if let Some(target) = self.envs.iter_mut().find(|e| e.id == env && Some(&e.id) != local.as_ref()) {
-                        target.ok = false;
-                    }
-                    self.log(&format!("threads ({}): {message}", if env.is_empty() { "local" } else { &env }));
+                self.listed_envs.insert(env.clone());
+                self.threads.insert(env.clone(), threads);
+                self.settled_totals.insert(env.clone(), settled_total);
+                if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
+                    target.ok = true;
                 }
+                if self.list_errors.remove(&env).is_some() {
+                    self.log(&format!("threads ({name}): reachable again"));
+                }
+                Ok(())
+            }
+            Err(T3Error::Auth(message)) => Err(T3Error::Auth(message)),
+            Err(T3Error::Other(message)) => {
+                let local = self.local_env_id.clone();
+                if let Some(target) = self.envs.iter_mut().find(|e| e.id == env && Some(&e.id) != local.as_ref()) {
+                    target.ok = false;
+                }
+                // The server itself failing fails the poll; a linked machine is only marked.
+                if Some(&env) == local.as_ref() || env.is_empty() {
+                    return Err(T3Error::Other(message));
+                }
+                // Logged when it changes, not on every poll.
+                if self.list_errors.insert(env.clone(), message.clone()).as_ref() != Some(&message) {
+                    self.log(&format!("threads ({name}): {message}"));
+                }
+                Ok(())
             }
         }
-        self.refresh_view()?;
-        self.auth_error = None;
-        Ok(())
     }
 
     fn refresh_environments(&mut self) -> Result<(), T3Error> {
@@ -691,16 +835,16 @@ impl Bridge {
     }
 
 
-    fn refresh_projects(&mut self) {
-        let envs: Vec<String> = self.envs.iter().filter(|e| e.ok).map(|e| e.id.clone()).collect();
-        for env in envs {
-            let args = with_args(json!({ "limit": 100 }), &self.env_arg(&env));
-            match self.client.call("t3_project_list", args) {
-                Ok(page) => {
-                    self.projects.insert(env.clone(), page["projects"].as_array().cloned().unwrap_or_default());
-                }
-                Err(error) => self.log(&format!("projects ({}): {error}", if env.is_empty() { "local" } else { &env })),
+    fn refresh_projects(&mut self, env: &str) {
+        if self.out_of_time() {
+            return;
+        }
+        let args = with_args(json!({ "limit": 100 }), &self.env_arg(env));
+        match self.client.call("t3_project_list", args) {
+            Ok(page) => {
+                self.projects.insert(env.to_string(), page["projects"].as_array().cloned().unwrap_or_default());
             }
+            Err(error) => self.log(&format!("projects ({}): {error}", if env.is_empty() { "local" } else { env })),
         }
     }
 
@@ -715,6 +859,12 @@ impl Bridge {
             let now = self.now_ms();
             let status = match self.pending_counts.get(&key) {
                 Some(p) if p.updated == updated && now - p.read_at < PENDING_RECHECK_MS => p.status,
+                // No time left in this poll: the last count stands until the next one.
+                Some(p) if self.out_of_time() => p.status,
+                None if self.out_of_time() => {
+                    seen.push(key);
+                    continue;
+                }
                 _ => match self.read_waiting_on(str_of(&thread["threadId"]), &env_arg) {
                     Ok(status) => {
                         self.pending_counts.insert(key.clone(), Pending { updated: updated.clone(), read_at: now, status });
@@ -755,7 +905,7 @@ impl Bridge {
         for thread in threads.iter_mut().filter(|t| t["createdBy"] == "agent") {
             let id = str_of(&thread["threadId"]).to_string();
             let key = format!("{env}:{id}");
-            if !self.launchers.contains_key(&key) {
+            if !self.launchers.contains_key(&key) && !self.out_of_time() {
                 let args = with_args(json!({ "threadId": id, "view": "messages", "limit": 1, "maxCharsPerItem": 1 }), &env_arg);
                 match self.client.call("t3_thread_read", args) {
                     Ok(read) => {
@@ -1139,32 +1289,29 @@ impl Bridge {
     }
 
     /// One step: run the game's commands, read T3 when it's time, publish what changed.
+    /// A poll runs a step at a time for up to TICK_BUDGET_MS, then gives the caller (and
+    /// the game's next commands, the tray's controls) a turn.
     pub fn tick(&mut self) {
         self.run_commands();
-        let t = self.now_ms();
-        if t >= self.poll_at {
-            self.poll_at = t + if self.window_open { 4000 } else { 12_000 };
-            match self.poll() {
-                Ok(()) => {
-                    self.polled_ok = true;
-                    self.poll_error = None;
+        let started = self.now_ms();
+        loop {
+            if self.poll_run.is_none() {
+                if self.now_ms() < self.poll_at {
+                    break;
                 }
-                Err(T3Error::Auth(message)) => {
-                    if self.auth_error.as_ref() != Some(&message) {
-                        self.log(&message);
-                    }
-                    self.auth_error = Some(message);
-                    self.poll_at = t + 30_000;
-                }
-                Err(T3Error::Other(message)) => {
-                    if self.poll_error.as_ref() != Some(&message) {
-                        self.log(&format!("poll: {message}"));
-                    }
-                    self.poll_error = Some(message);
-                }
+                self.start_poll();
+            }
+            self.poll_step();
+            if self.poll_run.is_none() || self.now_ms() - started >= TICK_BUDGET_MS {
+                break;
             }
         }
-        self.publish();
+        // Halfway through a poll the state is half new: publish only once it has taken a
+        // while, so an answer to a command still goes out.
+        let now = self.now_ms();
+        if self.poll_run.as_ref().is_none_or(|run| now - run.started >= PUBLISH_MIDPOLL_MS) {
+            self.publish();
+        }
     }
 }
 
