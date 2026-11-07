@@ -20,6 +20,8 @@ struct FakeT3 {
     unlisted: Mutex<Vec<Value>>,
     /// Each thread's messages (two short ones when not set).
     messages: Mutex<HashMap<String, Vec<Value>>>,
+    /// What the settled list holds, newest first.
+    settled: Mutex<Vec<Value>>,
 }
 
 impl FakeT3 {
@@ -39,6 +41,7 @@ impl FakeT3 {
             clock: Mutex::new(None),
             unlisted: Mutex::new(Vec::new()),
             messages: Mutex::new(HashMap::new()),
+            settled: Mutex::new(Vec::new()),
         })
     }
 
@@ -91,16 +94,19 @@ impl T3 for FakeT3 {
             "t3_thread_launch" => json!({ "threadId": "new1" }),
             "t3_project_list" => json!({ "projects": [{ "id": "p1", "title": "app" }] }),
             "t3_thread_list" => {
-                if args["settled"] == true {
-                    json!({ "threads": [] })
-                } else {
-                    // Like T3, the list has no pending-question count: only a thread read does.
-                    let mut threads = self.threads.lock().unwrap().clone();
-                    for t in &mut threads {
-                        t.as_object_mut().unwrap().remove("pendingRequestCount");
-                    }
-                    json!({ "threads": threads })
+                let mut threads = if args["settled"] == true { self.settled.lock().unwrap().clone() } else { self.threads.lock().unwrap().clone() };
+                // Like T3, the list has no pending-question count: only a thread read does.
+                for t in &mut threads {
+                    t.as_object_mut().unwrap().remove("pendingRequestCount");
                 }
+                // A page at a time, as T3 pages: at most 100 from the cursor on.
+                let limit = args["limit"].as_u64().unwrap_or(50) as usize;
+                assert!(limit <= 100, "T3 refuses a limit over 100");
+                let cursor = args["cursor"].as_u64().unwrap_or(0) as usize;
+                let total = threads.len();
+                let page: Vec<Value> = threads.into_iter().skip(cursor).take(limit).collect();
+                let next = (cursor + page.len() < total).then_some(cursor + page.len());
+                json!({ "threads": page, "nextCursor": next, "total": total })
             }
             "t3_thread_read" if args["view"].is_string() => {
                 // Messages after afterPosition, a page at a time.
@@ -1125,6 +1131,7 @@ fn every_kind(rig: &mut Rig, u: &str) -> Vec<(u64, &'static str)> {
         ("ui", json!({ "o": true })),
         ("open", json!({ "id": "t1" })),
         ("more", json!({})),
+        ("list", json!({ "g": "settled" })),
         ("refresh", json!({})),
         ("probe", json!({})),
         ("t3", json!({ "id": "t1" })),
@@ -1176,7 +1183,7 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     assert!(rig.t3.calls_to("t3_thread_launch").is_empty());
     assert_eq!(count(&rig), 4);
     assert_eq!(answers(&rig), 1);
-    assert_eq!(rig.bridge.snapshot()["ack"], 13);
+    assert_eq!(rig.bridge.snapshot()["ack"], 14);
     assert_eq!(rig.bridge.snapshot()["trust"], "nonew");
     assert!(rig.slot(1).contains("trust=\"nonew\""), "{}", rig.slot(1));
 
@@ -1193,13 +1200,76 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     assert_eq!(opened.lock().unwrap().len(), 1, "t3 still brings T3 to the front");
     assert_eq!(rig.bridge.snapshot()["view"]["id"], "t1", "open still opens");
     assert!(rig.bridge.window_open, "ui still says the window is open");
-    assert_eq!(rig.bridge.snapshot()["ack"], 13);
+    assert_eq!(rig.bridge.snapshot()["ack"], 14);
     assert_eq!(rig.bridge.snapshot()["trust"], "readonly");
 
     // Back to Full, at once: the next command runs.
     rig.bridge.set_trust(Trust::Full);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 14, "t": "send", "id": "t1", "m": "now" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 15, "t": "send", "id": "t1", "m": "now" }] }));
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
     assert!(rig.bridge.snapshot()["trust"].is_null());
+}
+
+/// `n` settled threads, newest first.
+fn settled_threads(n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|i| json!({ "threadId": format!("s{i}"), "projectId": "p1", "title": format!("Done {i}"), "status": "completed", "settled": true, "updatedAt": "2026-11-05T10:00:00Z" }))
+        .collect()
+}
+
+fn settled_shown(rig: &Rig) -> usize {
+    rig.bridge.snapshot()["threads"].as_array().unwrap().iter().filter(|t| t["set"] == true).count()
+}
+
+/// The settled lists asked for since `from`: (cursor, limit) of each.
+fn settled_pages(rig: &Rig, from: usize) -> Vec<(Option<u64>, u64)> {
+    rig.t3.calls_to("t3_thread_list")[from..].iter().filter(|a| a["settled"] == true).map(|a| (a["cursor"].as_u64(), a["limit"].as_u64().unwrap())).collect()
+}
+
+#[test]
+fn show_more_lists_more_of_a_group_up_to_its_cap_for_the_ui_session() {
+    let mut rig = Rig::new(30_000_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    *rig.t3.settled.lock().unwrap() = settled_threads(150);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert_eq!(settled_shown(&rig), 25);
+    assert_eq!(rig.bridge.snapshot()["settledTotal"], 150);
+    assert_eq!(rig.bridge.snapshot()["more"], json!({ "settled": true }), "only the settled list has more");
+
+    // Each Show more doubles what the next poll lists.
+    let mut s = 1;
+    let mut show_more = |rig: &mut Rig| -> Vec<(Option<u64>, u64)> {
+        s += 1;
+        let from = rig.t3.calls_to("t3_thread_list").len();
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": s, "t": "list", "g": "settled" }] }));
+        rig.bridge.tick();
+        settled_pages(rig, from)
+    };
+    assert_eq!(show_more(&mut rig), vec![(None, 50)]);
+    assert_eq!(settled_shown(&rig), 50);
+    assert_eq!(show_more(&mut rig), vec![(None, 100)]);
+    assert_eq!(settled_shown(&rig), 100);
+    // Past T3's page of 100, the list takes a request per page, one step each.
+    assert_eq!(show_more(&mut rig), vec![(None, 100), (Some(100), 100)]);
+    assert_eq!(settled_shown(&rig), 150);
+    assert!(rig.bridge.snapshot()["more"].is_null(), "every settled thread is listed");
+
+    // At the cap, more settled threads don't offer Show more: it couldn't list them.
+    rig.t3.settled.lock().unwrap().extend(settled_threads(250).into_iter().skip(150));
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert_eq!(settled_shown(&rig), 200);
+    assert_eq!(rig.bridge.snapshot()["settledTotal"], 250);
+    assert!(rig.bridge.snapshot()["more"].is_null());
+    assert_eq!(show_more(&mut rig), vec![(None, 100), (Some(100), 100)], "the cap holds");
+
+    // A new UI session (a /reload) starts from the first page again.
+    rig.advance(2000);
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [{ "s": 10, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert_eq!(settled_shown(&rig), 25);
+    assert_eq!(rig.bridge.snapshot()["more"], json!({ "settled": true }));
+    assert!(rig.slot(rig.bridge.link.slot - 1).contains("more={settled=true}"), "{}", rig.slot(rig.bridge.link.slot - 1));
 }
