@@ -39,7 +39,8 @@ jobs:
           $tag = "${{ github.ref_name }}".TrimStart("v")
           $cargo = (Select-String -Path companion/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           $addon = (Select-String -Path addon/T3WoW/T3WoW.toc -Pattern '^## Version: (.+)$').Matches[0].Groups[1].Value.Trim()
-          if ($tag -ne $cargo -or $tag -ne $addon) { throw "Tag ${tag}, companion ${cargo}, addon ${addon}: bump them together." }
+          $npm = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne $cargo -or $tag -ne $addon -or $tag -ne $npm) { throw "Tag ${tag}, companion ${cargo}, addon ${addon}, package.json ${npm}: bump them together." }
 
       - run: npm ci
       - run: npm test
