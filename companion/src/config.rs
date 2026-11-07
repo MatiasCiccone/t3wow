@@ -50,6 +50,61 @@ pub fn canonical_origin(origin: &str) -> String {
     format!("{scheme}://{authority}{path}")
 }
 
+/// How far the companion trusts commands from the game. Any addon in the game can draw
+/// the strip, so this caps what one could make T3 do.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Trust {
+    /// Everything the window offers.
+    #[default]
+    Full,
+    /// Everything but starting threads.
+    NoNewThreads,
+    /// Reading only: nothing that changes T3 (no messages, starts, answers, Stop or Settle).
+    ReadOnly,
+}
+
+/// What the game may still do under Read-only: look, and bring T3 to the front.
+const READ_ONLY_KINDS: [&str; 7] = ["hello", "ui", "open", "more", "refresh", "probe", "t3"];
+
+impl Trust {
+    pub const ALL: [Trust; 3] = [Trust::Full, Trust::NoNewThreads, Trust::ReadOnly];
+
+    /// As the tray menu names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Trust::Full => "Full",
+            Trust::NoNewThreads => "No new threads",
+            Trust::ReadOnly => "Read-only",
+        }
+    }
+
+    /// As the game's updates name it (left out for Full).
+    pub fn code(self) -> Option<&'static str> {
+        match self {
+            Trust::Full => None,
+            Trust::NoNewThreads => Some("nonew"),
+            Trust::ReadOnly => Some("readonly"),
+        }
+    }
+
+    /// Whether a command of this kind (its `t`) may run.
+    pub fn allows(self, kind: &str) -> bool {
+        match self {
+            Trust::Full => true,
+            Trust::NoNewThreads => kind != "new",
+            Trust::ReadOnly => READ_ONLY_KINDS.contains(&kind),
+        }
+    }
+}
+
+/// A value this version doesn't know (a typo in a hand edit) reads as Read-only, the
+/// safest, instead of making the whole file unreadable.
+fn lenient_trust<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Trust>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.map(|v| serde_json::from_value(v).unwrap_or(Trust::ReadOnly)))
+}
+
 /// What is saved for one T3 server.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +131,9 @@ pub struct Config {
     /// The T3 on another machine (`login --origin`); none means the T3 on this PC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The tray's "Commands from the game"; none means Full.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_trust")]
+    pub game_commands: Option<Trust>,
     /// Sign-ins by server (see `server_key`): a token is only ever sent to the server that
     /// issued it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -235,6 +293,10 @@ impl Config {
 
     pub fn set_client_id(&mut self, key: &str, client_id: Option<String>) {
         self.servers.entry(key.to_string()).or_default().client_id = client_id;
+    }
+
+    pub fn trust(&self) -> Trust {
+        self.game_commands.unwrap_or_default()
     }
 
     pub fn interface(&self) -> String {
@@ -407,6 +469,19 @@ mod tests {
         config.sign_out();
         assert_eq!(config.client_id("http://a:1").as_deref(), Some("client-a"));
         assert_eq!(config.client_id(LOCAL), None);
+    }
+
+    #[test]
+    fn the_game_commands_setting_saves_and_an_unknown_value_reads_as_read_only() {
+        let file = temp_file("trust");
+        assert_eq!(Config::update_at(&file, |_| {}).trust(), Trust::Full);
+        Config::update_at(&file, |c| c.game_commands = Some(Trust::NoNewThreads));
+        assert!(fs::read_to_string(&file).unwrap().contains(r#""gameCommands": "noNewThreads""#));
+        assert_eq!(Config::read(&file).unwrap().0.trust(), Trust::NoNewThreads);
+        fs::write(&file, r#"{"gameCommands":"read only","wowDir":"C:\\wow"}"#).unwrap();
+        let (config, _) = Config::read(&file).unwrap();
+        assert_eq!(config.trust(), Trust::ReadOnly);
+        assert_eq!(config.wow_dir.as_deref(), Some("C:\\wow"), "the rest of the file still reads");
     }
 
     #[test]

@@ -953,3 +953,98 @@ fn the_game_learns_which_commands_failed_and_which_thread_a_start_opened() {
     rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [{ "s": 6, "t": "hello", "o": false }] }));
     assert!(rig.bridge.snapshot()["out"].is_null());
 }
+
+/// Every command kind the window sends, one frame's worth (the answer names the question
+/// the fake T3 asks, so it reaches T3 when allowed).
+fn every_kind(rig: &mut Rig, u: &str) -> Vec<(u64, &'static str)> {
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["status"] = json!("waiting");
+        threads[0]["pendingRequestCount"] = json!(1);
+    }
+    rig.bridge.view = Some(View { env: "local".into(), id: "t1".into(), depth: 1 });
+    rig.bridge.tick();
+    let token = rig.bridge.snapshot()["view"]["ask"]["k"].clone();
+    let kinds = [
+        ("hello", json!({})),
+        ("ui", json!({ "o": true })),
+        ("open", json!({ "id": "t1" })),
+        ("more", json!({})),
+        ("refresh", json!({})),
+        ("probe", json!({})),
+        ("t3", json!({ "id": "t1" })),
+        ("send", json!({ "id": "t1", "m": "go" })),
+        ("new", json!({ "p": "p1", "m": "Build it" })),
+        ("settle", json!({ "id": "t1" })),
+        ("unsettle", json!({ "id": "t1" })),
+        ("stop", json!({ "id": "t1" })),
+        ("answer", json!({ "id": "t1", "k": token, "a": [1, [2]] })),
+    ];
+    let q: Vec<Value> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, (t, extra))| with_args(json!({ "s": i as u64 + 1, "t": t }), extra.as_object().unwrap()))
+        .collect();
+    rig.frame(json!({ "k": "c1", "u": u, "n": 0, "l": 1, "q": q }));
+    rig.bridge.tick();
+    kinds.iter().enumerate().map(|(i, (t, _))| (i as u64 + 1, *t)).collect()
+}
+
+/// The kinds whose outcome says the tray setting blocked them.
+fn blocked(rig: &Rig, sent: &[(u64, &'static str)]) -> Vec<&'static str> {
+    let out = rig.bridge.snapshot()["out"].as_array().cloned().unwrap_or_default();
+    sent.iter()
+        .filter(|(s, _)| out.iter().any(|o| o["s"] == *s && o["ok"] == false && str_of(&o["x"]).contains("Commands from the game")))
+        .map(|(_, t)| *t)
+        .collect()
+}
+
+#[test]
+fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
+    let changes = ["t3_thread_send", "t3_thread_launch", "t3_thread_organize", "t3_thread_interrupt"];
+    let count = |rig: &Rig| -> usize { changes.iter().map(|tool| rig.t3.calls_to(tool).len()).sum() };
+    let answers = |rig: &Rig| rig.t3.calls_to("t3_pending_request").iter().filter(|a| a["action"] == "respond").count();
+
+    // Full: nothing is blocked, and every change reaches T3.
+    let mut rig = Rig::new(27_000_000);
+    let sent = every_kind(&mut rig, "ui1");
+    assert!(blocked(&rig, &sent).is_empty());
+    assert_eq!(count(&rig), 5, "send, new, settle, unsettle and stop");
+    assert_eq!(answers(&rig), 1);
+    assert!(rig.bridge.snapshot()["trust"].is_null(), "Full isn't named");
+
+    // No new threads: only the start is refused; it comes back as a failure, and is acked.
+    let mut rig = Rig::new(28_000_000);
+    rig.bridge.set_trust(Trust::NoNewThreads);
+    let sent = every_kind(&mut rig, "ui1");
+    assert_eq!(blocked(&rig, &sent), vec!["new"]);
+    assert!(rig.t3.calls_to("t3_thread_launch").is_empty());
+    assert_eq!(count(&rig), 4);
+    assert_eq!(answers(&rig), 1);
+    assert_eq!(rig.bridge.snapshot()["ack"], 13);
+    assert_eq!(rig.bridge.snapshot()["trust"], "nonew");
+    assert!(rig.slot(1).contains("trust=\"nonew\""), "{}", rig.slot(1));
+
+    // Read-only: nothing that changes T3 gets through; looking still works.
+    let mut rig = Rig::new(29_000_000);
+    rig.bridge.set_trust(Trust::ReadOnly);
+    let opened = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&opened);
+    rig.bridge.opener = Box::new(move |link| log.lock().unwrap().push(link.to_string()));
+    let sent = every_kind(&mut rig, "ui1");
+    assert_eq!(blocked(&rig, &sent), vec!["send", "new", "settle", "unsettle", "stop", "answer"]);
+    assert_eq!(count(&rig), 0);
+    assert_eq!(answers(&rig), 0);
+    assert_eq!(opened.lock().unwrap().len(), 1, "t3 still brings T3 to the front");
+    assert_eq!(rig.bridge.snapshot()["view"]["id"], "t1", "open still opens");
+    assert!(rig.bridge.window_open, "ui still says the window is open");
+    assert_eq!(rig.bridge.snapshot()["ack"], 13);
+    assert_eq!(rig.bridge.snapshot()["trust"], "readonly");
+
+    // Back to Full, at once: the next command runs.
+    rig.bridge.set_trust(Trust::Full);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 14, "t": "send", "id": "t1", "m": "now" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+    assert!(rig.bridge.snapshot()["trust"].is_null());
+}

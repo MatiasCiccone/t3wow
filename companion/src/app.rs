@@ -3,7 +3,7 @@
 //! only shows what this reports.
 
 use crate::bridge::{Bridge, CaptureMessage};
-use crate::config::{config_dir, now_ms, Config};
+use crate::config::{config_dir, now_ms, Config, Trust};
 use crate::log;
 use crate::slots::{Slots, SLOT_COUNT};
 
@@ -30,6 +30,8 @@ pub enum Control {
     SignedIn,
     SignedOut,
     Reinstall,
+    /// The tray's "Commands from the game" changed (it is saved already).
+    Trust(Trust),
 }
 
 /// Where the update check stands, for the tray menu.
@@ -219,6 +221,7 @@ pub fn run(app: Arc<App>) {
         Box::new(log::line),
         Box::new(now_ms),
     );
+    bridge.set_trust(Config::load().trust());
     log::line(&format!("T3 WoW companion {}: T3 at {origin}, WoW at {}", env!("CARGO_PKG_VERSION"), wow_dir.display()));
     let (capture_tx, capture_rx) = channel::<CaptureMessage>();
     #[cfg(windows)]
@@ -256,6 +259,7 @@ pub fn run(app: Arc<App>) {
                     }
                     Err(error) => log::line(&format!("Reinstall failed: {error}")),
                 },
+                Control::Trust(trust) => bridge.set_trust(trust),
             }
         }
         bridge.tick();
@@ -267,6 +271,8 @@ pub fn run(app: Arc<App>) {
         if recheck || checked_origin.elapsed() > Duration::from_secs(30) {
             checked_origin = Instant::now();
             recheck = false;
+            // A hand edit of config.json (or `run`, which has no tray) counts too.
+            bridge.set_trust(Config::load().trust());
             let found = t3::target();
             let token = found.as_ref().and_then(|t| t.token.clone()).unwrap_or_default();
             if let Some(found) = found.filter(|t| t.origin != origin || t.key != key) {

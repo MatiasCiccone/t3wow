@@ -2,12 +2,12 @@
 //! the work happens in app::run on a background thread.
 
 use crate::app::{App, Control, Status, Update};
-use crate::config::Config;
+use crate::config::{Config, Trust};
 use crate::log;
 use crate::slots::Slots;
 use std::ptr::null_mut;
 use std::sync::Arc;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, PostQuitMessage, SetTimer, TranslateMessage, MSG, WM_TIMER};
 
@@ -137,6 +137,13 @@ pub fn run(app: Arc<App>) -> ! {
     let wow_folder = MenuItem::new("Choose WoW folder…", true, None);
     let reinstall = MenuItem::new("Reinstall addon", true, None);
     let interface = MenuItem::new("Match WoW's interface version…", true, None);
+    // What the game may make T3 do: any addon can draw the strip the companion reads.
+    let trust_now = Config::load().trust();
+    let trust_items: Vec<(Trust, CheckMenuItem)> = Trust::ALL.iter().map(|&t| (t, CheckMenuItem::new(t.label(), true, t == trust_now, None))).collect();
+    let trust_menu = Submenu::new("Commands from the game", true);
+    for (_, item) in &trust_items {
+        let _ = trust_menu.append(item);
+    }
     let open_log = MenuItem::new("Open log", true, None);
     let autostart = CheckMenuItem::new("Start with Windows", true, autostart_enabled(), None);
     let updates = MenuItem::new("Check for updates", true, None);
@@ -150,6 +157,7 @@ pub fn run(app: Arc<App>) -> ! {
         &wow_folder,
         &reinstall,
         &interface,
+        &trust_menu,
         &open_log,
         &autostart,
         &updates,
@@ -208,6 +216,13 @@ pub fn run(app: Arc<App>) -> ! {
                     app.send(Control::Reinstall);
                 } else if id == *interface.id() {
                     match_interface(&app);
+                } else if let Some(&(trust, _)) = trust_items.iter().find(|(_, item)| *item.id() == id) {
+                    // Saved first, so the worker's next look at config.json agrees.
+                    Config::update(|c| c.game_commands = Some(trust));
+                    app.send(Control::Trust(trust));
+                    for (t, item) in &trust_items {
+                        item.set_checked(*t == trust);
+                    }
                 } else if id == *autostart.id() {
                     set_autostart(autostart.is_checked());
                     autostart.set_checked(autostart_enabled());
