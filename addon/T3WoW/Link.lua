@@ -176,7 +176,7 @@ function Link.Render()
         state.queueSince = state.queueSince or GetTime()
     end
     local header = { k = own.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
-        p = (not signalling()) and 1 or nil }
+        p = (not signalling()) and 1 or nil, lid = db.login }
     -- An empty queue still sends a header-only sync frame.
     local commands = {}
     local payload = (#own.queue == 0) and Codec.Json(header) or nil
@@ -218,7 +218,8 @@ function Link.Fits(command)
     local alone = {}
     for key, value in pairs(command) do alone[key] = value end
     alone.s = (own and own.seq or 0) + 1
-    local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1, q = { alone } }
+    local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1,
+        lid = db and db.login, q = { alone } }
     return #Codec.Json(header) <= Codec.MAX_PAYLOAD
 end
 
@@ -238,9 +239,60 @@ function Link.Stalled()
     return state.queueSince ~= nil and GetTime() - state.queueSince > ACK_PATIENCE
 end
 
+-- ---------------------------------------------------------------- sign-in
+-- Each update carries a stamp (lid) for the T3 sign-in it comes from. The companion gives
+-- it a new one when it moves to another T3 (`t3wow.exe login --origin`) or signs out, and
+-- blanks the slot files that held the previous one's threads. Seeing a new stamp, the
+-- game drops everything it had from the previous one: threads, the open thread,
+-- notifications, and commands still waiting (meant for that T3's threads and machines).
+-- The stamp is kept in the saved variables (db.login, with db.loginAt, when the newest
+-- update with it was written), so this holds across /reload and restarts too.
+
+-- Commands that mean the same on any T3; keep in step with LOGIN_FREE in companion/src/bridge.rs.
+local LOGIN_FREE = { hello = true, ui = true, probe = true, refresh = true }
+
+-- Drops what came from the previous sign-in.
+function Link.ForgetLogin()
+    local kept = {}
+    for _, command in ipairs(own.queue) do
+        if LOGIN_FREE[command.t] then kept[#kept + 1] = command end
+    end
+    own.queue = kept
+    if #kept == 0 then state.queueSince = nil end
+    state.inbox, state.recentAlerts = nil, {}
+    ns.UI.ForgetLogin()
+    Link.Render()
+end
+
+-- Whether to take this update, given the sign-in it comes from; a new sign-in's first
+-- update drops the previous one's things first.
+local function takeLogin(inbox)
+    local lid = inbox.lid
+    if type(lid) ~= "string" then return true end -- an older companion: no stamps
+    local now = type(inbox.now) == "number" and inbox.now or 0
+    if lid == db.login then
+        db.loginAt = math.max(db.loginAt or 0, now)
+        return true
+    end
+    -- Another stamp, older than an update we have from ours, and not written for this UI
+    -- session: a slot left over from before the companion moved. Not shown.
+    if inbox.u ~= state.uiSession and type(db.loginAt) == "number" and now < db.loginAt then
+        trace(format("  update for another sign-in (%s), older than ours: ignored", lid))
+        return false
+    end
+    local previous = db.login
+    db.login, db.loginAt = lid, now
+    if previous ~= nil then
+        trace(format("  the companion moved to another T3 sign-in (%s): dropping the previous one's threads and commands", lid))
+        Link.ForgetLogin()
+    end
+    return true
+end
+
 -- ---------------------------------------------------------------- inbox
 
 local function receive(inbox)
+    if not takeLogin(inbox) then return end
     -- An update written for an earlier UI session (u) carries that session's ack, which
     -- can be past this session's command numbers after a crash: leave the queue alone.
     if inbox.k == own.client and type(inbox.ack) == "number" and (inbox.u == nil or inbox.u == state.uiSession) then

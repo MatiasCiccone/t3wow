@@ -62,6 +62,47 @@ pub fn target_in(config: &crate::config::Config) -> Option<Target> {
     Some(Target { key: config.server_key(), origin, token: config.token() })
 }
 
+/// What `connect` did.
+pub struct Connected {
+    pub origin: String,
+    /// The new sign-in, when it made one (none: that T3's saved sign-in was used).
+    pub signed: Option<SignIn>,
+}
+
+/// The one way the companion moves to another T3, or signs in again to its own:
+/// `t3wow.exe login`, the tray's Sign in to T3… and its connect-to-another-T3 entry all
+/// come through here. `origin`: None for the T3 in use now, Some(None) for the one on this
+/// PC, Some(Some(url)) for one on another machine. Signs in when `fresh` or when that T3
+/// has no saved sign-in; another T3's saved sign-in stays as it is. The origin is saved
+/// only once there is a sign-in for it, and in the same write as that sign-in, so a failed
+/// or cancelled sign-in leaves the companion where it was, and a running companion moves
+/// to both at once (`app::Control::SignedIn` tells it now; otherwise it looks every 30 s).
+/// There, `Bridge::set_login` drops everything the previous T3 showed in the game.
+pub fn connect(origin: Option<Option<String>>, fresh: bool, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Connected, String> {
+    use crate::config::{canonical_origin, Config};
+    let origin = origin.map(|o| o.map(|url| canonical_origin(&url)));
+    let mut config = Config::load();
+    if let Some(origin) = &origin {
+        config.origin = origin.clone();
+    }
+    let target = target_in(&config).ok_or("T3 Code is not running on this PC. Start the T3 Code desktop app, or pass --origin.")?;
+    let signed = match target.token.as_ref().filter(|_| !fresh) {
+        Some(_) => None,
+        None => Some(login(&target.origin, &target.key, log, cancelled)?),
+    };
+    let mut saved = Ok(());
+    Config::update(|c| {
+        if let Some(signed) = &signed {
+            saved = c.set_sign_in(&target.key, &signed.token, signed.expires_at);
+        }
+        if let (Ok(()), Some(origin)) = (&saved, &origin) {
+            c.origin = origin.clone();
+        }
+    });
+    saved?;
+    Ok(Connected { origin: target.origin, signed })
+}
+
 fn random_url_safe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).expect("random bytes");

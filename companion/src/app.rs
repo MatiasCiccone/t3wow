@@ -127,30 +127,40 @@ impl App {
     /// Opens T3's sign-in page in the browser and waits for the approval in the background.
     /// Asked again while one waits, it starts over: the old wait ends and a new page opens.
     pub fn sign_in(self: &Arc<App>) {
+        self.connect_in_background(None, true);
+    }
+
+    /// Moves the companion to another T3: `Some(url)` for one on another machine, `None`
+    /// for the one on this PC (what `t3wow.exe login --origin` does, for the tray). Uses
+    /// that T3's saved sign-in, or opens its sign-in page first; a failed or cancelled
+    /// sign-in leaves the companion where it was. Once saved, the worker moves at once and
+    /// the game drops everything the previous T3 showed (`Bridge::set_login`).
+    #[allow(dead_code)] // for the tray's connect-to-another-T3 entry
+    pub fn connect(self: &Arc<App>, origin: Option<String>) {
+        self.connect_in_background(Some(origin), false);
+    }
+
+    /// `t3::connect` on its own thread; a newer sign-in or connect ends a waiting one.
+    fn connect_in_background(self: &Arc<App>, origin: Option<Option<String>>, fresh: bool) {
         let run = self.sign_in_run.fetch_add(1, Ordering::SeqCst) + 1;
         let app = Arc::clone(self);
         std::thread::spawn(move || {
             let cancelled = || app.sign_in_run.load(Ordering::SeqCst) != run;
-            match t3::target() {
-                None => log::line("Can't sign in: T3 Code is not running on this PC."),
-                Some(target) => match t3::login(&target.origin, &target.key, &|m| log::line(m), &cancelled) {
-                    // Saved for the server that issued it, even if `login --origin` moved the
-                    // companion elsewhere meanwhile: the worker pairs tokens with servers.
-                    Ok(signed) => {
-                        let mut saved = Ok(());
-                        Config::update(|c| saved = c.set_sign_in(&target.key, &signed.token, signed.expires_at));
-                        match saved {
-                            Ok(()) => {
-                                let scope = if signed.scope.is_empty() { "no scope reported" } else { &signed.scope };
-                                log::line(&format!("Signed in to {} ({scope}).", target.origin));
-                                app.send(Control::SignedIn);
-                            }
-                            Err(error) => log::line(&error),
+            // A sign-in is saved for the server that issued it, even if `login --origin`
+            // moved the companion elsewhere meanwhile: the worker pairs tokens with servers.
+            match t3::connect(origin, fresh, &|m| log::line(m), &cancelled) {
+                Ok(connected) => {
+                    match connected.signed {
+                        Some(signed) => {
+                            let scope = if signed.scope.is_empty() { "no scope reported" } else { &signed.scope };
+                            log::line(&format!("Signed in to {} ({scope}).", connected.origin));
                         }
+                        None => log::line(&format!("Connecting to {} with its saved sign-in.", connected.origin)),
                     }
-                    Err(_) if cancelled() => log::line("Started the sign-in over."),
-                    Err(error) => log::line(&error),
-                },
+                    app.send(Control::SignedIn);
+                }
+                Err(_) if cancelled() => log::line("Started the sign-in over."),
+                Err(error) => log::line(&format!("Can't sign in: {error}")),
             }
         });
     }
@@ -228,6 +238,9 @@ pub fn run(app: Arc<App>) {
         Box::new(now_ms),
     );
     bridge.set_trust(Config::load().trust());
+    // Another T3 than the game's updates came from last time (`login --origin` while the
+    // companion was off): the game drops the previous one's threads.
+    bridge.set_login(&key);
     log::line(&format!("T3 WoW companion {}: T3 at {origin}, WoW at {}", env!("CARGO_PKG_VERSION"), wow_dir.display()));
     let (capture_tx, capture_rx) = channel::<CaptureMessage>();
     #[cfg(windows)]
@@ -251,10 +264,12 @@ pub fn run(app: Arc<App>) {
                     recheck = true;
                 }
                 Control::SignedOut => {
-                    // T3 now refuses the empty token, which the game window shows too.
+                    // T3 now refuses the empty token, which the game window shows too, and
+                    // what was read with the sign-in goes.
                     signed_out = true;
                     client.set_token("");
                     bridge.set_client(client.clone());
+                    bridge.sign_out();
                 }
                 Control::Reinstall => match slots.install() {
                     Ok(()) => {
@@ -283,9 +298,17 @@ pub fn run(app: Arc<App>) {
             let token = found.as_ref().and_then(|t| t.token.clone()).unwrap_or_default();
             if let Some(found) = found.filter(|t| t.origin != origin || t.key != key) {
                 log::line(&format!("T3 moved to {}", found.origin));
+                // Another T3 (not the same one on another port): another sign-in, whose
+                // threads replace the previous one's in the game. A tray sign-out was the
+                // previous T3's; this one is signed in if it has a saved sign-in.
+                let switched = found.key != key;
                 (key, origin) = (found.key, found.origin);
                 client = Arc::new(McpClient::new(&origin, &token));
                 bridge.set_client(client.clone());
+                if switched {
+                    bridge.set_login(&key);
+                    signed_out = token.is_empty();
+                }
             } else if !token.is_empty() && token != client.token() {
                 // A sign-in from the terminal: use its token (it also ends a tray sign-out).
                 log::line("Using the new T3 sign-in.");
