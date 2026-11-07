@@ -292,6 +292,11 @@ pub trait SlotWriter: Send {
     fn clear_slots(&mut self);
     /// Makes the probe's flip files real (or blank again); returns the types changed.
     fn flip_probe(&mut self, real: bool) -> Vec<String>;
+    /// The `## Version:` of the addon on disk, if known: the game compares it with the one
+    /// it loaded, and says to restart WoW when the one on disk is newer.
+    fn addon_version(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Writes through a temporary file, so the game never reads a half-written one.
@@ -305,6 +310,12 @@ fn write_whole(file: &Path, data: &[u8]) -> io::Result<()> {
 }
 
 impl SlotWriter for Slots {
+    /// What is in the AddOns folder now: the shipped addon after an install or repair, or
+    /// a newer one (from CurseForge, say) that `repair` left alone.
+    fn addon_version(&self) -> Option<String> {
+        self.installed_version()
+    }
+
     fn write_slot(&mut self, n: u32, lua: &str) -> io::Result<()> {
         if !(1..=SLOT_COUNT).contains(&n) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("no slot {n}")));
@@ -393,6 +404,8 @@ mod tests {
         let old = fs::read_to_string(&toc).unwrap().replace(&format!("## Version: {}", shipped_version()), "## Version: 0.0.1");
         fs::write(&toc, old).unwrap();
         assert!(slots.repair().unwrap().addon.unwrap().starts_with("updated 0.0.1 to "));
+        // The game is told the version it would load now.
+        assert_eq!(slots.addon_version(), Some(shipped_version()));
         assert!(fs::read_to_string(&toc).unwrap().contains("## Interface: 16001"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -423,6 +436,8 @@ mod tests {
         assert_eq!((repair.addon, repair.created), (None, 0));
         assert!(!dir.join("T3WoW/Link.lua").exists());
         assert_eq!(fs::read_to_string(&toc).unwrap(), newer);
+        // The game is told about the newer addon, not this companion's.
+        assert_eq!(slots.addon_version().as_deref(), Some("99.0.0"));
         let _ = fs::remove_dir_all(&dir);
     }
 
