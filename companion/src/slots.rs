@@ -26,10 +26,22 @@ pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("T3WoW.toc", include_bytes!("../../addon/T3WoW/T3WoW.toc")),
     ("Bindings.xml", include_bytes!("../../addon/T3WoW/Bindings.xml")),
     ("Codec.lua", include_bytes!("../../addon/T3WoW/Codec.lua")),
+    ("Theme.lua", include_bytes!("../../addon/T3WoW/Theme.lua")),
     ("UI.lua", include_bytes!("../../addon/T3WoW/UI.lua")),
     ("Link.lua", include_bytes!("../../addon/T3WoW/Link.lua")),
     ("T3WoW.lua", include_bytes!("../../addon/T3WoW/T3WoW.lua")),
     ("Media/logo.tga", include_bytes!("../../addon/T3WoW/Media/logo.tga")),
+    ("Media/round.tga", include_bytes!("../../addon/T3WoW/Media/round.tga")),
+    ("Media/ring.tga", include_bytes!("../../addon/T3WoW/Media/ring.tga")),
+    ("Media/classic.tga", include_bytes!("../../addon/T3WoW/Media/classic.tga")),
+    ("Media/classic-ring.tga", include_bytes!("../../addon/T3WoW/Media/classic-ring.tga")),
+    ("Media/close.tga", include_bytes!("../../addon/T3WoW/Media/close.tga")),
+    ("Media/chevron.tga", include_bytes!("../../addon/T3WoW/Media/chevron.tga")),
+    ("Media/check.tga", include_bytes!("../../addon/T3WoW/Media/check.tga")),
+    ("Media/grip.tga", include_bytes!("../../addon/T3WoW/Media/grip.tga")),
+    ("Media/Inter-Regular.ttf", include_bytes!("../../addon/T3WoW/Media/Inter-Regular.ttf")),
+    ("Media/Inter-SemiBold.ttf", include_bytes!("../../addon/T3WoW/Media/Inter-SemiBold.ttf")),
+    ("Media/Inter-OFL.txt", include_bytes!("../../addon/T3WoW/Media/Inter-OFL.txt")),
     ("LICENSE", include_bytes!("../../addon/T3WoW/LICENSE")),
 ];
 
@@ -368,6 +380,28 @@ mod tests {
 
     /// Stands in for a Windows font: the companion only copies font bytes, never reads them.
     const FIXTURE_FONT: &[u8] = b"fixture font bytes";
+
+    /// A file added to the addon but not to ADDON_FILES would be missing from every install.
+    #[test]
+    fn every_addon_file_is_embedded() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../addon/T3WoW");
+        let mut on_disk = Vec::new();
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    on_disk.push(path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        on_disk.sort();
+        let mut embedded: Vec<String> = ADDON_FILES.iter().map(|(name, _)| name.to_string()).collect();
+        embedded.sort();
+        assert_eq!(on_disk, embedded);
+    }
 
     fn fixture_slots(dir: &Path, interface: &str) -> Slots {
         Slots::with_fonts(dir, interface, Some(FIXTURE_FONT.to_vec()), Some(FIXTURE_FONT.to_vec()))

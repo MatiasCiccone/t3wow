@@ -4,7 +4,9 @@
 ## Notes: Use T3 Code from inside the game. Needs the t3wow companion running on this PC.
 ## Version: 0.5.0
 ## SavedVariables: T3WoWDB
+## OptionalDeps: ElvUI
 Codec.lua
+Theme.lua
 UI.lua
 Link.lua
 T3WoW.lua

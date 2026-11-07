@@ -69,7 +69,15 @@ Each login and reload says in chat that T3 WoW loaded, then that it connected to
 - **New Thread** has a dropdown for the machine and one for the project (the picked machine's projects, or none for a scratch thread), then starts a thread with your message as its task, and opens it. If the machine is unlinked or the project removed meanwhile, its dropdown says so and **Start** refuses and keeps your text.
 - **Stop** interrupts a running thread. It reads **Stopping…** until the run has ended; if there was nothing to stop, or T3 refuses (with its reason), the window says so and **Stop** comes back, as it does after a minute with no sign of the run ending. **Settle** / **Unsettle** moves it between Open and Settled.
 - When a thread you are not looking at finishes, needs you or fails, a notification slides in near the top of the screen; click it to open the thread, right-click to dismiss. A line in chat and a sound come with it.
-- **Settings** turns the notification, chat line and sound on or off, sets how long notifications stay (or until clicked) and how many stay on screen at once (the oldest makes room; a newer one for the same thread replaces it), moves them (**Move notifications**, then drag), picks which outcomes notify (stopped threads are off by default), and shows or hides the minimap button.
+- **Settings** picks the window's theme and turns on the compact thread list (both apply at once; see Themes below), turns the notification, chat line and sound on or off, sets how long notifications stay (or until clicked) and how many stay on screen at once (the oldest makes room; a newer one for the same thread replaces it), moves them (**Move notifications**, then drag), picks which outcomes notify (stopped threads are off by default), and shows or hides the minimap button.
+
+**Themes.** Every theme has the same layout, and only colors, fonts and corner art change:
+
+- **T3** (the default) looks like the T3 Code app: dark rounded cards and the Inter font, which ships with the addon.
+- **Flat** is a square, pixel-bordered look with the game's Arial Narrow. When ElvUI is running, it takes ElvUI's colors, font and pixel size, so the window matches the rest of an ElvUI screen.
+- **Classic** keeps the game's own feel: gold Friz Quadrata headings and grey bevelled edges.
+
+The **Compact thread list** setting fits a thread on one line (its machine and project show when you hover it), with any theme. Dropdown lists keep the game's own look in every theme.
 
 When an agent asks you a question, it shows at the end of the thread's conversation: pick an option (several, where it allows that) and press **Send answer**, or type your own answer in the box and press Enter. If the answer doesn't go through, **Send answer** can be pressed again. Permission prompts (approving a command or an edit) can't be answered through T3's tools by design: such a thread shows **Approve in T3**, and its thread view has an **Open in T3** button (the companion opens T3's own `t3code://` link). **Stop** cancels the run from the game. Clicking an approval's notification opens the thread in the game; turn on **Clicking an approval opens T3** in Settings to go straight to T3 instead.
 
@@ -140,7 +148,7 @@ npm run build:exe   # dist/t3wow.exe, Windows only
 
 - `addon/T3WoW`: the addon (Lua). `tests/` runs it in a Lua VM: the link and the window against a simulated game, and the contract with the companion. It also checks the release signing scripts against the signed release the companion's tests verify.
 - `companion/`: the companion (Rust): screen capture (`capture.rs`), the T3 client and sign-in (`t3.rs`), settings and saved sign-ins (`config.rs`), the bridge (`bridge.rs`), the addon files (`slots.rs`, with the addon embedded), updates (`updater.rs`), the tray (`tray.rs`, with its notifications and status from `app.rs`) and the tray's address box (`dialog.rs`, a plain Win32 dialog). `companion/tests/fixtures` holds the frames, inbox files and a signed release both sides are tested against.
-- `scripts/`: the exe build, the release key scripts and the release signing wizard.
+- `scripts/`: the exe build, the release key scripts, the release signing wizard, and `skin-textures.mjs`, which draws the addon's theme textures (`addon/T3WoW/Media/*.tga`; run it after changing a shape).
 - `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400).
 
 Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against another repository; release builds ignore it.
@@ -170,4 +178,4 @@ The same zip is uploaded to the [CurseForge project](https://www.curseforge.com/
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The addon carries a copy in its folder.
+MIT, see [LICENSE](LICENSE). The addon carries a copy in its folder. The Inter font in `addon/T3WoW/Media` (subset to Latin, Greek and Cyrillic) is under the SIL Open Font License; its license is next to it as `Inter-OFL.txt`.

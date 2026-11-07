@@ -1,6 +1,23 @@
 local _, ns = ...
 local UI = {}
 ns.UI = UI
+local Skin = ns.Skin
+
+-- Theme.lua came with this version. The game finds a new file only when it starts, so
+-- after an update installed while it ran, a Reload UI loads this without it: say so, and
+-- keep the rest of the addon from tripping over a window that wasn't built.
+if not Skin then
+    local said = false
+    local function tell()
+        if said then return end
+        said = true
+        print("|cff8f8fffT3 WoW|r was updated: restart WoW to load it (/reload isn't enough).")
+    end
+    setmetatable(UI, { __index = function() return function() end end })
+    UI.Toggle, UI.ShowSettings = tell, tell
+    tell()
+    return
+end
 
 local format, floor = string.format, math.floor
 local WIDTH, HEIGHT, LIST_WIDTH = 940, 580, 300
@@ -29,6 +46,10 @@ local ANSWER_TIMEOUT = 45 -- an answer with no word back stops showing "Sending�
 -- STOP_TIMEOUT passes (taken: T3 accepted it, so the run is just slow to end).
 local stopping
 local STOP_TIMEOUT = 60
+
+local function hexColor(hex)
+    return tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255, tonumber(hex:sub(5, 6), 16) / 255
+end
 
 local function statusText(status)
     local s = STATUS[status] or { status or "?", "a0a0a0" }
@@ -94,7 +115,7 @@ end
 
 -- ---------------------------------------------------------------- frame
 
-local frame = CreateFrame("Frame", "T3WoWFrame", UIParent, "BackdropTemplate")
+local frame = CreateFrame("Frame", "T3WoWFrame", UIParent)
 frame:SetSize(WIDTH, HEIGHT)
 frame:SetPoint("CENTER")
 frame:SetFrameStrata("HIGH")
@@ -135,37 +156,64 @@ frame:SetScript("OnDragStop", function(self)
     saveLayout()
 end)
 frame:SetClampedToScreen(true)
-frame:SetBackdrop({
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 11, right = 12, top = 12, bottom = 11 },
-})
+-- Sizes of the window's parts (one table: a file's main chunk may hold only 200 locals).
+local SIZE = {
+    title = 40, footer = 48, -- the title bar and the footer
+    header = 58, -- a thread's title and status, above the conversation
+    row = LIST_WIDTH - 26, -- a thread row's width
+    bubbleX = 12, bubbleY = 8, -- the padding inside a message bubble
+    card = 14, -- the padding inside the question's card
+    settings = 280, -- the settings panel's width
+    field = 112, -- where a labelled control (a dropdown, the slider) starts in Settings
+}
+-- The window is drawn in the theme (Theme.lua): a panel with a title bar and a footer, the
+-- thread list down the left.
+Skin.Box(frame, { shape = "panel", fill = "bg", ring = "border", ringLayer = "BORDER", sub = -8 })
+do
+    local titleLine = Skin.Line(frame)
+    titleLine:SetPoint("TOPLEFT", 1, -SIZE.title)
+    titleLine:SetPoint("TOPRIGHT", -1, -SIZE.title)
+    local footerLine = Skin.Line(frame)
+    footerLine:SetPoint("BOTTOMLEFT", 1, SIZE.footer)
+    footerLine:SetPoint("BOTTOMRIGHT", -1, SIZE.footer)
+end
 frame:Hide()
 tinsert(UISpecialFrames, "T3WoWFrame")
 
-local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-title:SetPoint("TOP", 0, -18)
+local title = frame:CreateFontString(nil, "OVERLAY")
+title:SetFontObject(Skin.fonts.title)
+title:SetPoint("LEFT", frame, "TOPLEFT", 14, -SIZE.title / 2)
 title:SetText("T3 WoW")
 
-local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-close:SetPoint("TOPRIGHT", -6, -6)
+local close = Skin.CloseButton(frame, function() frame:Hide() end)
+close:SetPoint("TOPRIGHT", -8, -8)
 
-local connection = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-connection:SetPoint("TOPLEFT", 20, -20)
+-- The link's state, in a pill beside the title: a dot in its color, and what it is.
+local connectionPill = Skin.Box(frame, { shape = "pill", fill = "card", ring = "border", height = 20, free = true, layer = "ARTWORK" })
+connectionPill:SetPoint("LEFT", title, "RIGHT", 12, 0)
+connectionPill.proxy:SetHeight(20)
+local connectionDot = Skin.Box(frame, { shape = "pill", fill = "dim", height = 6, free = true, layer = "ARTWORK", sub = 2 })
+connectionDot:SetPoint("LEFT", connectionPill.proxy, "LEFT", 8, 0)
+connectionDot.proxy:SetSize(6, 6)
+local connection = frame:CreateFontString(nil, "OVERLAY")
+connection:SetFontObject(Skin.fonts.muted)
+connection:SetPoint("LEFT", connectionPill.proxy, "LEFT", 20, 0)
 connection:SetJustifyH("LEFT")
+connection:SetWordWrap(false)
 
 local function makeScroll(parent, width)
     local scroll = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
     local child = CreateFrame("Frame", nil, scroll)
     child:SetSize(width, 1)
     scroll:SetScrollChild(child)
+    Skin.ScrollBar(scroll)
     return scroll, child
 end
 
-local function button(parent, text, width, onClick)
-    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    b:SetSize(width, 24)
+-- variant: "secondary" (the default), "primary" or "ghost" (Skin.Button).
+local function button(parent, text, width, onClick, variant)
+    local b = Skin.Button(CreateFrame("Button", nil, parent), variant)
+    b:SetSize(width, 28)
     b:SetText(text)
     b:SetScript("OnClick", onClick)
     return b
@@ -182,6 +230,47 @@ end
 local DROPDOWN_ROWS, DROPDOWN_ROW_HEIGHT, DROPDOWN_CAP = 15, 20, 40
 local MODERN_DROPDOWN = MenuUtil ~= nil and C_XMLUtil ~= nil and C_XMLUtil.GetTemplateInfo ~= nil
     and C_XMLUtil.GetTemplateInfo("WowStyle1DropdownTemplate") ~= nil
+
+-- The closed dropdown in the theme: the template's art is hidden behind a themed box with a
+-- chevron, and its text takes the theme's font. The open list stays the game's own.
+local function hideArt(f)
+    if type(f) ~= "table" or not f.GetRegions then return end
+    for _, region in ipairs({ f:GetRegions() }) do
+        if type(region) == "table" and region.IsObjectType and region:IsObjectType("Texture") then region:SetAlpha(0) end
+    end
+end
+
+local function skinDropdown(dd, name)
+    hideArt(dd)
+    local box = Skin.Box(dd, { shape = "control", fill = "input", ring = "border", free = true, layer = "BORDER" })
+    local chevron = Skin.Glyph(dd, "chevron", 14, "muted", "OVERLAY")
+    local text = dd.Text or (name and _G[name .. "Text"])
+    if MODERN_DROPDOWN then
+        box:SetAllPoints(dd)
+    else
+        -- UIDropDownMenu draws its box inside a 16-pixel margin; its arrow button opens the
+        -- list, so it is stretched over the whole box.
+        box:SetPoint("TOPLEFT", dd, "TOPLEFT", 18, -2)
+        box:SetPoint("BOTTOMRIGHT", dd, "BOTTOMRIGHT", -18, 6)
+        local arrow = dd.Button or (name and _G[name .. "Button"])
+        if type(arrow) == "table" and arrow.ClearAllPoints then
+            arrow:ClearAllPoints()
+            arrow:SetAllPoints(box.proxy)
+            for _, getter in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetDisabledTexture", "GetHighlightTexture" }) do
+                local tex = arrow[getter] and arrow[getter](arrow)
+                if type(tex) == "table" then tex:SetAlpha(0) end
+            end
+        end
+    end
+    chevron:SetPoint("RIGHT", box.proxy, "RIGHT", -8, 0)
+    if type(text) == "table" and text.SetFontObject then
+        text:SetFontObject(Skin.fonts.text)
+        text:ClearAllPoints()
+        text:SetPoint("LEFT", box.proxy, "LEFT", 9, 0)
+        text:SetPoint("RIGHT", chevron, "LEFT", -4, 0)
+        text:SetJustifyH("LEFT")
+    end
+end
 
 local function dropdown(parent, name, width, menu)
     local dd
@@ -236,57 +325,113 @@ local function dropdown(parent, name, width, menu)
         end)
         function dd:SetLabel(text) UIDropDownMenu_SetText(self, text) end
     end
+    skinDropdown(dd, name)
     return dd
 end
 
 -- ---------------------------------------------------------------- thread list
 
-local listScroll, listChild = makeScroll(frame, LIST_WIDTH - 10)
-listScroll:SetPoint("TOPLEFT", 18, -46)
-listScroll:SetPoint("BOTTOMLEFT", 18, 48)
-listScroll:SetWidth(LIST_WIDTH - 30)
+-- The list sits on its own panel down the left, divided from the conversation by a line.
+do
+    local listPanel = Skin.Box(frame, { shape = "panel", fill = "panel", free = true, sub = -7 })
+    listPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -SIZE.title - 1)
+    listPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", LIST_WIDTH, SIZE.footer + 1)
+    local listLine = Skin.Line(frame)
+    listLine.vertical = true
+    listLine:SetPoint("TOPLEFT", frame, "TOPLEFT", LIST_WIDTH, -SIZE.title)
+    listLine:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", LIST_WIDTH, SIZE.footer)
+end
+
+local listScroll, listChild = makeScroll(frame, SIZE.row)
+listScroll:SetPoint("TOPLEFT", 8, -SIZE.title - 6)
+listScroll:SetPoint("BOTTOMLEFT", 8, SIZE.footer + 6)
+listScroll:SetWidth(SIZE.row)
 local rows, headers = {}, {}
+
+-- Compact (a setting): one line per thread, its machine and project in the tooltip.
+local function compactList() return T3WoWDB ~= nil and T3WoWDB.settings ~= nil and T3WoWDB.settings.compact == true end
 
 local function header(index)
     local h = headers[index]
     if not h then
         h = CreateFrame("Button", nil, listChild)
-        h:SetSize(LIST_WIDTH - 40, 22)
-        h.text = h:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        h.text:SetPoint("LEFT", 4, 0)
-        h.line = h:CreateTexture(nil, "BACKGROUND")
-        h.line:SetColorTexture(1, 0.82, 0, 0.15)
-        h.line:SetAllPoints()
+        h:SetSize(SIZE.row, 26)
+        h.chevron = Skin.Glyph(h, "chevron", 12, "label")
+        h.chevron:SetPoint("LEFT", 4, 0)
+        h.text = h:CreateFontString(nil, "OVERLAY")
+        h.text:SetFontObject(Skin.fonts.label)
+        h.text:SetPoint("LEFT", 20, 0)
+        h.count = h:CreateFontString(nil, "OVERLAY")
+        h.count:SetFontObject(Skin.fonts.label)
+        h.count:SetPoint("RIGHT", -8, 0)
         headers[index] = h
     end
     return h
+end
+
+local function rowTooltip(self)
+    local t = self.thread
+    if not t or not compactList() then return end
+    local e = env(t.e)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(t.t ~= "" and t.t or "Untitled", 1, 1, 1)
+    GameTooltip:AddLine(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""), 0.7, 0.7, 0.7)
+    GameTooltip:AddLine(statusText(t.s))
+    GameTooltip:Show()
 end
 
 local function row(index)
     local r = rows[index]
     if not r then
         r = CreateFrame("Button", nil, listChild)
-        r:SetSize(LIST_WIDTH - 40, 36)
-        r.highlight = r:CreateTexture(nil, "BACKGROUND")
-        r.highlight:SetAllPoints()
-        r.title = r:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        r.title:SetPoint("TOPLEFT", 6, -4)
-        r.title:SetPoint("RIGHT", -64, 0)
+        r:SetSize(SIZE.row, 44)
+        r.box = Skin.Box(r, { shape = "control", fill = false, ring = false })
+        r.title = r:CreateFontString(nil, "OVERLAY")
+        r.title:SetFontObject(Skin.fonts.strong)
         r.title:SetJustifyH("LEFT")
         r.title:SetWordWrap(false)
-        r.sub = r:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        r.sub:SetPoint("BOTTOMLEFT", 6, 4)
-        r.sub:SetPoint("RIGHT", -40, 0)
+        r.sub = r:CreateFontString(nil, "OVERLAY")
+        r.sub:SetFontObject(Skin.fonts.small)
         r.sub:SetJustifyH("LEFT")
         r.sub:SetWordWrap(false)
-        r.status = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.status:SetPoint("TOPRIGHT", -6, -5)
-        r.age = r:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        r.age:SetPoint("BOTTOMRIGHT", -6, 5)
+        r.status = Skin.Pill(r)
+        r.dot = Skin.Box(r, { shape = "pill", fill = "dim", height = 6, free = true, layer = "ARTWORK" })
+        r.dot.proxy:SetSize(6, 6)
+        r.age = r:CreateFontString(nil, "OVERLAY")
+        r.age:SetFontObject(Skin.fonts.small)
         r:SetScript("OnClick", function(self) UI.Select(self.thread) end)
+        r:SetScript("OnEnter", rowTooltip)
+        r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        Skin.Hover(r)
         rows[index] = r
     end
     return r
+end
+
+-- Comfortable: title and status pill, machine · project and age under them. Compact: a
+-- status dot, the title and the age on one line.
+local function layoutRow(r, compact)
+    r.title:ClearAllPoints()
+    r.sub:ClearAllPoints()
+    r.age:ClearAllPoints()
+    r.status:ClearAllPoints()
+    r.dot:ClearAllPoints()
+    if compact then
+        r.dot:SetPoint("LEFT", r, "LEFT", 9, 0)
+        r.title:SetPoint("LEFT", 22, 0)
+        r.title:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
+        r.age:SetPoint("RIGHT", -8, 0)
+    else
+        r.status:SetPoint("TOPRIGHT", r, "TOPRIGHT", -8, -6)
+        r.title:SetPoint("TOPLEFT", 10, -7)
+        r.title:SetPoint("RIGHT", r.status.box.proxy, "LEFT", -6, 0)
+        r.age:SetPoint("BOTTOMRIGHT", -8, 7)
+        r.sub:SetPoint("BOTTOMLEFT", 10, 7)
+        r.sub:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
+    end
+    r.sub:SetShown(not compact)
+    r.status:SetShown(not compact)
+    r.dot:SetShown(compact)
 end
 
 -- Show more, at the end of a group with more threads than the companion listed: the next
@@ -296,7 +441,7 @@ local moreButtons = {}
 local function moreButton(key)
     local b = moreButtons[key]
     if not b then
-        b = button(listChild, "Show more", LIST_WIDTH - 60, function(self) ns.Link.Send({ t = "list", g = self.group }) end)
+        b = button(listChild, "Show more", SIZE.row - 8, function(self) ns.Link.Send({ t = "list", g = self.group }) end, "ghost")
         b.group = key
         moreButtons[key] = b
     end
@@ -327,6 +472,8 @@ local function renderList()
             table.insert(groups[groupOf(t)], t)
         end
     end
+    local compact = compactList()
+    local rowHeight = compact and Skin.Theme().compactHeight or Skin.Theme().rowHeight
     local y, rowIndex, headerIndex = 0, 0, 0
     for _, group in ipairs({ { "open", "Open" }, { "working", "Working" }, { "snoozed", "Snoozed" }, { "settled", "Settled" } }) do
         local key, label = group[1], group[2]
@@ -335,14 +482,16 @@ local function renderList()
         -- Only recent settled threads are listed; the count is all of them, as in T3.
         local count = #groups[key]
         if key == "settled" and inbox and inbox.settledTotal then count = math.max(count, inbox.settledTotal) end
-        h.text:SetText(format("%s %s (%d)", collapsed[key] and "+" or "-", label, count))
+        h.text:SetText(label)
+        h.count:SetText(count)
+        Skin.PointGlyph(h.chevron, collapsed[key])
         h:SetPoint("TOPLEFT", 0, -y)
         h:SetScript("OnClick", function()
             collapsed[key] = not collapsed[key]
             renderList()
         end)
         h:Show()
-        y = y + 24
+        y = y + 28
         if not collapsed[key] then
             local placed = {}
             local function place(t, indent)
@@ -352,26 +501,29 @@ local function renderList()
                 rowIndex = rowIndex + 1
                 local r = row(rowIndex)
                 r.thread = t
+                layoutRow(r, compact)
                 r.title:SetText(t.t ~= "" and t.t or "Untitled")
                 local e = env(t.e)
                 r.sub:SetText(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
-                r.status:SetText(statusText(t.s))
+                local s = STATUS[t.s] or { t.s or "?", "a0a0a0" }
+                r.status:Set(s[1], s[2])
+                r.dot:SetColors({ hexColor(s[2]) })
                 r.age:SetText(age(t.at))
                 local isSelected = selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e)
-                r.highlight:SetColorTexture(1, 0.82, 0, isSelected and 0.25 or (indent > 0 and 0.02 or 0.04))
+                r.box:SetColors(isSelected and "selected" or false, isSelected and "selectedRing" or false)
                 r:SetPoint("TOPLEFT", indent, -y)
-                r:SetWidth(LIST_WIDTH - 40 - indent)
+                r:SetSize(SIZE.row - indent, rowHeight)
                 r:Show()
-                y = y + 38
+                y = y + rowHeight + (compact and 1 or 2)
                 for _, child in ipairs(launched[id] or {}) do place(child, math.min(indent + 14, 42)) end
             end
             for _, t in ipairs(groups[key]) do place(t, 0) end
             -- An older companion sends no "more": no row.
             if inbox and type(inbox.more) == "table" and inbox.more[key] then
                 local b = moreButton(key)
-                b:SetPoint("TOPLEFT", 10, -y - 2)
+                b:SetPoint("TOPLEFT", 4, -y - 2)
                 b:Show()
-                y = y + 30
+                y = y + 32
             end
         end
     end
@@ -381,42 +533,74 @@ end
 -- ---------------------------------------------------------------- conversation
 
 local right = CreateFrame("Frame", nil, frame)
-right:SetPoint("TOPLEFT", LIST_WIDTH + 10, -46)
-right:SetPoint("BOTTOMRIGHT", -18, 48)
+right:SetPoint("TOPLEFT", LIST_WIDTH + 1, -SIZE.title - 1)
+right:SetPoint("BOTTOMRIGHT", -1, SIZE.footer + 1)
 
-local viewTitle = right:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-viewTitle:SetPoint("TOPLEFT", 4, 0)
-viewTitle:SetPoint("RIGHT", -4, 0)
+-- The thread's title, then its status pill, machine and age; a line under them.
+local viewTitle = right:CreateFontString(nil, "OVERLAY")
+viewTitle:SetFontObject(Skin.fonts.title)
+viewTitle:SetPoint("TOPLEFT", 18, -12)
+viewTitle:SetPoint("RIGHT", -18, 0)
 viewTitle:SetJustifyH("LEFT")
 viewTitle:SetWordWrap(false)
-local viewMeta = right:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -3)
+local viewPill = Skin.Pill(right)
+viewPill:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -6)
+local viewMeta = right:CreateFontString(nil, "OVERLAY")
+viewMeta:SetFontObject(Skin.fonts.small)
 viewMeta:SetJustifyH("LEFT")
+do
+    local headerLine = Skin.Line(right)
+    headerLine:SetPoint("TOPLEFT", 0, -SIZE.header)
+    headerLine:SetPoint("TOPRIGHT", 0, -SIZE.header)
+end
+
+-- What the header says under the title: a status (as a pill) and the rest, or just text.
+local function setViewMeta(status, text)
+    viewMeta:ClearAllPoints()
+    if status then
+        local s = STATUS[status] or { status, "a0a0a0" }
+        viewPill:Set(s[1], s[2])
+        viewPill:SetShown(true)
+        viewMeta:SetPoint("LEFT", viewPill.box.proxy, "RIGHT", 6, 0)
+    else
+        viewPill:SetShown(false)
+        viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -8)
+    end
+    viewMeta:SetText(text or "")
+end
 
 -- The conversation takes whatever width the list leaves; it follows the window's size.
-local function messageWidth() return frame:GetWidth() - LIST_WIDTH - 70 end
+local function messageWidth() return frame:GetWidth() - LIST_WIDTH - 46 end
 local messageScroll, messageChild = makeScroll(right, messageWidth())
-messageScroll:SetPoint("TOPLEFT", 0, -40)
-messageScroll:SetPoint("BOTTOMRIGHT", -24, 92)
+messageScroll:SetPoint("TOPLEFT", 18, -SIZE.header - 12)
+messageScroll:SetPoint("BOTTOMRIGHT", -26, 100)
 local messageStrings = {}
-local earlier = button(messageChild, "Show earlier messages", 180, function() ns.Link.Send({ t = "more" }) end)
+local earlier = button(messageChild, "Show earlier messages", 180, function() ns.Link.Send({ t = "more" }) end, "ghost")
 local openCopy -- the copy box, made after the composer
 
--- Each message has a button over it: clicking a message opens it in the copy box.
+-- Each message has a button over it: clicking a message opens it in the copy box. Your
+-- messages sit in a bubble on the right; the agent's run the full width.
 local function messageString(index)
     local fs = messageStrings[index]
     if not fs then
-        fs = messageChild:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
+        fs = messageChild:CreateFontString(nil, "OVERLAY")
+        fs:SetFontObject(Skin.fonts.text)
         fs:SetWidth(messageWidth() - 8)
         fs:SetJustifyH("LEFT")
         fs:SetWordWrap(true)
         fs:SetSpacing(2)
+        fs.bubble = Skin.Box(messageChild, { shape = "panel", fill = "raised", ring = "border", free = true })
+        fs.bubble:SetPoint("TOPLEFT", fs, "TOPLEFT", -SIZE.bubbleX, SIZE.bubbleY)
+        fs.bubble:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", SIZE.bubbleX, -SIZE.bubbleY)
+        fs.bubble:Hide()
         local hit = CreateFrame("Button", nil, messageChild)
         hit:SetPoint("TOPLEFT", fs, "TOPLEFT", -4, 4)
         hit:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", 4, -4)
-        local glow = hit:CreateTexture(nil, "HIGHLIGHT")
-        glow:SetAllPoints()
-        glow:SetColorTexture(1, 1, 1, 0.06)
+        -- The hover tint sits behind the text, on the conversation itself.
+        fs.hover = Skin.Box(messageChild, { shape = "control", fill = "hover", free = true, sub = -7 })
+        fs.hover:SetPoint("TOPLEFT", fs, "TOPLEFT", -6, 5)
+        fs.hover:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", 6, -5)
+        fs.hover:Hide()
         hit:SetScript("OnClick", function(self) openCopy(self.copyText) end)
         hit:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -424,6 +608,9 @@ local function messageString(index)
             GameTooltip:Show()
         end)
         hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        hit:HookScript("OnEnter", function() if not fs.bubble.shown then fs.hover:Show() end end)
+        hit:HookScript("OnLeave", function() fs.hover:Hide() end)
+        hit:HookScript("OnHide", function() fs.hover:Hide() end)
         hit:Hide()
         fs.hit = hit
         messageStrings[index] = fs
@@ -445,16 +632,39 @@ local function place(region, x, after)
     flow.last, flow.x, flow.gap = region, x, after
 end
 
+-- A message: yours in a bubble against the right edge, as wide as its text needs up to
+-- three quarters of the conversation; the agent's the full width.
+local function placeMessage(fs, text, mine)
+    local full = messageWidth() - 8
+    fs.bubble:SetShown(mine)
+    if mine then
+        local most = floor(full * 0.75)
+        fs:SetWidth(most)
+        fs:SetText(text)
+        local width = math.min(most, math.ceil((fs:GetStringWidth() or most) + 1))
+        if width < 40 then width = 40 end
+        fs:SetWidth(width)
+        flow.gap = flow.gap + SIZE.bubbleY
+        place(fs, full + 4 - width - SIZE.bubbleX, 18 + SIZE.bubbleY)
+    else
+        fs:SetWidth(full)
+        fs:SetText(text)
+        place(fs, 4, 18)
+    end
+end
+
 local newPanel = CreateFrame("Frame", nil, right)
-newPanel:SetPoint("TOPLEFT", 0, -40)
-newPanel:SetPoint("BOTTOMRIGHT", -24, 92)
-local newHelp = newPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+newPanel:SetPoint("TOPLEFT", 18, -SIZE.header - 12)
+newPanel:SetPoint("BOTTOMRIGHT", -26, 100)
+local newHelp = newPanel:CreateFontString(nil, "OVERLAY")
+newHelp:SetFontObject(Skin.fonts.muted)
 newHelp:SetPoint("TOPLEFT", 4, -8)
 newHelp:SetPoint("RIGHT", -4, 0)
 newHelp:SetJustifyH("LEFT")
 -- The machine and project dropdowns. The project list is the picked machine's.
 local function composing() return selected ~= nil and selected.new end
-local envLabel = newPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+local envLabel = newPanel:CreateFontString(nil, "OVERLAY")
+envLabel:SetFontObject(Skin.fonts.strong)
 envLabel:SetPoint("TOPLEFT", newHelp, "BOTTOMLEFT", 0, -20)
 envLabel:SetText("Machine")
 local envMenu = dropdown(newPanel, "T3WoWMachineMenu", 240, {
@@ -472,7 +682,8 @@ local envMenu = dropdown(newPanel, "T3WoWMachineMenu", 240, {
     end,
 })
 envMenu:SetPoint("LEFT", envLabel, "LEFT", 70, 0)
-local projectLabel = newPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+local projectLabel = newPanel:CreateFontString(nil, "OVERLAY")
+projectLabel:SetFontObject(Skin.fonts.strong)
 projectLabel:SetPoint("TOPLEFT", envLabel, "BOTTOMLEFT", 0, -22)
 projectLabel:SetText("Project")
 local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
@@ -515,7 +726,8 @@ local scrollToEnd = false
 -- the last piece; then, if asked, the conversation scrolls to its end.
 local function fit(stickToBottom)
     local top, bottom = messageChild:GetTop(), flow.last and flow.last:GetBottom()
-    if top and bottom then messageChild:SetHeight(math.max(top - bottom + 8, 1)) end
+    -- The space under the last piece counts: a bubble or the question's card reaches into it.
+    if top and bottom then messageChild:SetHeight(math.max(top - bottom + math.max(8, flow.gap or 0), 1)) end
     messageScroll:UpdateScrollChildRect()
     if stickToBottom then messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange()) end
 end
@@ -591,13 +803,18 @@ approvalOpen:Hide()
 local askSend = button(messageChild, "Send answer", 120, function()
     sendAnswer(nil)
     UI.Refresh()
-end)
+end, "primary")
 askSend:Hide()
+
+-- The question (or the approval note) sits on a card, its content inset by SIZE.card.
+local askCard = Skin.Box(messageChild, { shape = "panel", fill = "card", ring = "border", free = true, sub = -8 })
+askCard:Hide()
 
 local function askString(index)
     local fs = askStrings[index]
     if not fs then
-        fs = messageChild:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
+        fs = messageChild:CreateFontString(nil, "OVERLAY")
+        fs:SetFontObject(Skin.fonts.text)
         fs:SetJustifyH("LEFT")
         fs:SetWordWrap(true)
         fs:SetSpacing(2)
@@ -606,11 +823,22 @@ local function askString(index)
     return fs
 end
 
+-- An option is a chip: a round mark for one pick, a square one where several may be picked.
 local function askButton(index)
     local b = askButtons[index]
     if not b then
-        b = CreateFrame("Button", nil, messageChild, "UIPanelButtonTemplate")
-        b:SetHeight(22)
+        b = Skin.Button(CreateFrame("Button", nil, messageChild), "chip")
+        b:SetHeight(28)
+        b:GetFontString():ClearAllPoints()
+        b:GetFontString():SetPoint("LEFT", 27, 0)
+        b.mark = Skin.Box(b, { shape = "pill", fill = "off", ring = "border", height = 12, free = true, layer = "ARTWORK" })
+        b.mark:SetPoint("LEFT", b, "LEFT", 9, 0)
+        b.mark.proxy:SetSize(12, 12)
+        b.dot = Skin.Box(b, { shape = "pill", fill = "accent", height = 6, free = true, layer = "ARTWORK", sub = 2 })
+        b.dot:SetPoint("CENTER", b.mark.proxy, "CENTER")
+        b.dot.proxy:SetSize(6, 6)
+        b.tick = Skin.Glyph(b, "check", 14, "accent", "OVERLAY")
+        b.tick:SetPoint("CENTER", b.mark.proxy, "CENTER", 1, 1)
         b:SetScript("OnClick", function(self)
             local picks = askState.picks[self.qi] or {}
             if self.multi then
@@ -621,14 +849,14 @@ local function askButton(index)
             askState.picks[self.qi] = picks
             renderView()
         end)
-        b:SetScript("OnEnter", function(self)
+        b:HookScript("OnEnter", function(self)
             if self.desc and self.desc ~= "" and self.desc ~= self.label then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 GameTooltip:SetText(self.desc, 1, 1, 1, 1, true)
                 GameTooltip:Show()
             end
         end)
-        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        b:HookScript("OnLeave", function() GameTooltip:Hide() end)
         askButtons[index] = b
     end
     return b
@@ -639,6 +867,17 @@ local function hideAsk()
     for _, b in ipairs(askButtons) do b:Hide() end
     askSend:Hide()
     approvalOpen:Hide()
+    askCard:Hide()
+end
+
+-- The card spans the conversation's width, from the top of `first` to the bottom of `last`
+-- (both placed SIZE.card in from its left).
+local function showCard(first, last)
+    local inner = messageWidth() - 8 - 2 * SIZE.card
+    askCard:ClearAllPoints()
+    askCard:SetPoint("TOPLEFT", first, "TOPLEFT", -SIZE.card, SIZE.card)
+    askCard:SetPoint("BOTTOMRIGHT", last, "BOTTOMLEFT", inner + SIZE.card, -SIZE.card)
+    askCard:Show()
 end
 
 -- Draws the question (or the approval note) below what is laid out so far.
@@ -646,53 +885,85 @@ local function renderAsk(view)
     hideAsk()
     local ask = view.ask
     if setPlaceholder then setPlaceholder() end
+    local x, width = 4 + SIZE.card, messageWidth() - 8 - 2 * SIZE.card
+    local warn = Skin.Hex("warn")
     if not ask then
         if view.approval then
             local fs = askString(1)
-            fs:SetWidth(messageWidth() - 8)
-            fs:SetText("|cffff8000Waiting for your approval.|r Approve or deny it in T3: by design, T3 doesn't take approvals from anywhere else. Open in T3 brings it up on this thread; Stop cancels the run from here.")
-            place(fs, 4, 8)
-            place(approvalOpen, 4, 8)
+            fs:SetFontObject(Skin.fonts.text)
+            fs:SetWidth(width)
+            fs:SetText("|cff" .. warn .. "Waiting for your approval.|r Approve or deny it in T3: by design, T3 doesn't take approvals from anywhere else. Open in T3 brings it up on this thread; Stop cancels the run from here.")
+            flow.gap = flow.gap + SIZE.card
+            place(fs, x, 10)
+            place(approvalOpen, x, 18 + SIZE.card)
+            showCard(fs, approvalOpen)
         end
         return
     end
     if askState.k ~= ask.k then askState = { k = ask.k, picks = {} } end
-    local width = messageWidth() - 16
     local si, bi = 0, 0
+    local first
+    flow.gap = flow.gap + SIZE.card
+    local blocked = blockedReason("answer")
     for qi, q in ipairs(ask.qs or {}) do
         si = si + 1
         local fs = askString(si)
+        fs:SetFontObject(Skin.fonts.text)
         fs:SetWidth(width)
-        fs:SetText(format("|cffff8000%s|r%s\n%s", (q.h and q.h ~= "") and q.h or "Question",
-            q.m and " |cffa0a0a0(pick any)|r" or "", q.q or ""))
-        place(fs, 4, 6)
+        fs:SetText(format("|cff%s%s|r%s\n%s", warn, ((q.h and q.h ~= "") and q.h or "Question"):upper(),
+            q.m and (" |cff" .. Skin.Hex("dim") .. "(pick any)|r") or "", q.q or ""))
+        place(fs, x, 8)
+        first = first or fs
+        -- Chips run left to right and wrap; each row hangs under the one before.
+        local rowStart, rowWidth, prev = nil, 0, nil
         for oi, o in ipairs(q.o or {}) do
             bi = bi + 1
             local b = askButton(bi)
             b.qi, b.oi, b.multi, b.desc, b.label = qi, oi, q.m, o.d, o.l
-            local picked = askState.picks[qi] and askState.picks[qi][oi]
-            local mark = q.m and (picked and "[x] " or "[  ] ") or ""
-            b:SetText(picked and ("|cff40ff40" .. mark .. o.l .. "|r") or (mark .. o.l))
-            b:SetWidth(math.min(width, math.max(140, b:GetFontString():GetStringWidth() + 32)))
-            if picked then b:LockHighlight() else b:UnlockHighlight() end
-            b:SetEnabled(not blockedReason("answer"))
-            place(b, 12, 3)
+            local picked = askState.picks[qi] and askState.picks[qi][oi] and true or false
+            b:SetText(o.l)
+            local w = math.min(width, math.max(72, b:GetFontString():GetStringWidth() + 40))
+            b:SetWidth(w)
+            Skin.SetVariant(b, picked and "picked" or "chip")
+            b.mark.shape = q.m and "control" or "pill"
+            b.mark:SetColors("off", picked and "accent" or "border")
+            b.dot:SetShown(picked and not q.m)
+            b.tick:SetShown(picked and q.m and true or false)
+            b:SetEnabled(not blocked)
+            if rowStart and rowWidth + 6 + w <= width then
+                b:ClearAllPoints()
+                b:SetPoint("TOPLEFT", prev, "TOPRIGHT", 6, 0)
+                b:Show()
+                rowWidth = rowWidth + 6 + w
+            else
+                place(b, x, 6)
+                rowStart, rowWidth = b, w
+            end
+            prev = b
         end
         flow.gap = flow.gap + 8
     end
     local sending = askState.sent == ask.k and GetTime() - (askState.sentAt or 0) < ANSWER_TIMEOUT
-    local blocked = blockedReason("answer")
     askSend:SetText(sending and "Sending…" or "Send answer")
     askSend:SetEnabled(not sending and not blocked)
-    place(askSend, 12, 10)
     si = si + 1
     local hint = askString(si)
-    hint:SetWidth(math.max(80, width - 150))
-    hint:SetText(blocked and ("|cffff8000" .. blocked .. " Answer it in T3.|r")
-        or "|cffa0a0a0or type your own answer below and press Enter|r")
-    hint:ClearAllPoints()
-    hint:SetPoint("LEFT", askSend, "RIGHT", 10, 0)
-    hint:Show()
+    hint:SetFontObject(Skin.fonts.small)
+    if blocked then
+        place(askSend, x, 8)
+        hint:SetWidth(width)
+        hint:SetText("|cffff8000" .. blocked .. " Answer it in T3.|r")
+        place(hint, x, 18 + SIZE.card)
+        showCard(first or askSend, hint)
+    else
+        place(askSend, x, 18 + SIZE.card)
+        showCard(first or askSend, askSend)
+        hint:SetWidth(math.max(80, width - 140))
+        hint:SetText("or type your own answer below and press Enter")
+        hint:ClearAllPoints()
+        hint:SetPoint("LEFT", askSend, "RIGHT", 10, 0)
+        hint:Show()
+    end
 end
 
 function renderView()
@@ -702,6 +973,7 @@ function renderView()
     for _, fs in ipairs(messageStrings) do
         fs:Hide()
         fs.hit:Hide()
+        fs.bubble:Hide()
     end
     hideAsk()
     earlier:Hide()
@@ -711,7 +983,7 @@ function renderView()
         local e = envById(selected.env)
         local project = selectedProject()
         viewTitle:SetText("New thread")
-        viewMeta:SetText("Type the task below and press Send.")
+        setViewMeta(nil, "Type the task below and press Start.")
         local blocked = blockedReason("new")
         newHelp:SetText(blocked and ("|cffff8000" .. blocked .. "|r") or "The thread uses the project's default model and mode.")
         local noMachines = #(inbox and inbox.envs or {}) == 0
@@ -724,7 +996,7 @@ function renderView()
     messageScroll:Show()
     if not selected then
         viewTitle:SetText("Pick a thread")
-        viewMeta:SetText("")
+        setViewMeta(nil, "")
         return
     end
     local view = inbox and inbox.view
@@ -733,12 +1005,10 @@ function renderView()
     viewTitle:SetText((view and view.t) or (listed and listed.t) or "")
     local status = (listed and listed.s) or (view and view.s)
     local e = envById(selected.env)
-    viewMeta:SetText(format("%s · %s · %s", statusText(status), e and e.name or "?", age(listed and listed.at)))
+    setViewMeta(status, format("%s · %s", e and e.name or "?", age(listed and listed.at)))
     if not view then
-        local fs = messageString(1)
-        fs:SetText("|cffa0a0a0Loading…|r")
         flowStart(0)
-        place(fs, 4, 0)
+        placeMessage(messageString(1), "|cff" .. Skin.Hex("dim") .. "Loading…|r", false)
         return
     end
     flowStart(0)
@@ -751,9 +1021,7 @@ function renderView()
     local count = #items
     for i, item in ipairs(items) do
         local fs = messageString(i)
-        local who = item.r == "u" and "|cff7fbfffYou|r" or "|cff40c0c0Agent|r"
-        fs:SetText(who .. "\n" .. item.x)
-        place(fs, 4, 14)
+        placeMessage(fs, item.x, item.r == "u")
         fs.hit.copyText = item.x
         fs.hit:Show()
     end
@@ -772,15 +1040,12 @@ function renderView()
             echo = nil
         else
             local fs = messageString(count + 1)
-            fs:SetText("|cff7fbfffYou|r |cffa0a0a0(sending)|r\n" .. echo.text:gsub("|", "||"))
-            place(fs, 4, 14)
+            placeMessage(fs, "|cff" .. Skin.Hex("dim") .. "(sending)|r\n" .. echo.text:gsub("|", "||"), true)
         end
     end
     renderAsk(view)
     if WORKING[status] then
-        local fs = messageString(count + 2)
-        fs:SetText("|cffffd100Working…|r")
-        place(fs, 4, 14)
+        placeMessage(messageString(count + 2), "|cffffd100Working…|r", false)
     end
     -- Sized now from what the game has laid out, and again next frame, once text heights
     -- have settled.
@@ -791,33 +1056,33 @@ end
 
 -- ---------------------------------------------------------------- composer
 
+-- The box is a card; its outline takes the focus color while you type.
 local inputScroll = CreateFrame("ScrollFrame", nil, right, "UIPanelScrollFrameTemplate")
-inputScroll:SetPoint("BOTTOMLEFT", 4, 4)
-inputScroll:SetPoint("BOTTOMRIGHT", -26, 4)
-inputScroll:SetHeight(76)
-local inputBg = CreateFrame("Frame", nil, right, "BackdropTemplate")
-inputBg:SetPoint("TOPLEFT", inputScroll, -6, 6)
-inputBg:SetPoint("BOTTOMRIGHT", inputScroll, 26, -6)
-inputBg:SetBackdrop({
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 14,
-    insets = { left = 3, right = 3, top = 3, bottom = 3 },
-})
-inputBg:SetBackdropColor(0, 0, 0, 0.8)
-inputBg:SetFrameLevel(inputScroll:GetFrameLevel() - 1)
+inputScroll:SetPoint("BOTTOMLEFT", 28, 22)
+inputScroll:SetPoint("BOTTOMRIGHT", -40, 22)
+inputScroll:SetHeight(60)
+Skin.ScrollBar(inputScroll)
+local inputBg = CreateFrame("Frame", nil, right)
+inputBg:SetPoint("TOPLEFT", inputScroll, -10, 10)
+inputBg:SetPoint("BOTTOMRIGHT", inputScroll, 26, -10)
+inputBg:SetFrameLevel(math.max(0, inputScroll:GetFrameLevel() - 1))
+local inputBox = Skin.Box(inputBg, { shape = "panel", fill = "input", ring = "border" })
 
 local input = CreateFrame("EditBox", nil, inputScroll)
 input:SetMultiLine(true)
 input:SetAutoFocus(false)
-input:SetFontObject(ChatFontNormal)
-input:SetWidth(messageWidth() - 30)
+input:SetFontObject(Skin.fonts.text)
+input:SetTextInsets(0, 0, 2, 2)
+input:SetWidth(messageWidth() - 24)
+input:SetScript("OnEditFocusGained", function() inputBox:SetColors(nil, "focus") end)
+input:SetScript("OnEditFocusLost", function() inputBox:SetColors(nil, "border") end)
 input:SetMaxBytes(2400)
 inputScroll:SetScrollChild(input)
 input:SetScript("OnEscapePressed", input.ClearFocus)
 inputScroll:SetScript("OnMouseDown", function() input:SetFocus() end)
-local placeholder = input:CreateFontString(nil, "OVERLAY", "GameFontDisable")
-placeholder:SetPoint("TOPLEFT", 2, -2)
+local placeholder = input:CreateFontString(nil, "OVERLAY")
+placeholder:SetFontObject(Skin.fonts.small)
+placeholder:SetPoint("TOPLEFT", 0, -3)
 placeholder:SetText("Message the agent (Shift+Enter for a new line)")
 input:SetScript("OnTextChanged", function(self)
     placeholder:SetShown(self:GetText() == "")
@@ -839,31 +1104,27 @@ end)
 -- The game can't write to the clipboard, so a clicked message opens over the conversation
 -- in a read-only box, highlighted: Ctrl+C copies it (or the part you select), and closes
 -- the box, as does Escape.
-local copyBox = CreateFrame("Frame", nil, right, "BackdropTemplate")
-copyBox:SetPoint("TOPLEFT", messageScroll, -4, 4)
-copyBox:SetPoint("BOTTOMRIGHT", messageScroll, 24, -4)
-copyBox:SetBackdrop({
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 14,
-    insets = { left = 3, right = 3, top = 3, bottom = 3 },
-})
-copyBox:SetBackdropColor(0, 0, 0, 0.95)
+local copyBox = CreateFrame("Frame", nil, right)
+copyBox:SetPoint("TOPLEFT", messageScroll, -8, 8)
+copyBox:SetPoint("BOTTOMRIGHT", messageScroll, 24, -8)
+Skin.Box(copyBox, { shape = "panel", fill = "card", ring = "focus" })
 copyBox:SetFrameLevel(messageScroll:GetFrameLevel() + 20)
 copyBox:EnableMouse(true)
 copyBox:Hide()
-local copyHelp = copyBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-copyHelp:SetPoint("TOPLEFT", 10, -10)
+local copyHelp = copyBox:CreateFontString(nil, "OVERLAY")
+copyHelp:SetFontObject(Skin.fonts.small)
+copyHelp:SetPoint("TOPLEFT", 12, -12)
 copyHelp:SetText("Ctrl+C copies the highlighted text. Escape closes.")
-local copyClose = CreateFrame("Button", nil, copyBox, "UIPanelCloseButton")
-copyClose:SetPoint("TOPRIGHT", 2, 2)
+local copyClose = Skin.CloseButton(copyBox, function() copyBox:Hide() end)
+copyClose:SetPoint("TOPRIGHT", -4, -4)
 local copyScroll = CreateFrame("ScrollFrame", nil, copyBox, "UIPanelScrollFrameTemplate")
-copyScroll:SetPoint("TOPLEFT", 10, -28)
-copyScroll:SetPoint("BOTTOMRIGHT", -30, 8)
+copyScroll:SetPoint("TOPLEFT", 12, -32)
+copyScroll:SetPoint("BOTTOMRIGHT", -24, 10)
+Skin.ScrollBar(copyScroll)
 local copyEdit = CreateFrame("EditBox", nil, copyScroll)
 copyEdit:SetMultiLine(true)
 copyEdit:SetAutoFocus(false)
-copyEdit:SetFontObject(ChatFontNormal)
+copyEdit:SetFontObject(Skin.fonts.text)
 copyEdit:SetMaxLetters(0)
 copyEdit:SetWidth(messageWidth() - 8)
 copyScroll:SetScrollChild(copyEdit)
@@ -946,8 +1207,8 @@ end)
 
 -- ---------------------------------------------------------------- buttons and status
 
-local refresh = button(frame, "Refresh", 90, function() ns.Link.Send({ t = "refresh" }) end)
-refresh:SetPoint("BOTTOMLEFT", 18, 16)
+local refresh = button(frame, "Refresh", 84, function() ns.Link.Send({ t = "refresh" }) end)
+refresh:SetPoint("BOTTOMLEFT", 12, 10)
 local newThread = button(frame, "New Thread", 110, function()
     local first = inbox and inbox.envs and inbox.envs[1]
     selected = { new = true, env = first and first.id or "" }
@@ -959,8 +1220,8 @@ newThread:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
 local reload = button(frame, "Reload UI", 100, function() ReloadUI() end)
 reload:SetPoint("LEFT", newThread, "RIGHT", 6, 0)
 
-local send = button(frame, "Send", 90, sendCurrent)
-send:SetPoint("BOTTOMRIGHT", -18, 16)
+local send = button(frame, "Send", 90, sendCurrent, "primary")
+send:SetPoint("BOTTOMRIGHT", -22, 10)
 local settle = button(frame, "Settle", 90, function()
     if not selected or selected.new then return end
     local listed = selectedThread()
@@ -978,7 +1239,8 @@ local stop = button(frame, "Stop", 80, function()
 end)
 stop:SetPoint("RIGHT", settle, "LEFT", -6, 0)
 
-local statusLine = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+local statusLine = frame:CreateFontString(nil, "OVERLAY")
+statusLine:SetFontObject(Skin.fonts.small)
 statusLine:SetPoint("LEFT", reload, "RIGHT", 12, 0)
 statusLine:SetPoint("RIGHT", stop, "LEFT", -12, 0)
 statusLine:SetJustifyH("LEFT")
@@ -1033,7 +1295,15 @@ local function renderStatus()
     else
         connected = "|cff40c040Connected|r"
     end
+    connection:SetWidth(0)
     connection:SetText(connected)
+    -- The pill fits the text, up to the room the title bar has; the dot takes its color.
+    local room = math.max(120, frame:GetWidth() - (title:GetStringWidth() or 60) - 170)
+    local width = math.min(room, math.ceil(connection:GetStringWidth() or 0) + 1)
+    connection:SetWidth(width)
+    connectionPill.proxy:SetWidth(width + 30)
+    local dot = connected:match("^|cff(%x%x%x%x%x%x)")
+    connectionDot:SetColors(dot and { hexColor(dot) } or "dim")
     reload:SetShown(ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil)
     local line = notice
     if not line and inbox and inbox.notes and #inbox.notes > 0 then
@@ -1075,10 +1345,6 @@ local function settings()
     return s
 end
 
-local function hexColor(hex)
-    return tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255, tonumber(hex:sub(5, 6), 16) / 255
-end
-
 local selectThread -- defined with the API below
 
 function UI.OpenThread(threadId, envId)
@@ -1089,37 +1355,30 @@ end
 -- ---------------------------------------------------------------- notifications
 
 local TOAST_WIDTH, TOAST_HEIGHT, TOAST_GAP, TOAST_LIMIT = 320, 60, 6, 10
+-- A notification's icon: a circle in the status color with a check, a cross or a "?".
 local STATUS_ICON = {
-    completed = "Interface\\RaidFrame\\ReadyCheck-Ready",
-    waiting = "Interface\\RaidFrame\\ReadyCheck-Waiting",
-    approval = "Interface\\RaidFrame\\ReadyCheck-Waiting",
-    failed = "Interface\\RaidFrame\\ReadyCheck-NotReady",
-    interrupted = "Interface\\RaidFrame\\ReadyCheck-NotReady",
-    cancelled = "Interface\\RaidFrame\\ReadyCheck-NotReady",
+    completed = "check", idle = "check", rolled_back = "check", waiting = "?", approval = "?",
+    failed = "close", interrupted = "close", cancelled = "close",
 }
 
 -- Notifications stack down from this anchor; "Move notifications" in settings shows it.
 -- It has a notification's exact size and place, so where you drop it is where the first
 -- notification appears.
-local toastAnchor = CreateFrame("Frame", "T3WoWToastAnchor", UIParent, "BackdropTemplate")
+local toastAnchor = CreateFrame("Frame", "T3WoWToastAnchor", UIParent)
 toastAnchor:SetSize(TOAST_WIDTH, TOAST_HEIGHT)
 toastAnchor:SetFrameStrata("DIALOG")
 toastAnchor:SetClampedToScreen(true)
 toastAnchor:SetMovable(true)
 toastAnchor:RegisterForDrag("LeftButton")
-toastAnchor:SetBackdrop({
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 },
-})
-toastAnchor:SetBackdropColor(0.1, 0.4, 0.8, 0.85)
+Skin.Box(toastAnchor, { shape = "panel", fill = "card", ring = "accent" })
 toastAnchor:SetAlpha(0)
 toastAnchor:EnableMouse(false)
-local anchorTitle = toastAnchor:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+local anchorTitle = toastAnchor:CreateFontString(nil, "OVERLAY")
+anchorTitle:SetFontObject(Skin.fonts.strong)
 anchorTitle:SetPoint("CENTER", 0, 8)
 anchorTitle:SetText("T3 WoW notifications appear here")
-local anchorHint = toastAnchor:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+local anchorHint = toastAnchor:CreateFontString(nil, "OVERLAY")
+anchorHint:SetFontObject(Skin.fonts.small)
 anchorHint:SetPoint("CENTER", 0, -9)
 anchorHint:SetText("Drag to move, then click Done moving")
 toastAnchor:SetScript("OnDragStart", toastAnchor.StartMoving)
@@ -1169,31 +1428,34 @@ end
 local function newToast()
     local toast = table.remove(toastPool)
     if toast then return toast end
-    toast = CreateFrame("Button", nil, UIParent, "BackdropTemplate")
+    toast = CreateFrame("Button", nil, UIParent)
     toast:SetSize(TOAST_WIDTH, TOAST_HEIGHT)
     toast:SetFrameStrata("DIALOG")
-    toast:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 16,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 },
-    })
-    toast:SetBackdropColor(0.04, 0.04, 0.07, 0.94)
-    toast.icon = toast:CreateTexture(nil, "ARTWORK")
-    toast.icon:SetSize(32, 32)
-    toast.icon:SetPoint("LEFT", 12, 0)
-    toast.head = toast:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    toast.head:SetPoint("TOPLEFT", toast.icon, "TOPRIGHT", 10, 2)
-    toast.head:SetPoint("RIGHT", -10, 0)
+    toast.box = Skin.Box(toast, { shape = "panel", fill = "card", ring = "border" })
+    toast.circle = Skin.Box(toast, { shape = "pill", fill = "raised", height = 28, free = true, layer = "ARTWORK" })
+    toast.circle:SetPoint("LEFT", toast, "LEFT", 14, 0)
+    toast.circle.proxy:SetSize(28, 28)
+    toast.icon = Skin.Glyph(toast, "check", 18, "text", "OVERLAY")
+    toast.icon:SetPoint("CENTER", toast.circle.proxy, "CENTER")
+    toast.mark = toast:CreateFontString(nil, "OVERLAY")
+    toast.mark:SetFontObject(Skin.fonts.title)
+    toast.mark:SetPoint("CENTER", toast.circle.proxy, "CENTER", 0, 0)
+    toast.mark:SetText("?")
+    toast.head = toast:CreateFontString(nil, "OVERLAY")
+    toast.head:SetFontObject(Skin.fonts.small)
+    toast.head:SetPoint("TOPLEFT", toast.circle.proxy, "TOPRIGHT", 12, 3)
+    toast.head:SetPoint("RIGHT", -12, 0)
     toast.head:SetJustifyH("LEFT")
-    toast.title = toast:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    toast.title = toast:CreateFontString(nil, "OVERLAY")
+    toast.title:SetFontObject(Skin.fonts.strong)
     toast.title:SetPoint("TOPLEFT", toast.head, "BOTTOMLEFT", 0, -3)
-    toast.title:SetPoint("RIGHT", -10, 0)
+    toast.title:SetPoint("RIGHT", -12, 0)
     toast.title:SetJustifyH("LEFT")
     toast.title:SetWordWrap(false)
-    toast.sub = toast:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    toast.sub = toast:CreateFontString(nil, "OVERLAY")
+    toast.sub:SetFontObject(Skin.fonts.small)
     toast.sub:SetPoint("TOPLEFT", toast.title, "BOTTOMLEFT", 0, -3)
-    toast.sub:SetPoint("RIGHT", -10, 0)
+    toast.sub:SetPoint("RIGHT", -12, 0)
     toast.sub:SetJustifyH("LEFT")
     toast:EnableMouse(true)
     toast:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -1241,11 +1503,19 @@ local function showToast(event)
         end
     end
     toast.threadId, toast.envId, toast.inT3 = event.id, event.e, event.s == "approval" and settings().approvalOpensT3 == true
-    toast.icon:SetTexture(STATUS_ICON[event.s] or STATUS_ICON.completed)
+    local icon = STATUS_ICON[event.s] or "check"
+    local r, g, b = hexColor(s[2])
+    toast.circle:SetColors({ r, g, b, 0.18 })
+    toast.icon:SetTexture("Interface\\AddOns\\T3WoW\\Media\\" .. (icon == "?" and "check" or icon))
+    Skin.SetGlyphColor(toast.icon, { r, g, b })
+    toast.icon:SetShown(icon ~= "?")
+    toast.mark:SetTextColor(r, g, b)
+    toast.mark:SetShown(icon == "?")
     toast.head:SetText(format("T3 WoW · |cff%s%s|r", s[2], s[1]))
     toast.title:SetText(event.t ~= "" and event.t or "Thread")
     toast.sub:SetText((machine and machine.name or "") .. (event.id and (toast.inT3 and "  ·  click to open in T3" or "  ·  click to open") or ""))
-    toast:SetBackdropBorderColor(hexColor(s[2]))
+    -- Classic outlines a notification in its status color, as the game's own alerts do.
+    toast.box:SetColors(nil, Skin.ThemeKey() == "classic" and { r, g, b, 1 } or "border")
     toast.duration = settings().duration
     toast.shownAt = GetTime()
     toast.hovered = false
@@ -1277,194 +1547,245 @@ end
 
 -- ---------------------------------------------------------------- settings panel
 
-local settingsPanel = CreateFrame("Frame", "T3WoWSettings", frame, "BackdropTemplate")
-settingsPanel:SetSize(270, 474)
-settingsPanel:SetPoint("TOPLEFT", frame, "TOPRIGHT", -4, 0)
-settingsPanel:SetBackdrop({
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 11, right = 12, top = 12, bottom = 11 },
-})
+local refreshThemeControls -- set with the settings panel's controls
+local settingsPanel = CreateFrame("Frame", "T3WoWSettings", frame)
+settingsPanel:SetSize(SIZE.settings, 560)
+settingsPanel:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+Skin.Box(settingsPanel, { shape = "panel", fill = "bg", ring = "border", ringLayer = "BORDER", sub = -8 })
 settingsPanel:EnableMouse(true)
 settingsPanel:Hide()
 
-local settingsTitle = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-settingsTitle:SetPoint("TOP", 0, -18)
-settingsTitle:SetText("Settings")
-local settingsClose = CreateFrame("Button", nil, settingsPanel, "UIPanelCloseButton")
-settingsClose:SetPoint("TOPRIGHT", -6, -6)
+do
+    local settingsTitle = settingsPanel:CreateFontString(nil, "OVERLAY")
+    settingsTitle:SetFontObject(Skin.fonts.title)
+    settingsTitle:SetPoint("LEFT", settingsPanel, "TOPLEFT", 16, -SIZE.title / 2)
+    settingsTitle:SetText("Settings")
+    local settingsClose = Skin.CloseButton(settingsPanel, function() settingsPanel:Hide() end)
+    settingsClose:SetPoint("TOPRIGHT", -8, -8)
+    local settingsLine = Skin.Line(settingsPanel)
+    settingsLine:SetPoint("TOPLEFT", 1, -SIZE.title)
+    settingsLine:SetPoint("TOPRIGHT", -1, -SIZE.title)
 
-local checks = {}
-local layoutY = -48
+    local checks = {}
+    local layoutY = -SIZE.title - 12
 
-local function sectionLabel(text)
-    local label = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    label:SetPoint("TOPLEFT", 20, layoutY)
-    label:SetText(text)
-    layoutY = layoutY - 22
-end
+    local function sectionLabel(text)
+        local label = settingsPanel:CreateFontString(nil, "OVERLAY")
+        label:SetFontObject(Skin.fonts.label)
+        label:SetPoint("TOPLEFT", 16, layoutY)
+        label:SetText(text)
+        layoutY = layoutY - 22
+    end
 
--- get/set default to the settings table entry named key.
-local function checkbox(text, key, get, set)
-    local check = CreateFrame("CheckButton", nil, settingsPanel, "UICheckButtonTemplate")
-    check:SetSize(24, 24)
-    check:SetPoint("TOPLEFT", 18, layoutY)
-    local label = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    label:SetPoint("LEFT", check, "RIGHT", 4, 0)
-    label:SetText(text)
-    check.get = get or function() return settings()[key] end
-    check.set = set or function(value) settings()[key] = value end
-    check:SetScript("OnClick", function(self) self.set(self:GetChecked() and true or false) end)
-    checks[#checks + 1] = check
-    layoutY = layoutY - 26
-    return check
-end
+    -- get/set default to the settings table entry named key.
+    local function checkbox(text, key, get, set)
+        local check = Skin.Check(settingsPanel)
+        check:SetPoint("TOPLEFT", 16, layoutY)
+        local label = settingsPanel:CreateFontString(nil, "OVERLAY")
+        label:SetFontObject(Skin.fonts.text)
+        label:SetPoint("LEFT", check, "RIGHT", 8, 0)
+        label:SetText(text)
+        check.get = get or function() return settings()[key] end
+        check.set = set or function(value) settings()[key] = value end
+        check:SetScript("OnClick", function(self)
+            self.set(self:GetChecked() and true or false)
+            Skin.UpdateCheck(self)
+        end)
+        checks[#checks + 1] = check
+        layoutY = layoutY - 26
+        return check
+    end
 
-local function durationName(d)
-    return d == 0 and "Until clicked" or (d .. " seconds")
-end
+    -- A label on the left of a row, its control at SIZE.field.
+    local function fieldLabel(text)
+        local label = settingsPanel:CreateFontString(nil, "OVERLAY")
+        label:SetFontObject(Skin.fonts.text)
+        label:SetPoint("TOPLEFT", 16, layoutY - 7)
+        label:SetText(text)
+        return label
+    end
 
-local refreshToastControls -- set below, once the controls exist
-
-sectionLabel("Notifications")
-checkbox("Line in chat", "chat")
-checkbox("Sound", "sound")
--- Last, right above the options it switches on and off.
-checkbox("On-screen notification", "toasts", nil, function(value)
-    settings().toasts = value
-    refreshToastControls()
-end)
-
--- How long notifications stay: a dropdown.
-local durationLabel = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-durationLabel:SetPoint("TOPLEFT", 24, layoutY - 8)
-durationLabel:SetText("Stay on screen")
-local durationMenu = CreateFrame("Frame", "T3WoWDurationMenu", settingsPanel, "UIDropDownMenuTemplate")
-durationMenu:SetPoint("LEFT", durationLabel, "RIGHT", -6, -2)
-UIDropDownMenu_SetWidth(durationMenu, 110)
-UIDropDownMenu_Initialize(durationMenu, function(_, level)
-    for _, d in ipairs(DURATIONS) do
-        local info = UIDropDownMenu_CreateInfo()
-        info.text = durationName(d)
-        -- UIDropDownMenu_Initialize also runs this once while the addon loads, before
-        -- saved settings exist, so read them without creating anything.
-        local saved = T3WoWDB and T3WoWDB.settings
-        info.checked = saved ~= nil and saved.duration == d
-        info.func = function()
-            settings().duration = d
-            UIDropDownMenu_SetText(durationMenu, durationName(d))
-            CloseDropDownMenus()
+    -- Greys a dropdown out (and back), under either menu system.
+    local function setDropdownEnabled(dd, on)
+        if MODERN_DROPDOWN then
+            dd:SetEnabled(on)
+        elseif on then
+            UIDropDownMenu_EnableDropDown(dd)
+        else
+            UIDropDownMenu_DisableDropDown(dd)
         end
-        UIDropDownMenu_AddButton(info, level)
+        dd:SetAlpha(on and 1 or 0.5)
     end
-end)
-layoutY = layoutY - 34
 
--- How many stay on screen at once: a slider, 1 to 10. The oldest makes room.
-local maxLabel = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-maxLabel:SetPoint("TOPLEFT", 24, layoutY - 4)
-maxLabel:SetText("At most")
-local maxSlider = CreateFrame("Slider", "T3WoWMaxToasts", settingsPanel, "BackdropTemplate")
-maxSlider:SetOrientation("HORIZONTAL")
-maxSlider:SetSize(110, 16)
-maxSlider:SetPoint("LEFT", maxLabel, "RIGHT", 12, 0)
-maxSlider:SetBackdrop({
-    bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
-    edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
-    tile = true, tileSize = 8, edgeSize = 8,
-    insets = { left = 3, right = 3, top = 6, bottom = 6 },
-})
-maxSlider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
-maxSlider:SetMinMaxValues(1, TOAST_LIMIT)
-maxSlider:SetValueStep(1)
-if maxSlider.SetObeyStepOnDrag then maxSlider:SetObeyStepOnDrag(true) end
-maxSlider:EnableMouseWheel(true)
-local maxValue = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-maxValue:SetPoint("LEFT", maxSlider, "RIGHT", 8, 0)
-local function maxName(n) return n .. " at a time" end
-maxSlider:SetScript("OnValueChanged", function(self, value)
-    local n = math.floor(value + 0.5)
-    maxValue:SetText(maxName(n))
-    if settings().maxToasts ~= n then
-        settings().maxToasts = n
-        trimToasts()
+    -- Where a dropdown sits: UIDropDownMenu draws its box 18 pixels in from its left.
+    local function placeDropdown(dd)
+        dd:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", SIZE.field - (MODERN_DROPDOWN and 0 or 18), layoutY - (MODERN_DROPDOWN and 2 or 0))
     end
-end)
-maxSlider:SetScript("OnMouseWheel", function(self, delta) self:SetValue(self:GetValue() + delta) end)
-layoutY = layoutY - 28
 
-local moveButton = button(settingsPanel, "Move notifications", 110, nil)
-moveButton:SetPoint("TOPLEFT", 22, layoutY - 2)
-local testButton = button(settingsPanel, "Test", 110, function()
-    -- Uses your most recent thread, so clicking the sample opens a real thread too.
-    local latest = inbox and inbox.threads and inbox.threads[1]
-    local latestEnv = latest and env(latest.e)
-    showToast({
-        s = "completed",
-        t = latest and ("Test: " .. latest.t) or "Test notification",
-        id = latest and latest.id,
-        e = latestEnv and latestEnv.id,
+    local function durationName(d)
+        return d == 0 and "Until clicked" or (d .. " seconds")
+    end
+
+    local refreshToastControls -- set below, once the controls exist
+
+    -- The look: the theme, and how tightly the thread list is packed. Both apply at once.
+    sectionLabel("Appearance")
+    fieldLabel("Theme")
+    local themeMenu = dropdown(settingsPanel, "T3WoWThemeMenu", 150, {
+        entries = function()
+            local list = {}
+            for _, key in ipairs(Skin.ORDER) do
+                local name = Skin.THEMES[key].name
+                if key == "flat" and type(ElvUI) == "table" then name = name .. " (ElvUI colors)" end
+                list[#list + 1] = { text = name, value = key }
+            end
+            return list
+        end,
+        isSelected = function(key) return Skin.ThemeKey() == key end,
+        pick = function(key) Skin.Set(key) end,
     })
-end)
-testButton:SetPoint("LEFT", moveButton, "RIGHT", 6, 0)
-layoutY = layoutY - 38
+    placeDropdown(themeMenu)
+    layoutY = layoutY - 34
+    checkbox("Compact thread list", "compact", nil, function(value)
+        settings().compact = value
+        UI.Refresh()
+    end)
+    layoutY = layoutY - 8
 
-local function setAnchorUnlocked(unlocked)
-    placeAnchor()
-    toastAnchor:SetAlpha(unlocked and 1 or 0)
-    toastAnchor:EnableMouse(unlocked)
-    moveButton:SetText(unlocked and "Done moving" or "Move notifications")
-end
-moveButton:SetScript("OnClick", function() setAnchorUnlocked(toastAnchor:GetAlpha() == 0) end)
+    sectionLabel("Notifications")
+    checkbox("Line in chat", "chat")
+    checkbox("Sound", "sound")
+    -- Last, right above the options it switches on and off.
+    checkbox("On-screen notification", "toasts", nil, function(value)
+        settings().toasts = value
+        refreshToastControls()
+    end)
 
--- The duration, moving and testing only matter for on-screen notifications.
-refreshToastControls = function()
-    local on = settings().toasts and true or false
-    UIDropDownMenu_SetText(durationMenu, durationName(settings().duration))
-    maxSlider:SetValue(settings().maxToasts)
-    maxValue:SetText(maxName(settings().maxToasts))
-    local grey = on and 1 or 0.5
-    maxSlider:EnableMouse(on)
-    maxSlider:EnableMouseWheel(on)
-    maxSlider:SetAlpha(on and 1 or 0.4)
-    maxLabel:SetTextColor(grey, grey, grey)
-    maxValue:SetTextColor(grey, grey, grey)
-    if on then
-        UIDropDownMenu_EnableDropDown(durationMenu)
-        durationLabel:SetTextColor(1, 1, 1)
-    else
-        UIDropDownMenu_DisableDropDown(durationMenu)
-        durationLabel:SetTextColor(0.5, 0.5, 0.5)
-        setAnchorUnlocked(false)
+    -- How long notifications stay: a dropdown.
+    local durationLabel = fieldLabel("Stay on screen")
+    local durationMenu = dropdown(settingsPanel, "T3WoWDurationMenu", 150, {
+        entries = function()
+            local list = {}
+            for _, d in ipairs(DURATIONS) do list[#list + 1] = { text = durationName(d), value = d } end
+            return list
+        end,
+        -- Asked while the addon loads too, before saved settings exist: read them without
+        -- creating anything.
+        isSelected = function(d)
+            local saved = T3WoWDB and T3WoWDB.settings
+            return saved ~= nil and saved.duration == d
+        end,
+        pick = function(d)
+            settings().duration = d
+            refreshToastControls()
+        end,
+    })
+    placeDropdown(durationMenu)
+    layoutY = layoutY - 34
+
+    -- How many stay on screen at once: a slider, 1 to 10. The oldest makes room.
+    local maxLabel = fieldLabel("At most")
+    local maxSlider = CreateFrame("Slider", "T3WoWMaxToasts", settingsPanel)
+    maxSlider:SetOrientation("HORIZONTAL")
+    maxSlider:SetSize(70, 16)
+    maxSlider:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", SIZE.field + 4, layoutY - 6)
+    maxSlider:SetMinMaxValues(1, TOAST_LIMIT)
+    maxSlider:SetValueStep(1)
+    if maxSlider.SetObeyStepOnDrag then maxSlider:SetObeyStepOnDrag(true) end
+    maxSlider:EnableMouseWheel(true)
+    Skin.Slider(maxSlider)
+    local maxValue = settingsPanel:CreateFontString(nil, "OVERLAY")
+    maxValue:SetFontObject(Skin.fonts.small)
+    maxValue:SetPoint("LEFT", maxSlider, "RIGHT", 10, 0)
+    local function maxName(n) return n .. " at a time" end
+    maxSlider:SetScript("OnValueChanged", function(self, value)
+        local n = math.floor(value + 0.5)
+        maxValue:SetText(maxName(n))
+        Skin.UpdateSlider(self)
+        if settings().maxToasts ~= n then
+            settings().maxToasts = n
+            trimToasts()
+        end
+    end)
+    maxSlider:SetScript("OnMouseWheel", function(self, delta) self:SetValue(self:GetValue() + delta) end)
+    layoutY = layoutY - 32
+
+    local moveButton = button(settingsPanel, "Move notifications", (SIZE.settings - 38) / 2, nil)
+    moveButton:SetPoint("TOPLEFT", 16, layoutY)
+    local testButton = button(settingsPanel, "Test", (SIZE.settings - 38) / 2, function()
+        -- Uses your most recent thread, so clicking the sample opens a real thread too.
+        local latest = inbox and inbox.threads and inbox.threads[1]
+        local latestEnv = latest and env(latest.e)
+        showToast({
+            s = "completed",
+            t = latest and ("Test: " .. latest.t) or "Test notification",
+            id = latest and latest.id,
+            e = latestEnv and latestEnv.id,
+        })
+    end)
+    testButton:SetPoint("LEFT", moveButton, "RIGHT", 6, 0)
+    layoutY = layoutY - 42
+
+    local function setAnchorUnlocked(unlocked)
+        placeAnchor()
+        toastAnchor:SetAlpha(unlocked and 1 or 0)
+        toastAnchor:EnableMouse(unlocked)
+        moveButton:SetText(unlocked and "Done moving" or "Move notifications")
     end
-    moveButton:SetEnabled(on)
-    testButton:SetEnabled(on)
+    moveButton:SetScript("OnClick", function() setAnchorUnlocked(toastAnchor:GetAlpha() == 0) end)
+
+    -- The duration, moving and testing only matter for on-screen notifications.
+    refreshToastControls = function()
+        local on = settings().toasts and true or false
+        durationMenu:SetLabel(durationName(settings().duration))
+        maxSlider:SetValue(settings().maxToasts)
+        maxValue:SetText(maxName(settings().maxToasts))
+        Skin.UpdateSlider(maxSlider)
+        maxSlider:EnableMouse(on)
+        maxSlider:EnableMouseWheel(on)
+        maxSlider:SetAlpha(on and 1 or 0.4)
+        maxLabel:SetAlpha(on and 1 or 0.5)
+        maxValue:SetAlpha(on and 1 or 0.5)
+        durationLabel:SetAlpha(on and 1 or 0.5)
+        setDropdownEnabled(durationMenu, on)
+        if not on then setAnchorUnlocked(false) end
+        moveButton:SetEnabled(on)
+        testButton:SetEnabled(on)
+    end
+
+    sectionLabel("Notify when a thread")
+    checkbox("Finishes", "onCompleted")
+    checkbox("Needs you", "onWaiting")
+    checkbox("Fails", "onFailed")
+    checkbox("Is stopped", "onStopped")
+    -- Off by default: a stray click mid-fight shouldn't pull you out of the game. Off, an
+    -- approval's notification opens the thread here, and its Open in T3 button goes on.
+    checkbox("Clicking an approval opens T3", "approvalOpensT3")
+    layoutY = layoutY - 8
+
+    sectionLabel("Minimap")
+    checkbox("Show minimap button", nil,
+        function() return not (T3WoWDB and T3WoWDB.minimap and T3WoWDB.minimap.hide) end,
+        function(value) if ns.Minimap and ns.Minimap.Show then ns.Minimap.Show(value) end end)
+    settingsPanel:SetHeight(-layoutY + 10)
+
+    refreshThemeControls = function()
+        themeMenu:SetLabel(Skin.Theme().name)
+    end
+
+    settingsPanel:SetScript("OnShow", function()
+        for _, check in ipairs(checks) do
+            check:SetChecked(check.get() and true or false)
+            Skin.UpdateCheck(check)
+        end
+        refreshThemeControls()
+        refreshToastControls()
+    end)
+    settingsPanel:SetScript("OnHide", function() setAnchorUnlocked(false) end)
+
+    local settingsButton = button(frame, "Settings", 76, function() settingsPanel:SetShown(not settingsPanel:IsShown()) end, "ghost")
+    settingsButton:SetPoint("TOPRIGHT", -38, -6)
 end
-
-sectionLabel("Notify when a thread")
-checkbox("Finishes", "onCompleted")
-checkbox("Needs you", "onWaiting")
-checkbox("Fails", "onFailed")
-checkbox("Is stopped", "onStopped")
--- Off by default: a stray click mid-fight shouldn't pull you out of the game. Off, an
--- approval's notification opens the thread here, and its Open in T3 button goes on.
-checkbox("Clicking an approval opens T3", "approvalOpensT3")
-layoutY = layoutY - 8
-
-sectionLabel("Minimap")
-checkbox("Show minimap button", nil,
-    function() return not (T3WoWDB and T3WoWDB.minimap and T3WoWDB.minimap.hide) end,
-    function(value) if ns.Minimap and ns.Minimap.Show then ns.Minimap.Show(value) end end)
-
-settingsPanel:SetScript("OnShow", function()
-    for _, check in ipairs(checks) do check:SetChecked(check.get() and true or false) end
-    refreshToastControls()
-end)
-settingsPanel:SetScript("OnHide", function() setAnchorUnlocked(false) end)
-
-local settingsButton = button(frame, "Settings", 80, function() settingsPanel:SetShown(not settingsPanel:IsShown()) end)
-settingsButton:SetPoint("TOPRIGHT", -36, -12)
 
 function UI.ShowSettings()
     frame:Show()
@@ -1603,9 +1924,17 @@ local function applyWidth()
     local width = messageWidth()
     messageChild:SetWidth(width)
     for _, fs in ipairs(messageStrings) do fs:SetWidth(width - 8) end
-    input:SetWidth(width - 30)
+    input:SetWidth(width - 24)
     copyEdit:SetWidth(width - 8)
 end
+
+-- A new theme (or the saved one, at login) changes sizes and colors drawn per thread: lay
+-- everything out again.
+Skin.OnApply(function()
+    applyWidth()
+    refreshThemeControls()
+    UI.Refresh()
+end)
 
 frame:SetScript("OnSizeChanged", function()
     applyWidth()
@@ -1616,9 +1945,8 @@ local grip = CreateFrame("Button", nil, frame)
 grip:SetSize(16, 16)
 grip:SetPoint("BOTTOMRIGHT", -2, 2)
 grip:SetFrameLevel(frame:GetFrameLevel() + 10)
-grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
-grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
-grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+grip.glyph = Skin.Glyph(grip, "grip", 16, "dim")
+grip.glyph:SetAllPoints()
 grip:SetScript("OnMouseDown", function(_, mouse)
     if mouse == "LeftButton" then frame:StartSizing("BOTTOMRIGHT") end
 end)
@@ -1628,12 +1956,16 @@ grip:SetScript("OnMouseUp", function()
     UI.Refresh()
 end)
 grip:SetScript("OnEnter", function(self)
+    Skin.SetGlyphColor(self.glyph, "text")
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:AddLine("Drag to resize")
     GameTooltip:AddLine("Right-click to reset the size", 0.7, 0.7, 0.7)
     GameTooltip:Show()
 end)
-grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+grip:SetScript("OnLeave", function(self)
+    Skin.SetGlyphColor(self.glyph, "dim")
+    GameTooltip:Hide()
+end)
 grip:RegisterForClicks("RightButtonUp")
 grip:SetScript("OnClick", function()
     frame:SetSize(WIDTH, HEIGHT)
