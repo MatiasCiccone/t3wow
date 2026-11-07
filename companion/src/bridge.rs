@@ -24,6 +24,10 @@ const ROUTINE_GAP_MS: i64 = 10_000;
 pub const SIGNAL_PERIOD: i64 = 25;
 const VIEW_MESSAGES: usize = 24;
 const VIEW_CHARS: usize = 40_000;
+/// The open thread is read in full at least this often; in between, only what's new.
+const VIEW_FULL_READ_MS: i64 = 300_000;
+/// An open thread that isn't in the lists (no updatedAt to compare) is read again this often.
+const UNLISTED_VIEW_TTL_MS: i64 = 20_000;
 
 /// Why the game was told to stop watching signals.
 const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart WoW for updates within a second";
@@ -142,6 +146,21 @@ struct View {
     depth: usize,
 }
 
+/// The open thread's messages as last read, with what decides whether reading on from
+/// the last one is enough.
+struct ViewCache {
+    env: String,
+    id: String,
+    depth: usize,
+    item_count: usize,
+    status: String,
+    /// When the last full read was.
+    read_at: i64,
+    messages: Vec<Value>,
+    /// There are older messages than these.
+    earlier: bool,
+}
+
 /// What the tray shows.
 #[derive(Clone, Debug, Default)]
 pub struct BridgeStatus {
@@ -182,6 +201,7 @@ pub struct Bridge {
     settled_totals: BTreeMap<String, u64>,
     view_data: Option<Value>,
     view_key: Option<String>,
+    view_cache: Option<ViewCache>,
     notes: Vec<Value>,
     events: Vec<Value>,
     event_seq: i64,
@@ -301,9 +321,9 @@ fn fetch_threads(client: &dyn T3, env_arg: &Map<String, Value>) -> ThreadLists {
         let base = with_args(json!({ "allProjects": true, "includeSubagents": false }), args.as_object().unwrap());
         client.call("t3_thread_list", with_args(base, env_arg))
     };
-    let open = list(json!({ "settled": false, "snoozed": false, "limit": 60 }))?;
-    let snoozed = list(json!({ "settled": false, "snoozed": true, "limit": 15 }))?;
-    let settled = list(json!({ "settled": true, "limit": 15 }))?;
+    let open = list(json!({ "settled": false, "snoozed": false, "limit": 80 }))?;
+    let snoozed = list(json!({ "settled": false, "snoozed": true, "limit": 25 }))?;
+    let settled = list(json!({ "settled": true, "limit": 25 }))?;
     let items = |v: &Value| v["threads"].as_array().cloned().unwrap_or_default();
     let mut threads: Vec<Value> = items(&open).into_iter().filter(|t| t["snoozed"] != true).collect();
     threads.extend(items(&snoozed).into_iter().filter(|t| t["snoozed"] == true));
@@ -343,6 +363,8 @@ impl Bridge {
             settled_totals: BTreeMap::new(),
             view_data: None,
             view_key: None,
+            view_cache: None,
+
             notes: Vec::new(),
             events: Vec::new(),
             event_seq: 0,
@@ -386,6 +408,7 @@ impl Bridge {
     /// open thread), which the new one may not have.
     fn forget_server(&mut self) {
         self.view = None;
+        self.view_cache = None;
         self.view_data = None;
         self.view_key = None;
         self.pending_ask = None;
@@ -993,49 +1016,106 @@ impl Bridge {
         Ok(())
     }
 
-    fn refresh_view(&mut self) -> Result<(), T3Error> {
+    /// The open thread's messages from `after` on (all of them for None), page by page.
+    fn read_messages(&self, id: &str, env_arg: &Map<String, Value>, after: Option<u64>) -> Result<Vec<Value>, T3Error> {
+        let mut messages = Vec::new();
+        let mut after = after;
+        for _ in 0..10 {
+            let mut args = json!({ "threadId": id, "view": "messages", "limit": 100, "maxCharsPerItem": 6000 });
+            if let Some(after) = after {
+                args["afterPosition"] = json!(after);
+            }
+            let result = self.client.call("t3_thread_read", with_args(args, env_arg))?;
+            messages.extend(result["items"].as_array().cloned().unwrap_or_default());
+            match (result["hasMore"] == true, result["nextPosition"].as_u64()) {
+                (true, Some(next)) => after = Some(next),
+                _ => break,
+            }
+        }
+        Ok(messages)
+    }
 
-        let Some(View { env, id, depth }) = self.view.clone() else {
+    /// The last messages of the open thread: only what came after the last one read when
+    /// that's safe (same thread and depth, no items gone, a run still going or just
+    /// started, read recently), re-reading that last one, which may still be growing.
+    /// Otherwise a full read of the last 80×depth items, widened until there are enough.
+    fn view_messages(&mut self, view: &View, thread: &Value, env_arg: &Map<String, Value>) -> Result<(Vec<Value>, bool), T3Error> {
+        let item_count = thread["itemCount"].as_u64().unwrap_or(0) as usize;
+        let status = str_of(&thread["status"]).to_string();
+        let now = self.now_ms();
+        let cache = self.view_cache.take().filter(|c| {
+            c.env == view.env
+                && c.id == view.id
+                && c.depth == view.depth
+                && item_count >= c.item_count
+                && now - c.read_at < VIEW_FULL_READ_MS
+                // A run that ended may have tidied its messages.
+                && (!working(&c.status) || working(&status))
+        });
+        let last = cache.as_ref().and_then(|c| c.messages.last()).and_then(|m| m["position"].as_u64());
+        let (messages, earlier, read_at) = match (cache, last) {
+            (Some(cache), Some(last)) => {
+                let newer = self.read_messages(&view.id, env_arg, last.checked_sub(1))?;
+                let mut messages: Vec<Value> = cache.messages.into_iter().filter(|m| m["position"].as_u64().is_some_and(|p| p < last)).collect();
+                messages.extend(newer);
+                (messages, cache.earlier, cache.read_at)
+            }
+            _ => {
+                let want = VIEW_MESSAGES * view.depth;
+                let mut messages = Vec::new();
+                let mut window = 80 * view.depth;
+                let mut start = 0;
+                for _ in 0..4 {
+                    start = item_count.saturating_sub(window);
+                    messages = self.read_messages(&view.id, env_arg, (start > 0).then_some(start as u64))?;
+                    if messages.len() >= want || start == 0 {
+                        break;
+                    }
+                    window *= 4;
+                }
+                (messages, start > 0, now)
+            }
+        };
+        // Keep a few views' worth: older ones only matter after "show earlier".
+        let keep = VIEW_MESSAGES * view.depth * 4;
+        let trimmed = messages.len() > keep;
+        let messages: Vec<Value> = messages[messages.len().saturating_sub(keep)..].to_vec();
+        let earlier = earlier || trimmed;
+        self.view_cache = Some(ViewCache {
+            env: view.env.clone(),
+            id: view.id.clone(),
+            depth: view.depth,
+            item_count,
+            status,
+            read_at,
+            messages: messages.clone(),
+            earlier,
+        });
+        Ok((messages, earlier))
+    }
+
+    fn refresh_view(&mut self) -> Result<(), T3Error> {
+        let Some(view_wanted) = self.view.clone() else {
             self.view_data = None;
+            self.view_cache = None;
             return Ok(());
         };
+        let View { env, id, depth } = view_wanted.clone();
         let listed = self.threads.get(&env).and_then(|list| list.iter().find(|t| t["threadId"] == id.as_str())).cloned();
-        let key = format!(
-            "{env}:{id}:{depth}:{}:{}",
-            listed.as_ref().map(|t| str_of(&t["updatedAt"])).unwrap_or(""),
-            listed.as_ref().map(|t| str_of(&t["status"])).unwrap_or("")
-        );
+        // A thread past the lists' limits has no updatedAt to compare: look again now and then.
+        let freshness = match &listed {
+            Some(t) => format!("{}:{}", str_of(&t["updatedAt"]), str_of(&t["status"])),
+            None => format!("unlisted:{}", self.now_ms().div_euclid(UNLISTED_VIEW_TTL_MS)),
+        };
+        let key = format!("{env}:{id}:{depth}:{freshness}");
         if Some(&key) == self.view_key.as_ref() && self.view_data.is_some() {
             return Ok(());
         }
         let env_arg = self.env_arg(&env);
         let head = self.client.call("t3_thread_read", with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 }), &env_arg))?;
         let thread = head["thread"].clone();
-        let item_count = thread["itemCount"].as_u64().unwrap_or(0) as usize;
         let want = VIEW_MESSAGES * depth;
-        let mut messages: Vec<Value> = Vec::new();
-        let mut window = 80 * depth;
-        for _ in 0..4 {
-            let start = item_count.saturating_sub(window);
-            messages.clear();
-            let mut after = (start > 0).then_some(start as u64);
-            for _ in 0..10 {
-                let mut args = json!({ "threadId": id, "view": "messages", "limit": 100, "maxCharsPerItem": 6000 });
-                if let Some(after) = after {
-                    args["afterPosition"] = json!(after);
-                }
-                let result = self.client.call("t3_thread_read", with_args(args, &env_arg))?;
-                messages.extend(result["items"].as_array().cloned().unwrap_or_default());
-                match (result["hasMore"] == true, result["nextPosition"].as_u64()) {
-                    (true, Some(next)) => after = Some(next),
-                    _ => break,
-                }
-            }
-            if messages.len() >= want || start == 0 {
-                break;
-            }
-            window *= 4;
-        }
+        let (messages, earlier) = self.view_messages(&view_wanted, &thread, &env_arg)?;
         let mut items: Vec<Value> = Vec::new();
         let mut chars = 0;
         for item in messages.iter().rev().take(want) {
@@ -1051,7 +1131,7 @@ impl Bridge {
             chars += length;
             items.insert(0, json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text }));
         }
-        let more = messages.len() > items.len() || item_count > window;
+        let more = messages.len() > items.len() || earlier;
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
         let status = if pending && working(str_of(&thread["status"])) { "waiting" } else { str_of(&thread["status"]) };
         let mut view = json!({
@@ -1066,7 +1146,9 @@ impl Bridge {
         });
         // A question the agent is waiting on goes to the game with the conversation.
         // Approvals can't be answered through T3's tools: the window points to T3 instead.
-        self.pending_ask = None;
+        // If the question can't be read this time, the one shown stays.
+        let shown_ask = self.view_data.as_ref().filter(|v| v["e"] == env.as_str() && v["id"] == id.as_str()).map(|v| v["ask"].clone()).filter(|a| !a.is_null());
+        let previous = self.pending_ask.take().filter(|a| a.env == env && a.thread == id);
         if pending {
             match self.read_pending(&env, &id, &env_arg) {
                 Ok(Some((ask, value))) => {
@@ -1074,7 +1156,13 @@ impl Bridge {
                     self.pending_ask = Some(ask);
                 }
                 Ok(None) => {}
-                Err(error) => self.log(&format!("pending question: {error}")),
+                Err(error) => {
+                    self.log(&format!("pending question: {error}"));
+                    if let (Some(ask), Some(value)) = (previous, shown_ask) {
+                        view["ask"] = value;
+                        self.pending_ask = Some(ask);
+                    }
+                }
             }
         }
         // Waiting on something that isn't a question: an approval, which only T3 can give.

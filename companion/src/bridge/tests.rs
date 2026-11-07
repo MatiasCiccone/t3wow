@@ -16,6 +16,8 @@ struct FakeT3 {
     clock: Mutex<Option<Arc<Mutex<i64>>>>,
     /// Threads reads find but lists leave out.
     unlisted: Mutex<Vec<Value>>,
+    /// Each thread's messages (two short ones when not set).
+    messages: Mutex<HashMap<String, Vec<Value>>>,
 }
 
 impl FakeT3 {
@@ -33,6 +35,7 @@ impl FakeT3 {
             failing: Mutex::new(HashMap::new()),
             clock: Mutex::new(None),
             unlisted: Mutex::new(Vec::new()),
+            messages: Mutex::new(HashMap::new()),
         })
     }
 
@@ -84,15 +87,27 @@ impl T3 for FakeT3 {
                     json!({ "threads": threads })
                 }
             }
-            "t3_thread_read" => json!({
-                "thread": self.thread(&args["threadId"]),
-                "items": if args["view"].is_string() {
-                    json!([{ "type": "user_message", "text": "hi", "senderThreadId": self.thread(&args["threadId"])["sender"] }, { "type": "assistant_message", "text": "**done**" }])
-                } else {
-                    json!([])
-                },
-                "hasMore": false,
-            }),
+            "t3_thread_read" if args["view"].is_string() => {
+                // Messages after afterPosition, a page at a time.
+                let id = str_of(&args["threadId"]).to_string();
+                let all = self.messages.lock().unwrap().get(&id).cloned().unwrap_or_else(|| {
+                    vec![
+                        json!({ "position": 0, "type": "user_message", "text": "hi", "senderThreadId": self.thread(&args["threadId"])["sender"] }),
+                        json!({ "position": 1, "type": "assistant_message", "text": "**done**" }),
+                    ]
+                });
+                let after = args["afterPosition"].as_i64().unwrap_or(-1);
+                let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+                let rest: Vec<Value> = all.into_iter().filter(|m| m["position"].as_i64().unwrap() > after).collect();
+                let page: Vec<Value> = rest.iter().take(limit).cloned().collect();
+                json!({
+                    "thread": self.thread(&args["threadId"]),
+                    "items": page,
+                    "hasMore": rest.len() > limit,
+                    "nextPosition": page.last().map(|m| m["position"].clone()),
+                })
+            }
+            "t3_thread_read" => json!({ "thread": self.thread(&args["threadId"]), "items": [], "hasMore": false }),
             // One pending question, in the shape T3 returns (see the probe in the commit log).
             "t3_pending_request" => match args["action"].as_str() {
                 Some("list") if !*self.questions.lock().unwrap() => json!({ "requestIds": [] }),
@@ -825,4 +840,84 @@ fn a_working_thread_that_drops_off_the_list_still_notifies_when_it_ends() {
     let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
     assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "{latest}");
     assert!(!rig.bridge.last_status.contains_key("local:t1"), "forgotten once it ended");
+}
+
+/// A thread's messages, as T3 numbers them (every other position, as tool calls sit between).
+fn conversation(texts: &[&str]) -> Vec<Value> {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| json!({ "position": i * 2, "type": if i % 2 == 0 { "user_message" } else { "assistant_message" }, "text": text }))
+        .collect()
+}
+
+#[test]
+fn the_open_thread_reads_only_whats_new_and_still_sees_its_last_message_grow() {
+    let mut rig = Rig::new(23_000_000);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["one", "two", "three"]));
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(5);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let message_reads = |rig: &Rig| rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| a["view"] == "messages" && a["threadId"] == "t1" && a["limit"] == 100).collect::<Vec<_>>();
+    assert_eq!(message_reads(&rig).len(), 1);
+
+    // The agent's last message grows, and a new one comes.
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["one", "two", "three, and more", "four"]));
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(7);
+    rig.t3.set("running", "2026-11-06T10:00:05Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let reads = message_reads(&rig);
+    assert_eq!(reads.len(), 2);
+    assert_eq!(reads[1]["afterPosition"], 3, "read on from the last message seen (position 4), itself included");
+    let view = rig.bridge.snapshot()["view"].clone();
+    let texts: Vec<&str> = view["items"].as_array().unwrap().iter().map(|i| i["x"].as_str().unwrap()).collect();
+    assert_eq!(texts, vec!["one", "two", "three, and more", "four"]);
+
+    // A rollback leaves fewer items: everything is read again.
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["one", "two"]));
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(3);
+    rig.t3.set("running", "2026-11-06T10:00:10Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let reads = message_reads(&rig);
+    assert!(reads[2].get("afterPosition").is_none(), "{}", reads[2]);
+    let view = rig.bridge.snapshot()["view"].clone();
+    assert_eq!(view["items"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn an_open_thread_past_the_lists_limits_is_still_read_again_now_and_then() {
+    let mut rig = Rig::new(24_000_000);
+    let old = json!({ "threadId": "old", "projectId": "p1", "title": "Old", "status": "completed", "settled": true, "updatedAt": "2026-01-01T00:00:00Z", "itemCount": 3 });
+    rig.t3.unlisted.lock().unwrap().push(old);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "old" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["view"]["t"], "Old");
+
+    rig.t3.unlisted.lock().unwrap()[0]["title"] = json!("Old, renamed");
+    rig.advance(25_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["view"]["t"], "Old, renamed");
+}
+
+#[test]
+fn a_question_that_cant_be_read_once_stays_a_question() {
+    let mut rig = Rig::new(25_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["status"] = json!("waiting");
+        threads[0]["pendingRequestCount"] = json!(1);
+    }
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["view"]["ask"].is_object());
+
+    rig.t3.failing.lock().unwrap().insert("t3_pending_request".into(), "timed out".into());
+    rig.t3.set("waiting", "2026-11-06T10:00:05Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let view = rig.bridge.snapshot()["view"].clone();
+    assert!(view["ask"].is_object(), "{view}");
+    assert!(view["approval"].is_null(), "not shown as an approval: {view}");
 }
