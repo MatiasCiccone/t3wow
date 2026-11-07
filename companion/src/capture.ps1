@@ -77,9 +77,9 @@ public static class T3Cap {
           sb.Append((char)('0' + v));
           if (n == 18) {
             long acc = 0;
-            for (int k = 0; k < 19; k++) acc = (acc << 3) | (long)(sb[k] - '0');
-            acc >>= 1; // 57 bits read, 56 are the 7 header bytes
-            int length = (int)(acc & 0xFFFF);
+            for (int k = 0; k < 19; k++) acc = acc * 8 + (sb[k] - '0');
+            acc = acc / 2; // 57 bits read, 56 are the 7 header bytes
+            int length = (int)(acc % 65536);
             need = ((7 + length + 2) * 8 + 2) / 3;
             if (need > PerRow * MaxRows) return "";
           }

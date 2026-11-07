@@ -51,7 +51,9 @@ function fail(message) {
 }
 
 function wowDir(config) {
-  const dir = flags.wow ?? config.wowDir ?? WOW_GUESSES.find((guess) => existsSync(guess));
+  // PowerShell passes a trailing `\"` through as a literal quote.
+  const given = flags.wow?.replace(/["']/g, "").replace(/[\\/]+$/, "");
+  const dir = given ?? config.wowDir ?? WOW_GUESSES.find((guess) => existsSync(guess));
   if (!dir) fail("Could not find WoW: Forever. Pass --wow \"C:\\...\\World of Warcraft\\_forever_\".");
   return dir;
 }
@@ -196,8 +198,11 @@ async function run() {
 
 function startCapture(dir, onMessage, log) {
   const script = join(HERE, "..", "src", "capture.ps1");
+  let delay = 1000;
+  let child = null;
+  process.once("exit", () => child?.kill());
   const start = () => {
-    const child = spawn(
+    child = spawn(
       "powershell.exe",
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-MagicCells", magicCells().join(""), "-ClientFolder", dir],
       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
@@ -208,11 +213,13 @@ function startCapture(dir, onMessage, log) {
       } catch {}
     });
     createInterface({ input: child.stderr }).on("line", (line) => log(`capture: ${line}`));
+    const startedAt = Date.now();
     child.on("exit", (code) => {
-      log(`capture exited (${code}); restarting`);
-      setTimeout(start, 2000);
+      // Back off while it keeps failing fast; a long healthy run resets the delay.
+      delay = Date.now() - startedAt > 60_000 ? 2000 : Math.min(delay * 2, 60_000);
+      log(`capture exited (${code}); restarting in ${delay / 1000}s`);
+      setTimeout(start, delay);
     });
-    process.on("exit", () => child.kill());
   };
   start();
 }
