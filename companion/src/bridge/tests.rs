@@ -97,16 +97,28 @@ impl T3 for FakeT3 {
 struct Written {
     slots: BTreeMap<u32, String>,
     raised: Vec<u32>,
+    /// While set, every write fails with this error.
+    failing: Option<String>,
 }
 
 struct FakeSlots(Arc<Mutex<Written>>);
 
 impl SlotWriter for FakeSlots {
-    fn write_slot(&mut self, n: u32, lua: &str) {
-        self.0.lock().unwrap().slots.insert(n, lua.to_string());
+    fn write_slot(&mut self, n: u32, lua: &str) -> std::io::Result<()> {
+        let mut written = self.0.lock().unwrap();
+        if let Some(error) = &written.failing {
+            return Err(std::io::Error::other(error.clone()));
+        }
+        written.slots.insert(n, lua.to_string());
+        Ok(())
     }
-    fn raise_signal(&mut self, n: u32) {
-        self.0.lock().unwrap().raised.push(n);
+    fn raise_signal(&mut self, n: u32) -> std::io::Result<()> {
+        let mut written = self.0.lock().unwrap();
+        if let Some(error) = &written.failing {
+            return Err(std::io::Error::other(error.clone()));
+        }
+        written.raised.push(n);
+        Ok(())
     }
     fn clear_signals(&mut self) {}
     fn flip_probe(&mut self, _real: bool) -> Vec<String> {
@@ -527,4 +539,104 @@ fn a_command_counts_as_done_only_once_it_ran() {
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
     assert_eq!(rig.bridge.link.acked["c1"], 1);
+}
+
+#[test]
+fn near_the_last_slot_the_budget_shows_and_past_it_nothing_is_written() {
+    let mut rig = Rig::new(12_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 199, "p": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.written.lock().unwrap().slots.keys().copied().collect::<Vec<_>>(), vec![199, 200], "never past slot 200");
+    assert_eq!(rig.bridge.status().slot, 199);
+
+    // The game loaded both and reports it is out.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 201, "p": 1, "q": [] }));
+    rig.written.lock().unwrap().slots.clear();
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert!(rig.written.lock().unwrap().slots.is_empty());
+    assert_eq!(rig.bridge.status().slot, 201);
+}
+
+#[test]
+fn when_the_signal_files_run_out_updates_still_go_out_on_the_timer() {
+    let mut rig = Rig::new(13_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    // A long day in one game process: the game now watches file 3998.
+    rig.bridge.link.signal = 3998;
+    rig.bridge.link.signal_time = rig.now_s();
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    // The last files there are carry an update that tells the game to use the timer.
+    assert_eq!(rig.raised().last(), Some(&3999));
+    let inbox = rig.slot(2);
+    assert!(inbox.contains("sigoff=\""), "{inbox}");
+    assert!(rig.bridge.status().signals_out);
+    assert!(!rig.bridge.status().signals);
+
+    // The next change is written without raising anything, where the game's count says.
+    let raised = rig.raised().len();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "p": 1, "q": [{ "s": 2, "t": "ui", "o": true }] }));
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert_eq!(rig.raised().len(), raised);
+    assert!(rig.slot(3).contains("ack=2"), "{}", rig.slot(3));
+
+    // A new WoW process starts with fresh signal files.
+    rig.bridge.on_capture(CaptureMessage::Wow(Some("456@1".into())));
+    assert!(!rig.bridge.status().signals_out);
+}
+
+#[test]
+fn the_game_watching_past_the_last_signal_file_gets_its_updates_by_timer() {
+    let mut rig = Rig::new(14_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    rig.bridge.link.signal = 4000;
+    rig.bridge.link.signal_time = rig.now_s() - 100;
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert!(rig.raised().iter().all(|n| *n <= SIGNAL_COUNT), "{:?}", rig.raised());
+    assert!(rig.slot(2).contains("sigoff=\"") && rig.slot(2).contains("s=\"completed\""), "{}", rig.slot(2));
+}
+
+#[test]
+fn a_failed_write_is_retried_and_doesnt_use_up_a_slot() {
+    let mut rig = Rig::new(15_000_000);
+    rig.written.lock().unwrap().failing = Some("access denied".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    for _ in 0..3 {
+        rig.bridge.tick();
+        rig.advance(2_000);
+    }
+    assert_eq!(rig.bridge.link.slot, 1, "no slot spent");
+    assert!(rig.bridge.status().write_problem.unwrap().contains("access denied"));
+
+    rig.written.lock().unwrap().failing = None;
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("ack=1"), "{}", rig.slot(1));
+    assert_eq!(rig.bridge.link.slot, 2);
+    assert!(rig.bridge.status().write_problem.is_none());
+
+    // Nothing new: the delivered state isn't sent again.
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.link.slot, 2);
+}
+
+#[test]
+fn after_a_reinstall_the_state_goes_out_again() {
+    let mut rig = Rig::new(16_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.link.slot, 2);
+    rig.bridge.republish();
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.link.slot, 3);
 }

@@ -338,10 +338,10 @@ SlashCmdList.T3WOW = function(message)
     end
     if message == "status" then
         local s = ns.Link.Status()
-        print(string.format("|cff8f8fffT3|r signals %s, watching signal %d, next slot %d, queued %d, last update %s",
+        print(string.format("|cff8f8fffT3|r signals %s, watching signal %d, next slot %d (%d/200 updates used), queued %d, last update %s",
             s.signals == "on" and (s.nextSignal and "on" or "on (waiting for the first update)")
                 or (s.signals == "checking" and "checking" or "off (polling)"),
-            s.nextSignal or 0, s.nextSlot, s.queue,
+            s.nextSignal or 0, s.nextSlot, s.slotsUsed or 0, s.queue,
             s.inboxAge and string.format("%ds ago", s.inboxAge) or "never"))
         print(string.format("|cff8f8fffT3|r signals noticed this session: %d%s (%d checks so far)", s.signalsSeen,
             s.signalAge and string.format(", last %ds ago", s.signalAge) or "", s.fontStrings or 0))

@@ -5,7 +5,8 @@
 use crate::bridge::{Bridge, CaptureMessage};
 use crate::config::{config_dir, now_ms, Config};
 use crate::log;
-use crate::slots::Slots;
+use crate::slots::{Slots, SLOT_COUNT};
+
 use crate::t3::{self, McpClient, T3};
 use crate::updater::{self, Release};
 use std::path::PathBuf;
@@ -250,6 +251,8 @@ pub fn run(app: Arc<App>) {
                     Ok(()) => {
                         log::line("Reinstalled the addon. Restart WoW to load it.");
                         restart_note = Some("restart WoW to load the reinstalled addon".into());
+                        // The reinstall blanked the slots and signals already written: write them again.
+                        bridge.republish();
                     }
                     Err(error) => log::line(&format!("Reinstall failed: {error}")),
                 },
@@ -290,11 +293,17 @@ pub fn run(app: Arc<App>) {
         } else {
             "T3: connecting…".to_string()
         };
+        let used = s.slot.saturating_sub(1).min(SLOT_COUNT);
         let wow_line = match (s.wow_running, s.in_game, s.signals) {
             (false, _, _) => "WoW: not running".to_string(),
             (true, false, _) => "WoW: running, waiting for the addon (log in, or /reload)".to_string(),
-            (true, true, true) => "WoW: in game, updates arrive in about a second".to_string(),
-            (true, true, false) => "WoW: in game, updates on a timer".to_string(),
+            (true, true, _) if s.write_problem.is_some() => {
+                format!("WoW: {}", s.write_problem.as_deref().unwrap_or("").chars().take(70).collect::<String>())
+            }
+            (true, true, _) if used >= SLOT_COUNT => "WoW: in game, all 200 updates used: Reload UI in the game".to_string(),
+            (true, true, true) => format!("WoW: in game, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) if s.signals_out => format!("WoW: in game, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) => format!("WoW: in game, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
         };
         let wow_line = match &restart_note {
             Some(note) if s.wow_running => format!("{wow_line} ({note})"),
@@ -303,7 +312,7 @@ pub fn run(app: Arc<App>) {
         if !s.wow_running {
             restart_note = None;
         }
-        let attention = signed_out || s.auth_needed || (!s.t3_ok && s.t3_problem.is_some());
+        let attention = signed_out || s.auth_needed || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some();
         app.set(t3_line, wow_line, attention, !signed_out && !s.auth_needed);
         std::thread::sleep(Duration::from_millis(250));
     }

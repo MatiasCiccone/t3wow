@@ -14,6 +14,9 @@ local Link = {}
 ns.Link = Link
 
 local SLOT_COUNT, SIGNAL_COUNT = 200, 4000
+-- From this many updates used, the window says to Reload UI soon.
+local SLOT_WARN = 190
+local SIGNALS_OUT = "this WoW session used all its signal files; restart WoW for updates within a second"
 local SIGNAL_PERIOD = 25 -- keep in step with companion/src/bridge.rs
 local ROOT = "Interface\\AddOns\\T3WoW\\"
 local ACK_PATIENCE = 20
@@ -222,6 +225,11 @@ local function receive(inbox)
     end
     trace(format("  update from %s: wait %s @%s (%s), %d event(s)", date("%H:%M:%S", inbox.now or 0), tostring(inbox.ns),
         inbox.nt and date("%H:%M:%S", inbox.nt) or "?", adopted and "taken" or "older, ignored", #(inbox.events or {})))
+    -- The companion ran out of signal files for this game process: load slots on a timer.
+    if type(inbox.sigoff) == "string" and inbox.u == state.uiSession and state.signals ~= "off" then
+        state.signals, state.signalCheck = "off", inbox.sigoff
+        trace("companion: signals off (" .. inbox.sigoff .. ")")
+    end
     state.inbox = inbox
     state.inboxAt = GetTime()
     for _, event in ipairs(inbox.events or {}) do
@@ -239,6 +247,22 @@ local function receive(inbox)
     ns.UI.OnInbox(inbox)
 end
 
+-- Says once in chat when the session's updates run low, and when they run out.
+local function noteBudget()
+    local used = state.nextSlot - 1
+    local tag = "|cff8f8fffT3 WoW|r "
+    if used >= SLOT_COUNT then
+        state.exhausted = true
+        if not state.exhaustedSaid then
+            state.exhaustedSaid = true
+            print(tag .. "|cffff8000used all 200 updates of this UI session: no more notifications until you Reload UI (/reload).|r")
+        end
+    elseif used >= SLOT_WARN and not state.lowSaid then
+        state.lowSaid = true
+        print(tag .. format("|cffffd100%d of 200 updates used this UI session: Reload UI (/reload) soon to keep getting notifications.|r", used))
+    end
+end
+
 -- via: how this load was triggered ("a signal", "the timer", "the fallback for a waiting command").
 local function loadNextSlot(via)
     state.loadVia = via
@@ -250,6 +274,7 @@ local function loadNextSlot(via)
     local name = format("T3WoW_S%03d", state.nextSlot)
     state.nextSlot = state.nextSlot + 1
     trace(format("load %s via %s", name, via or "?"))
+    noteBudget()
     _G.T3WoW_Inbox = nil
     local loaded, reason = LoadAddOnFn(name)
     local inbox = _G.T3WoW_Inbox
@@ -264,6 +289,10 @@ local function loadNextSlot(via)
 end
 
 function Link.Exhausted() return state.exhausted end
+
+-- How many of the session's updates are used.
+function Link.SlotsUsed() return math.min(SLOT_COUNT, state.nextSlot - 1), SLOT_COUNT end
+function Link.SlotsLow() return state.nextSlot - 1 >= SLOT_WARN end
 
 -- Decides once per UI session whether font signals work: the real test font must load
 -- and the blank one must not. Right after the game starts (cold disk, every addon
@@ -337,6 +366,12 @@ poller:SetScript("OnUpdate", function(_, delta)
             end
         end
         local watched = watchedSignal()
+        if watched > SIGNAL_COUNT then
+            -- Past the last signal file: nothing more can signal us in this game process.
+            state.signals, state.signalCheck = "off", SIGNALS_OUT
+            trace("signals off: past the last signal file")
+            return
+        end
         if watched ~= state.lastWatched then
             trace(format("watch %d (base %d @%s)%s", watched, state.signalBase, date("%H:%M:%S", state.signalTime),
                 state.lastWatched and format("; %d check(s) of %d", state.checksOfWatched or 0, state.lastWatched) or ""))
@@ -380,6 +415,8 @@ function Link.Status()
         signals = state.signals,
         nextSignal = watchedSignal(),
         nextSlot = state.nextSlot,
+        slotsUsed = math.min(SLOT_COUNT, state.nextSlot - 1),
+
         queue = db and #db.queue or 0,
         loadError = state.loadError,
         signalCheck = state.signalCheck,
