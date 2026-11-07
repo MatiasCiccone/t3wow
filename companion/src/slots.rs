@@ -88,12 +88,19 @@ pub struct Slots {
     pub addon_dir: PathBuf,
     interface: String,
     font: Option<Vec<u8>>,
+    /// A second font for the probe's valid2.ttf.
+    alt_font: Option<Vec<u8>>,
 }
 
 impl Slots {
     pub fn new(addons_dir: impl Into<PathBuf>, interface: &str) -> Slots {
+        Slots::with_fonts(addons_dir, interface, small_font(), windows_font(&["arial.ttf", "segoeui.ttf"]))
+    }
+
+    /// With the given fonts instead of this PC's (tests use fixture bytes, so they run anywhere).
+    fn with_fonts(addons_dir: impl Into<PathBuf>, interface: &str, font: Option<Vec<u8>>, alt_font: Option<Vec<u8>>) -> Slots {
         let addons_dir = addons_dir.into();
-        Slots { addon_dir: addons_dir.join(ADDON), addons_dir, interface: interface.to_string(), font: small_font() }
+        Slots { addon_dir: addons_dir.join(ADDON), addons_dir, interface: interface.to_string(), font, alt_font }
     }
 
     pub fn for_wow(wow_dir: &Path, interface: &str) -> Slots {
@@ -172,7 +179,7 @@ impl Slots {
         put(probe.join("empty.tga"), b"")?;
         put(probe.join("valid.tga"), &tiny_tga())?;
         put(probe.join("flip.tga"), b"")?;
-        put(probe.join("valid2.ttf"), &windows_font(&["arial.ttf", "segoeui.ttf"]).unwrap_or_default())?;
+        put(probe.join("valid2.ttf"), &self.alt_font.clone().unwrap_or_default())?;
         for n in 1..=SLOT_COUNT {
             let dir = self.addons_dir.join(slot_name(n));
             fs::create_dir_all(&dir)?;
@@ -285,6 +292,13 @@ impl SlotWriter for Slots {
 mod tests {
     use super::*;
 
+    /// Stands in for a Windows font: the companion only copies font bytes, never reads them.
+    const FIXTURE_FONT: &[u8] = b"fixture font bytes";
+
+    fn fixture_slots(dir: &Path, interface: &str) -> Slots {
+        Slots::with_fonts(dir, interface, Some(FIXTURE_FONT.to_vec()), Some(FIXTURE_FONT.to_vec()))
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("t3wow-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -295,12 +309,13 @@ mod tests {
     #[test]
     fn repair_puts_back_missing_files_and_updates_an_older_addon() {
         let dir = temp_dir("repair");
-        let slots = Slots::new(&dir, "16001");
+        let slots = fixture_slots(&dir, "16001");
         let first = slots.repair().unwrap();
         assert!(first.addon.unwrap().starts_with("installed "));
         assert!(first.created > SIGNAL_COUNT);
         assert!(slots.installed());
         assert!(dir.join("T3WoW/Media/logo.tga").exists());
+        assert_eq!(fs::read(dir.join("T3WoW/ctl/probe/valid.ttf")).unwrap(), FIXTURE_FONT);
 
         // An addon manager removed a slot and a signal file; nothing else changed.
         fs::remove_dir_all(dir.join(slot_name(7))).unwrap();
