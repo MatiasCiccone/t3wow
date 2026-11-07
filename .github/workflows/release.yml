@@ -55,15 +55,18 @@ jobs:
           "$hash  t3wow.exe" | Out-File -Encoding ascii -NoNewline release/t3wow.exe.sha256
           Compress-Archive -Path addon/T3WoW -DestinationPath "release/T3WoW-${{ github.ref_name }}.zip"
 
-      - name: Release notes (commit subjects since the previous tag)
+      # Only feat and fix subjects (without the prefix) go public: the rest (ci, chore,
+      # docs, refactor...) is the private repository's business.
+      - name: Release notes (feat and fix subjects since the previous tag)
         shell: bash
         run: |
           previous=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           range=${previous:+$previous..}$GITHUB_REF_NAME
+          changes=$(git log --no-merges --format='%s' "$range" | sed -nE 's/^(feat|fix)(\([^)]*\))?!?: *(.+)$/- \3/p')
           {
             echo "## Changes"
             echo
-            git log --no-merges --format='- %s' "$range"
+            echo "${changes:-- Fixes and improvements behind the scenes.}"
             echo
             echo "Download \`t3wow.exe\` and run it; it installs the addon and updates itself from here."
           } > release/NOTES.md
