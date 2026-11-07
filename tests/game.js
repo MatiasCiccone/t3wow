@@ -105,11 +105,13 @@ function IsShiftKeyDown() return false end
 function ReloadUI() end
 function PlaySound() end
 function CloseDropDownMenus() end
+-- UIDropDownMenu keeps a menu's list function and shown text; while menuItems is a table
+-- (a test opening a menu), the entries it adds go there.
 function UIDropDownMenu_SetWidth() end
-function UIDropDownMenu_Initialize() end
-function UIDropDownMenu_SetText() end
+function UIDropDownMenu_Initialize(menu, fn) menu.init = fn end
+function UIDropDownMenu_SetText(menu, text) menu.text = text end
 function UIDropDownMenu_CreateInfo() return {} end
-function UIDropDownMenu_AddButton() end
+function UIDropDownMenu_AddButton(info) if menuItems then menuItems[#menuItems + 1] = info end end
 function UIDropDownMenu_EnableDropDown() end
 function UIDropDownMenu_DisableDropDown() end
 C_AddOns = { LoadAddOn = function(name) loads[#loads + 1] = name; T3WoW_Inbox = inboxes[name]; return true end }
@@ -139,12 +141,14 @@ const STUB_UI = `ns.UI = {
 }`;
 
 // Runs `script` after loading Codec.lua and Link.lua (and UI.lua with { ui: true }); its
-// return value comes back as a string. T3WoWDB starts as `db` (a Lua table literal).
-export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }` } = {}) {
+// return value comes back as a string. T3WoWDB starts as `db` (a Lua table literal), and
+// `before` runs ahead of the addon's files (to give the game an API it doesn't have here).
+export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }`, before = "" } = {}) {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
   const load = (name) => `assert(load(${JSON.stringify(read(name))}, "${name}"))("T3WoW", ns)`;
   const chunk = `${GAME}
+${before}
 local ns = {}
 ${ui ? "" : STUB_UI}
 ${load("Codec.lua")}

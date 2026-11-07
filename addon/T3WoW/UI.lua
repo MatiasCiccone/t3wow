@@ -162,6 +162,74 @@ local function button(parent, text, width, onClick)
     return b
 end
 
+-- A dropdown: click it to open a list, pick one. Every dropdown is built here, so a reskin
+-- restyles them in one place. menu.entries() returns the list, asked again before it can
+-- show: { text, value } entries can be picked (menu.pick(value), and menu.isSelected(value)
+-- checks one), { text, note = true } lines can't (an empty list's note). The widget's
+-- SetLabel(text) sets what it shows closed, and asks for the list again.
+-- Clients with Blizzard's menu system get WowStyle1DropdownTemplate, which scrolls a long
+-- list and doesn't taint; older ones get UIDropDownMenu, which lists the first
+-- DROPDOWN_CAP entries.
+local DROPDOWN_ROWS, DROPDOWN_ROW_HEIGHT, DROPDOWN_CAP = 15, 20, 40
+local MODERN_DROPDOWN = MenuUtil ~= nil and C_XMLUtil ~= nil and C_XMLUtil.GetTemplateInfo ~= nil
+    and C_XMLUtil.GetTemplateInfo("WowStyle1DropdownTemplate") ~= nil
+
+local function dropdown(parent, name, width, menu)
+    local dd
+    if MODERN_DROPDOWN then
+        dd = CreateFrame("DropdownButton", name, parent, "WowStyle1DropdownTemplate")
+        dd:SetWidth(width)
+        dd:SetupMenu(function(_, root)
+            local list = menu.entries()
+            if #list > DROPDOWN_ROWS then root:SetScrollMode(DROPDOWN_ROWS * DROPDOWN_ROW_HEIGHT) end
+            for _, entry in ipairs(list) do
+                if entry.note then
+                    root:CreateTitle(entry.text)
+                else
+                    root:CreateRadio(entry.text, menu.isSelected, function(value)
+                        menu.pick(value)
+                        return MenuResponse and MenuResponse.Close
+                    end, entry.value)
+                end
+            end
+        end)
+        function dd:SetLabel(text)
+            -- An open list stays as it is under the cursor; it's asked for again next time.
+            if not self:IsMenuOpen() then self:GenerateMenu() end
+            self:OverrideText(text)
+        end
+    else
+        dd = CreateFrame("Frame", name, parent, "UIDropDownMenuTemplate")
+        UIDropDownMenu_SetWidth(dd, width)
+        -- UIDropDownMenu_Initialize also runs this once while the addon loads: entries()
+        -- must cope with nothing received yet.
+        UIDropDownMenu_Initialize(dd, function(_, level)
+            local list = menu.entries()
+            for index, entry in ipairs(list) do
+                local info = UIDropDownMenu_CreateInfo()
+                if index > DROPDOWN_CAP then
+                    info.text, info.isTitle, info.notCheckable = format("…and %d more", #list - DROPDOWN_CAP), true, true
+                    UIDropDownMenu_AddButton(info, level)
+                    break
+                end
+                info.text = entry.text
+                if entry.note then
+                    info.isTitle, info.notCheckable = true, true
+                else
+                    info.checked = menu.isSelected(entry.value)
+                    info.func = function()
+                        menu.pick(entry.value)
+                        CloseDropDownMenus()
+                    end
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        function dd:SetLabel(text) UIDropDownMenu_SetText(self, text) end
+    end
+    return dd
+end
+
 -- ---------------------------------------------------------------- thread list
 
 local listScroll, listChild = makeScroll(frame, LIST_WIDTH - 10)
@@ -344,25 +412,45 @@ local newHelp = newPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 newHelp:SetPoint("TOPLEFT", 4, -8)
 newHelp:SetPoint("RIGHT", -4, 0)
 newHelp:SetJustifyH("LEFT")
-local envButton = button(newPanel, "Machine", 260, function()
-    local list = inbox and inbox.envs or {}
-    if #list == 0 then return end
-    selected.env = list[(envIndexById(selected.env) or 0) % #list + 1].id
-    selected.project = nil
-    UI.Refresh()
-end)
-envButton:SetPoint("TOPLEFT", newHelp, "BOTTOMLEFT", 0, -12)
-local projectButton = button(newPanel, "Project", 260, function()
-    local list = UI.ProjectsFor(envIndexById(selected.env))
-    local at = 0
-    for index, p in ipairs(list) do
-        if p.id == selected.project then at = index end
-    end
-    local nextProject = list[(at + 1) % (#list + 1)]
-    selected.project = nextProject and nextProject.id or nil
-    UI.Refresh()
-end)
-projectButton:SetPoint("TOPLEFT", envButton, "BOTTOMLEFT", 0, -6)
+-- The machine and project dropdowns. The project list is the picked machine's.
+local function composing() return selected ~= nil and selected.new end
+local envLabel = newPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+envLabel:SetPoint("TOPLEFT", newHelp, "BOTTOMLEFT", 0, -20)
+envLabel:SetText("Machine")
+local envMenu = dropdown(newPanel, "T3WoWMachineMenu", 240, {
+    entries = function()
+        local list = {}
+        for _, e in ipairs(inbox and inbox.envs or {}) do list[#list + 1] = { text = e.name, value = e.id } end
+        if #list == 0 then list[1] = { text = "No machines linked: link one in T3", note = true } end
+        return list
+    end,
+    isSelected = function(id) return composing() and selected.env == id end,
+    pick = function(id)
+        if not composing() or selected.env == id then return end
+        selected.env, selected.project = id, nil
+        UI.Refresh()
+    end,
+})
+envMenu:SetPoint("LEFT", envLabel, "LEFT", 70, 0)
+local projectLabel = newPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+projectLabel:SetPoint("TOPLEFT", envLabel, "BOTTOMLEFT", 0, -22)
+projectLabel:SetText("Project")
+local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
+    entries = function()
+        local list = { { text = "No project (scratch)" } }
+        local projects = composing() and UI.ProjectsFor(envIndexById(selected.env)) or {}
+        for _, p in ipairs(projects) do list[#list + 1] = { text = p.t, value = p.id } end
+        if #projects == 0 then list[2] = { text = "No projects on this machine", note = true } end
+        return list
+    end,
+    isSelected = function(id) return composing() and selected.project == id end,
+    pick = function(id)
+        if not composing() then return end
+        selected.project = id
+        UI.Refresh()
+    end,
+})
+projectMenu:SetPoint("LEFT", projectLabel, "LEFT", 70, 0)
 
 -- The New Thread composer's project, if it is still listed.
 local function selectedProject()
@@ -599,9 +687,10 @@ function renderView()
         viewMeta:SetText("Type the task below and press Send.")
         local blocked = blockedReason("new")
         newHelp:SetText(blocked and ("|cffff8000" .. blocked .. "|r") or "The thread uses the project's default model and mode.")
-        envButton:SetText("Machine: " .. (e and e.name or "|cffff4040no longer linked: pick another|r"))
-        projectButton:SetText("Project: " .. (project and project.t
-            or (selected.project and "|cffff4040gone: pick another|r" or "No project (scratch)")))
+        local noMachines = #(inbox and inbox.envs or {}) == 0
+        envMenu:SetLabel(e and e.name or (noMachines and "|cffff4040none linked|r" or "|cffff4040no longer linked: pick another|r"))
+        projectMenu:SetLabel(project and project.t
+            or (selected.project and "|cffff4040gone: pick another|r" or "No project (scratch)"))
         return
     end
     newPanel:Hide()
@@ -741,8 +830,10 @@ local function sendCurrent()
     -- What was picked may have gone since (a machine unlinked, a project removed): then
     -- nothing is sent and the text stays.
     if not envById(selected.env) then
-        UI.Notice(selected.new and "That machine isn't linked any more: pick another with Machine."
-            or "That thread's machine isn't linked any more.")
+        local noMachines = #(inbox and inbox.envs or {}) == 0
+        UI.Notice(not selected.new and "That thread's machine isn't linked any more."
+            or noMachines and "No machine to start it on: link one in T3."
+            or "That machine isn't linked any more: pick another with Machine.")
         return
     end
     if selected.new and selected.project and not selectedProject() then
