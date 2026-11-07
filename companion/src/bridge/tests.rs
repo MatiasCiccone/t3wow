@@ -10,6 +10,10 @@ struct FakeT3 {
     env_id: Mutex<String>,
     /// The machines the "local" server links.
     links: Mutex<Value>,
+    /// Calls that take a while (ms, on the rig's clock) or fail, by tool name.
+    delays: Mutex<HashMap<String, i64>>,
+    failing: Mutex<HashMap<String, String>>,
+    clock: Mutex<Option<Arc<Mutex<i64>>>>,
 }
 
 impl FakeT3 {
@@ -23,6 +27,9 @@ impl FakeT3 {
             questions: Mutex::new(true),
             env_id: Mutex::new("local".into()),
             links: Mutex::new(json!([{ "environmentId": "mac", "label": "Mac", "status": "reachable" }])),
+            delays: Mutex::new(HashMap::new()),
+            failing: Mutex::new(HashMap::new()),
+            clock: Mutex::new(None),
         })
     }
 
@@ -46,6 +53,12 @@ impl FakeT3 {
 impl T3 for FakeT3 {
     fn call(&self, name: &str, args: Value) -> Result<Value, T3Error> {
         self.calls.lock().unwrap().push((name.to_string(), args.clone()));
+        if let (Some(ms), Some(clock)) = (self.delays.lock().unwrap().get(name), self.clock.lock().unwrap().as_ref()) {
+            *clock.lock().unwrap() += ms;
+        }
+        if let Some(message) = self.failing.lock().unwrap().get(name) {
+            return Err(T3Error::Other(message.clone()));
+        }
         Ok(match name {
             "t3_environment_links" => {
                 let env_id = self.env_id.lock().unwrap().clone();
@@ -141,6 +154,7 @@ impl Rig {
         let t3 = FakeT3::new();
         let written = Arc::new(Mutex::new(Written::default()));
         let clock = Arc::new(Mutex::new(start_ms));
+        *t3.clock.lock().unwrap() = Some(Arc::clone(&clock));
         let now = Arc::clone(&clock);
         let mut bridge = Bridge::new(t3.clone(), Box::new(FakeSlots(Arc::clone(&written))), None, Box::new(|_| {}), Box::new(move || *now.lock().unwrap()));
         bridge.on_capture(CaptureMessage::Wow(Some("123@1".into())));
@@ -677,4 +691,87 @@ fn a_machine_no_longer_linked_leaves_the_list_and_a_reorder_keeps_ids_straight()
     assert_eq!(machines(&rig), vec![(1, "local".into())]);
     assert!(snapshot["projects"].as_array().unwrap().iter().all(|p| p["e"] == 1), "{}", snapshot["projects"]);
     assert!(snapshot["view"].is_null());
+}
+
+#[test]
+fn a_slow_t3_doesnt_hold_up_the_games_commands_between_poll_steps() {
+    let mut rig = Rig::new(18_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    // Every thread list now takes 5 s: a poll's list step is slower than a tick's budget.
+    rig.t3.delays.lock().unwrap().insert("t3_thread_list".into(), 5_000);
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert!(rig.bridge.poll_run.is_some(), "the poll gave way after its slow step");
+
+    // Stop, pressed meanwhile, runs on the next tick, before the poll goes on.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "stop", "id": "t1" }] }));
+    let reads_before = rig.t3.calls_to("t3_thread_read").len();
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_interrupt").len(), 1);
+    assert!(rig.t3.calls_to("t3_thread_read").len() >= reads_before);
+    for _ in 0..5 {
+        rig.bridge.tick();
+    }
+    assert!(rig.bridge.poll_run.is_none() || rig.bridge.repoll, "the poll ends, and another follows for the command");
+}
+
+#[test]
+fn the_next_poll_counts_from_the_end_of_the_last_and_failures_space_them_out() {
+    let mut rig = Rig::new(19_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    // A poll that takes 30 s: the next one is 12 s after it ends, not straight away.
+    rig.t3.delays.lock().unwrap().insert("t3_thread_list".into(), 5_000);
+    rig.advance(12_000);
+    while {
+        rig.bridge.tick();
+        rig.bridge.poll_run.is_some()
+    } {}
+    let ended = *rig.clock.lock().unwrap();
+    assert_eq!(rig.bridge.poll_at, ended + 12_000);
+    rig.t3.delays.lock().unwrap().clear();
+
+    // T3 fails: 24 s, 48 s, then at most a minute between tries.
+    rig.t3.failing.lock().unwrap().insert("t3_thread_list".into(), "connection refused".into());
+    rig.t3.failing.lock().unwrap().insert("t3_environment_links".into(), "connection refused".into());
+    let mut gaps = Vec::new();
+    for _ in 0..4 {
+        let wait = rig.bridge.poll_at - *rig.clock.lock().unwrap();
+        rig.advance(wait.max(0));
+        rig.bridge.tick();
+        gaps.push(rig.bridge.poll_at - *rig.clock.lock().unwrap());
+    }
+    assert_eq!(gaps, vec![24_000, 48_000, 60_000, 60_000]);
+    assert!(!rig.bridge.status().t3_ok);
+
+    rig.t3.failing.lock().unwrap().clear();
+    rig.advance(60_000);
+    rig.bridge.tick();
+    assert!(rig.bridge.status().t3_ok);
+    assert_eq!(rig.bridge.poll_at - *rig.clock.lock().unwrap(), 12_000);
+}
+
+#[test]
+fn past_the_polls_deadline_question_checks_wait_for_the_next_poll() {
+    let mut rig = Rig::new(20_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        for n in 2..=6 {
+            let mut t = threads[0].clone();
+            t["threadId"] = json!(format!("t{n}"));
+            threads.push(t);
+        }
+    }
+    // Each check reads the thread, and each read takes 8 s.
+    rig.t3.delays.lock().unwrap().insert("t3_thread_read".into(), 8_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    while {
+        rig.bridge.tick();
+        rig.bridge.poll_run.is_some()
+    } {}
+    // 12 working threads on two machines; the deadline (20 s) allows three reads, plus the one under way.
+    let checks = rig.t3.calls_to("t3_thread_read").len();
+    assert!(checks <= 4, "{checks} reads");
+    assert_eq!(rig.bridge.snapshot()["threads"].as_array().unwrap().len(), 12, "the lists are all there");
 }

@@ -129,11 +129,13 @@ pub struct SignIn {
 }
 
 /// HTTP statuses come back as responses (not errors), so callers read error bodies too.
+/// A call gets 15 s: the bridge reads T3 on one thread, and a hung T3 mustn't hold up the
+/// game's commands, Stop or a sign-out for longer.
 fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_global(Some(Duration::from_secs(60)))
+            .timeout_global(Some(Duration::from_secs(15)))
             .http_status_as_error(false)
             .build(),
     )
