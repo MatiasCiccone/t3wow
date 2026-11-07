@@ -30,12 +30,68 @@ function inboxWith(envs, extra)
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
 end
+-- What a dropdown lists when opened, whichever menu system built it: { text, checked, pick }
+-- (pick is nil for a line that can't be picked), and the list's scroll height if it scrolls.
+function menuEntries(name)
+  local menu, out = _G[name], {}
+  if rawget(menu, "generator") then
+    local root = {}
+    function root:SetScrollMode(height) out.scroll = height end
+    function root:CreateTitle(text) out[#out + 1] = { text = text } end
+    function root:CreateRadio(text, isSelected, setSelected, data)
+      out[#out + 1] = { text = text, checked = isSelected(data), pick = function() return setSelected(data) end }
+    end
+    menu.generator(menu, root)
+  else
+    menuItems = {}
+    menu.init(menu, 1)
+    for _, info in ipairs(menuItems) do out[#out + 1] = { text = info.text, checked = info.checked, pick = info.func } end
+    menuItems = nil
+  end
+  return out
+end
+function menuTexts(name)
+  local texts = {}
+  for _, e in ipairs(menuEntries(name)) do texts[#texts + 1] = e.text end
+  return table.concat(texts, "|")
+end
+function pick(name, text)
+  for _, e in ipairs(menuEntries(name)) do
+    if e.text == text then
+      assert(e.pick, text .. " can't be picked")
+      return e.pick()
+    end
+  end
+  error("no " .. text .. " in " .. menuTexts(name))
+end
+-- What a dropdown shows while closed.
+function shown(name) return _G[name].text end
 ENVS = { LOCAL, MAC }
 Link.Init()
 UI.Toggle()
 `;
 
-const run = (script) => runGame(UI_HELPERS + script, { ui: true });
+// Blizzard's menu system (WowStyle1DropdownTemplate), which the game here lacks: a
+// dropdown keeps its list function and the text it shows.
+const MODERN_MENU = `
+C_XMLUtil = { GetTemplateInfo = function(name) if name == "WowStyle1DropdownTemplate" then return {} end end }
+MenuUtil = {}
+MenuResponse = { Close = 3 }
+local createFrame = CreateFrame
+function CreateFrame(kind, name, parent, template)
+  local f = createFrame(kind, name, parent, template)
+  if template == "WowStyle1DropdownTemplate" then
+    function f:SetupMenu(generator) self.generator = generator end
+    function f:OverrideText(text) self.text = text end
+  end
+  return f
+end
+`;
+
+const run = (script, { modern = false } = {}) =>
+  runGame(UI_HELPERS + script, { ui: true, before: modern ? MODERN_MENU : "" });
+// The New Thread dropdowns under both menu systems.
+const MENUS = [["Blizzard's menu", true], ["UIDropDownMenu", false]];
 
 test("a thread stays selected by its machine's id when the machine list changes", () => {
   run(`
@@ -59,14 +115,16 @@ return "ok"
 `);
 });
 
-test("New Thread keeps the machine and project it was given, and refuses once they're gone", () => {
+for (const [menus, modern] of MENUS) test(`New Thread keeps the machine and project it was given, and refuses once they're gone (${menus})`, () => {
   run(`
 local projects = { { e = 1, id = "pa", t = "alpha" }, { e = 2, id = "pm", t = "mac app" } }
 inboxWith(ENVS, { projects = projects })
 click("New Thread")
-click("Machine: PC")
-assert(find("Button", "Machine: Mac"), "machine didn't change")
-click("Project: No project (scratch)")
+assert(shown("T3WoWMachineMenu") == "PC", shown("T3WoWMachineMenu"))
+pick("T3WoWMachineMenu", "Mac")
+assert(shown("T3WoWMachineMenu") == "Mac", "machine didn't change")
+pick("T3WoWProjectMenu", "mac app")
+assert(shown("T3WoWProjectMenu") == "mac app", shown("T3WoWProjectMenu"))
 -- The local machine drops out of the list: the Mac's project is still the one picked.
 inboxWith({ ENVS[2] }, { projects = { { e = 1, id = "pm", t = "mac app" } } })
 typeText("build it")
@@ -79,6 +137,86 @@ local before = #queue()
 click("Start")
 assert(#queue() == before, "started with a project that's gone")
 assert(typed() == "again", typed())
+assert(shown("T3WoWProjectMenu"):find("gone: pick another"), shown("T3WoWProjectMenu"))
+-- The Mac is unlinked too: Start refuses, keeps the text, and the dropdown says so.
+inboxWith({ ENVS[1] })
+pick("T3WoWProjectMenu", "No project (scratch)")
+click("Start")
+assert(#queue() == before, "started on a machine that's gone")
+assert(typed() == "again", typed())
+assert(shown("T3WoWMachineMenu"):find("no longer linked"), shown("T3WoWMachineMenu"))
+return "ok"
+`, { modern });
+});
+
+for (const [menus, modern] of MENUS) test(`the project dropdown lists the picked machine's projects (${menus})`, () => {
+  run(`
+local projects = { { e = 1, id = "pb", t = "beta" }, { e = 1, id = "pa", t = "Alpha" }, { e = 2, id = "pm", t = "mac app" } }
+inboxWith(ENVS, { projects = projects })
+click("New Thread")
+assert(menuTexts("T3WoWMachineMenu") == "PC|Mac", menuTexts("T3WoWMachineMenu"))
+assert(menuTexts("T3WoWProjectMenu") == "No project (scratch)|Alpha|beta", menuTexts("T3WoWProjectMenu"))
+assert(menuEntries("T3WoWProjectMenu")[1].checked, "scratch isn't checked")
+pick("T3WoWProjectMenu", "beta")
+assert(menuEntries("T3WoWProjectMenu")[3].checked and not menuEntries("T3WoWProjectMenu")[1].checked, "beta isn't checked")
+-- Another machine: its projects, and the project picked goes back to none.
+pick("T3WoWMachineMenu", "Mac")
+assert(menuEntries("T3WoWMachineMenu")[2].checked, "Mac isn't checked")
+assert(menuTexts("T3WoWProjectMenu") == "No project (scratch)|mac app", menuTexts("T3WoWProjectMenu"))
+assert(shown("T3WoWProjectMenu") == "No project (scratch)", shown("T3WoWProjectMenu"))
+-- Picking the machine already picked keeps the project.
+pick("T3WoWProjectMenu", "mac app")
+pick("T3WoWMachineMenu", "Mac")
+assert(shown("T3WoWProjectMenu") == "mac app", shown("T3WoWProjectMenu"))
+typeText("build it")
+click("Start")
+assert(sent().t == "new" and sent().e == "mac" and sent().p == "pm", tostring(sent().e) .. "/" .. tostring(sent().p))
+return "ok"
+`, { modern });
+});
+
+for (const [menus, modern] of MENUS) test(`New Thread with no machines or no projects says so (${menus})`, () => {
+  run(`
+inboxWith({})
+click("New Thread")
+inboxWith({})
+assert(shown("T3WoWMachineMenu"):find("none linked"), shown("T3WoWMachineMenu"))
+local machines = menuEntries("T3WoWMachineMenu")
+assert(#machines == 1 and machines[1].text:find("No machines linked") and not machines[1].pick, menuTexts("T3WoWMachineMenu"))
+typeText("build it")
+local before = #queue()
+click("Start")
+assert(#queue() == before and typed() == "build it", "started with no machine")
+assert(showing("No machine to start it on"), "no reason given")
+-- A machine with no projects: scratch, and a line saying there are none.
+inboxWith(ENVS)
+click("New Thread")
+local list = menuEntries("T3WoWProjectMenu")
+assert(#list == 2 and list[1].pick and list[2].text == "No projects on this machine" and not list[2].pick, menuTexts("T3WoWProjectMenu"))
+return "ok"
+`, { modern });
+});
+
+test("a long project list scrolls in Blizzard's menu and is capped in UIDropDownMenu", () => {
+  const many = `
+local projects = {}
+for i = 1, 60 do projects[i] = { e = 1, id = "p" .. i, t = string.format("project %02d", i) } end
+inboxWith(ENVS, { projects = projects })
+click("New Thread")
+`;
+  run(`${many}
+local list = menuEntries("T3WoWProjectMenu")
+assert(#list == 61 and list.scroll and list.scroll > 0, #list .. " entries, scroll " .. tostring(list.scroll))
+assert(not menuEntries("T3WoWMachineMenu").scroll, "a short list scrolls")
+pick("T3WoWProjectMenu", "project 60")
+assert(shown("T3WoWProjectMenu") == "project 60", shown("T3WoWProjectMenu"))
+return "ok"
+`, { modern: true });
+  run(`${many}
+local list = menuEntries("T3WoWProjectMenu")
+assert(#list == 41 and list[41].text == "…and 21 more" and not list[41].pick, #list .. " " .. tostring(list[#list].text))
+pick("T3WoWProjectMenu", "project 39")
+assert(shown("T3WoWProjectMenu") == "project 39", shown("T3WoWProjectMenu"))
 return "ok"
 `);
 });
@@ -136,7 +274,7 @@ test("a started thread opens in place of the New Thread composer", () => {
   run(`
 inboxWith(ENVS, { projects = { { e = 2, id = "pm", t = "mac app" } } })
 click("New Thread")
-click("Machine: PC")
+pick("T3WoWMachineMenu", "Mac")
 typeText("Build it")
 click("Start")
 local s = sent().s
