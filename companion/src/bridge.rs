@@ -368,7 +368,6 @@ impl Bridge {
             view_data: None,
             view_key: None,
             view_cache: None,
-
             notes: Vec::new(),
             events: Vec::new(),
             event_seq: 0,
@@ -871,6 +870,7 @@ impl Bridge {
         self.last_status.retain(|key, _| linked(env_of(key)));
         self.pending_counts.retain(|key, _| linked(env_of(key)));
         self.launchers.retain(|key, _| linked(env_of(key)));
+        self.list_errors.retain(|env, _| linked(env));
         if self.view.as_ref().is_some_and(|v| !linked(&v.env)) {
             self.view = None;
             self.view_data = None;

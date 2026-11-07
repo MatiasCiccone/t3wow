@@ -766,7 +766,6 @@ local function renderStatus()
     end
     connection:SetText(connected)
     reload:SetShown(ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil)
-
     local line = notice
     if not line and inbox and inbox.notes and #inbox.notes > 0 then
         local last = inbox.notes[#inbox.notes]
@@ -1343,7 +1342,6 @@ frame:SetScript("OnUpdate", function(_, delta)
         renderView()
     end
     renderStatus()
-
 end)
 
 function UI.Toggle() frame:SetShown(not frame:IsShown()) end
