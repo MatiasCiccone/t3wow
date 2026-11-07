@@ -50,6 +50,8 @@ local function fontString()
   function fs:Show() self.hidden = false end
   function fs:Hide() self.hidden = true end
   function fs:IsShown() return not self.hidden end
+  function fs:SetPoint(...) self.point = { ... } end
+  function fs:ClearAllPoints() self.point = nil end
   fontStrings[#fontStrings + 1] = fs
   return setmetatable(fs, { __index = function() return function() return 0 end end })
 end

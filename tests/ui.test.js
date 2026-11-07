@@ -504,3 +504,38 @@ assert(stopButton().text == "Stopping…", "back on the first: " .. stopButton()
 return "ok"
 `);
 });
+
+// The shown font string whose text matches the Lua pattern.
+const SHOWN = `
+function shownString(pattern)
+  for _, fs in ipairs(fontStrings) do
+    if not fs.hidden and type(fs.text) == "string" and fs.text:find(pattern) then return fs end
+  end
+end
+function below(fs, above) return fs.point and fs.point[2] == above and fs.point[3] == "BOTTOMLEFT" end
+`;
+
+test("each message and the Working… line sit below the one before, however tall its text is", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "Hi" } }
+local view = { e = 1, id = "t1", t = "Thread", s = "running", items = items }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+typeText("No tailscale. Just lan and t3")
+click("Send")
+assert(below(shownString("%(sending%)"), shownString("Hi")), "the echo isn't below the last message")
+assert(below(shownString("Working…"), shownString("%(sending%)")), "Working… isn't below the echo")
+-- Your message and a long reply arrive together: the reply takes the string Working… had.
+local reply = string.rep("The SSH tunnel I suggested earlier won't help here. ", 40)
+items = { items[1], { r = "u", x = "No tailscale. Just lan and t3" }, { r = "a", x = reply } }
+view = { e = 1, id = "t1", t = "Thread", s = "running", items = items }
+inboxWith(ENVS, { threads = { thread }, view = view })
+local you, agent, working = shownString("No tailscale"), shownString("SSH tunnel"), shownString("Working…")
+assert(not shownString("%(sending%)"), "echo still there")
+assert(below(you, shownString("Hi")), "your message isn't below the one before")
+assert(below(agent, you), "the reply isn't below your message")
+assert(below(working, agent), "Working… isn't below the reply")
+return "ok"
+`);
+});

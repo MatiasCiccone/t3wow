@@ -414,6 +414,20 @@ local function messageString(index)
     return fs
 end
 
+-- The conversation is laid out top to bottom, each piece hung from the bottom of the one
+-- before it, so the game places it by the height its text really has. A height read just
+-- after SetText can still be the string's old text's (text is laid out later), which once
+-- drew "Working…" over a long reply that had taken the string "Working…" used before.
+local flow = {}
+local function flowStart(top) flow.last, flow.x, flow.gap = nil, 0, top end
+-- Places a region x from the left, below the last one; `after` is the space under it.
+local function place(region, x, after)
+    region:ClearAllPoints()
+    region:SetPoint("TOPLEFT", flow.last or messageChild, flow.last and "BOTTOMLEFT" or "TOPLEFT", x - flow.x, -flow.gap)
+    region:Show()
+    flow.last, flow.x, flow.gap = region, x, after
+end
+
 local newPanel = CreateFrame("Frame", nil, right)
 newPanel:SetPoint("TOPLEFT", 0, -40)
 newPanel:SetPoint("BOTTOMRIGHT", -24, 92)
@@ -480,14 +494,13 @@ end
 -- A thread opens scrolled to its latest message. The messages arrive a moment after the
 -- click, so the wish is kept until they are drawn.
 local scrollToEnd = false
-local function scrollToBottom()
+-- The scroll child is as tall as what is laid out in it, measured from where the game put
+-- the last piece; then, if asked, the conversation scrolls to its end.
+local function fit(stickToBottom)
+    local top, bottom = messageChild:GetTop(), flow.last and flow.last:GetBottom()
+    if top and bottom then messageChild:SetHeight(math.max(top - bottom + 8, 1)) end
     messageScroll:UpdateScrollChildRect()
-    messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange())
-    -- Text heights can settle a frame later; scroll again then.
-    C_Timer.After(0, function()
-        messageScroll:UpdateScrollChildRect()
-        messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange())
-    end)
+    if stickToBottom then messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange()) end
 end
 
 -- ---------------------------------------------------------------- questions from the agent
@@ -611,8 +624,8 @@ local function hideAsk()
     approvalOpen:Hide()
 end
 
--- Draws the question (or the approval note) from y down; returns the new y.
-local function renderAsk(view, y)
+-- Draws the question (or the approval note) below what is laid out so far.
+local function renderAsk(view)
     hideAsk()
     local ask = view.ask
     if setPlaceholder then setPlaceholder() end
@@ -621,16 +634,10 @@ local function renderAsk(view, y)
             local fs = askString(1)
             fs:SetWidth(messageWidth() - 8)
             fs:SetText("|cffff8000Waiting for your approval.|r Approve or deny it in T3: by design, T3 doesn't take approvals from anywhere else. Open in T3 brings it up on this thread; Stop cancels the run from here.")
-            fs:ClearAllPoints()
-            fs:SetPoint("TOPLEFT", 4, -y)
-            fs:Show()
-            y = y + fs:GetStringHeight() + 8
-            approvalOpen:ClearAllPoints()
-            approvalOpen:SetPoint("TOPLEFT", 4, -y)
-            approvalOpen:Show()
-            y = y + 32
+            place(fs, 4, 8)
+            place(approvalOpen, 4, 8)
         end
-        return y
+        return
     end
     if askState.k ~= ask.k then askState = { k = ask.k, picks = {} } end
     local width = messageWidth() - 16
@@ -641,10 +648,7 @@ local function renderAsk(view, y)
         fs:SetWidth(width)
         fs:SetText(format("|cffff8000%s|r%s\n%s", (q.h and q.h ~= "") and q.h or "Question",
             q.m and " |cffa0a0a0(pick any)|r" or "", q.q or ""))
-        fs:ClearAllPoints()
-        fs:SetPoint("TOPLEFT", 4, -y)
-        fs:Show()
-        y = y + fs:GetStringHeight() + 6
+        place(fs, 4, 6)
         for oi, o in ipairs(q.o or {}) do
             bi = bi + 1
             local b = askButton(bi)
@@ -655,20 +659,15 @@ local function renderAsk(view, y)
             b:SetWidth(math.min(width, math.max(140, b:GetFontString():GetStringWidth() + 32)))
             if picked then b:LockHighlight() else b:UnlockHighlight() end
             b:SetEnabled(not blockedReason("answer"))
-            b:ClearAllPoints()
-            b:SetPoint("TOPLEFT", 12, -y)
-            b:Show()
-            y = y + 25
+            place(b, 12, 3)
         end
-        y = y + 8
+        flow.gap = flow.gap + 8
     end
     local sending = askState.sent == ask.k and GetTime() - (askState.sentAt or 0) < ANSWER_TIMEOUT
     local blocked = blockedReason("answer")
-    askSend:ClearAllPoints()
-    askSend:SetPoint("TOPLEFT", 12, -y)
     askSend:SetText(sending and "Sending…" or "Send answer")
     askSend:SetEnabled(not sending and not blocked)
-    askSend:Show()
+    place(askSend, 12, 10)
     si = si + 1
     local hint = askString(si)
     hint:SetWidth(math.max(80, width - 150))
@@ -677,7 +676,6 @@ local function renderAsk(view, y)
     hint:ClearAllPoints()
     hint:SetPoint("LEFT", askSend, "RIGHT", 10, 0)
     hint:Show()
-    return y + 34
 end
 
 function renderView()
@@ -719,15 +717,15 @@ function renderView()
     if not view then
         local fs = messageString(1)
         fs:SetText("|cffa0a0a0Loading…|r")
-        fs:SetPoint("TOPLEFT", 4, 0)
-        fs:Show()
+        flowStart(0)
+        place(fs, 4, 0)
         return
     end
-    local y = 0
+    flowStart(0)
     if view.more then
         earlier:SetPoint("TOP", messageChild, "TOP", 0, 0)
         earlier:Show()
-        y = 30
+        flowStart(30)
     end
     local items = view.items or {}
     local count = #items
@@ -735,9 +733,7 @@ function renderView()
         local fs = messageString(i)
         local who = item.r == "u" and "|cff7fbfffYou|r" or "|cff40c0c0Agent|r"
         fs:SetText(who .. "\n" .. item.x)
-        fs:SetPoint("TOPLEFT", 4, -y)
-        fs:Show()
-        y = y + fs:GetStringHeight() + 14
+        place(fs, 4, 14)
     end
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may
@@ -755,24 +751,20 @@ function renderView()
         else
             local fs = messageString(count + 1)
             fs:SetText("|cff7fbfffYou|r |cffa0a0a0(sending)|r\n" .. echo.text:gsub("|", "||"))
-            fs:SetPoint("TOPLEFT", 4, -y)
-            fs:Show()
-            y = y + fs:GetStringHeight() + 14
+            place(fs, 4, 14)
         end
     end
-    y = renderAsk(view, y)
+    renderAsk(view)
     if WORKING[status] then
         local fs = messageString(count + 2)
         fs:SetText("|cffffd100Working…|r")
-        fs:SetPoint("TOPLEFT", 4, -y)
-        fs:Show()
-        y = y + fs:GetStringHeight() + 14
+        place(fs, 4, 14)
     end
-    messageChild:SetHeight(math.max(y, 1))
-    if stickToBottom then
-        scrollToEnd = false
-        scrollToBottom()
-    end
+    -- Sized now from what the game has laid out, and again next frame, once text heights
+    -- have settled.
+    if stickToBottom then scrollToEnd = false end
+    fit(stickToBottom)
+    C_Timer.After(0, function() fit(stickToBottom) end)
 end
 
 -- ---------------------------------------------------------------- composer
