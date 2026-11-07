@@ -157,13 +157,56 @@ fn check_exe(exe: &[u8], expected_sha: &str) -> Result<(), String> {
 /// Downloads the release, checks it, and swaps it in for the running exe (Windows lets a
 /// running exe be renamed, not overwritten). The caller restarts the companion.
 pub fn install(release: &Release) -> Result<(), String> {
-    let sha_file = download(&release.sha_url, MAX_SMALL_FILE_BYTES)?;
-    let sig_file = download(&release.sig_url, MAX_SMALL_FILE_BYTES)?;
-    let expected = signed_checksum(&sha_file, &sig_file, &RELEASE_PUBLIC_KEY)?;
-    let exe_bytes = download(&release.exe_url, MAX_EXE_BYTES)?;
-    check_exe(&exe_bytes, &expected)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    swap_in(&exe, &exe_bytes, |from, to| fs::rename(from, to))
+    update_exe(
+        &exe,
+        &release.version,
+        || {
+            let sha_file = download(&release.sha_url, MAX_SMALL_FILE_BYTES)?;
+            let sig_file = download(&release.sig_url, MAX_SMALL_FILE_BYTES)?;
+            let expected = signed_checksum(&sha_file, &sig_file, &RELEASE_PUBLIC_KEY)?;
+            let exe_bytes = download(&release.exe_url, MAX_EXE_BYTES)?;
+            check_exe(&exe_bytes, &expected)?;
+            Ok(exe_bytes)
+        },
+        |from, to| fs::rename(from, to),
+    )
+}
+
+/// One whole update under the update lock, from download to swap: a second update (the
+/// tray and `t3wow.exe update` at once) stops at the lock, and one that runs after another
+/// stops when the exe on disk is already that version or newer, so a slow, older update
+/// can't replace a newer one. `fetch` downloads and checks the new exe.
+fn update_exe(
+    exe: &Path,
+    version: &str,
+    fetch: impl FnOnce() -> Result<Vec<u8>, String>,
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), String> {
+    let _lock = try_lock(exe)?;
+    if let Some(installed) = installed_version(exe).filter(|v| !compare_versions(version, v).is_gt()) {
+        return Err(format!("already updated to {installed}: restart T3 WoW (Quit from its tray menu, then start it again)"));
+    }
+    let bytes = fetch()?;
+    swap_files(exe, &bytes, rename)?;
+    // What is now on disk, tied to the exe's modified time: an exe replaced by hand later
+    // doesn't match, so its record no longer counts.
+    if let Some(modified) = modified_ms(exe) {
+        let _ = fs::write(sibling(exe, "version"), format!("{version}\n{modified}\n"));
+    }
+    Ok(())
+}
+
+fn modified_ms(exe: &Path) -> Option<u128> {
+    fs::metadata(exe).ok()?.modified().ok()?.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis())
+}
+
+/// The version an update put on disk, while the exe is still the file it wrote.
+fn installed_version(exe: &Path) -> Option<String> {
+    let text = fs::read_to_string(sibling(exe, "version")).ok()?;
+    let mut lines = text.lines();
+    let (version, modified) = (lines.next()?, lines.next()?.parse::<u128>().ok()?);
+    (modified_ms(exe) == Some(modified)).then(|| version.to_string())
 }
 
 /// `<exe name>.<suffix>`, next to the exe.
@@ -187,12 +230,12 @@ fn try_lock(exe: &Path) -> Result<File, String> {
     }
 }
 
-/// Puts `bytes` in place of `exe`, one update at a time. The new exe is staged under a name
-/// of its own, and the previous exe is kept until the new one is in place, so a failed swap
-/// puts it back. After a swap, the previous exe stays (a running exe can't be deleted) until
-/// `clean_up` on the next start. `rename` is fs::rename, or one that fails, in tests.
-fn swap_in(exe: &Path, bytes: &[u8], rename: impl Fn(&Path, &Path) -> io::Result<()>) -> Result<(), String> {
-    let _lock = try_lock(exe)?;
+/// Puts `bytes` in place of `exe` (the caller holds the update lock). The new exe is staged
+/// under a name of its own, and the previous exe is kept until the new one is in place, so a
+/// failed swap puts it back. After a swap, the previous exe stays (a running exe can't be
+/// deleted) until `clean_up` on the next start. `rename` is fs::rename, or one that fails,
+/// in tests.
+fn swap_files(exe: &Path, bytes: &[u8], rename: impl Fn(&Path, &Path) -> io::Result<()>) -> Result<(), String> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let tag = format!("{}-{nanos}", std::process::id());
     let new = sibling(exe, &format!("new-{tag}"));
@@ -358,7 +401,7 @@ mod tests {
     /// The files next to the exe, other than the exe and the lock.
     fn leftovers(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        names.retain(|n| n != "t3wow.exe" && n != "t3wow.exe.update-lock");
+        names.retain(|n| n != "t3wow.exe" && n != "t3wow.exe.update-lock" && n != "t3wow.exe.version");
         names.sort();
         names
     }
@@ -366,7 +409,7 @@ mod tests {
     #[test]
     fn a_swap_puts_the_new_exe_in_place_and_keeps_the_old_one_until_the_next_start() {
         let (dir, exe) = exe_dir("ok");
-        swap_in(&exe, b"new exe", |from, to| fs::rename(from, to)).unwrap();
+        update_exe(&exe, "9.0.0", || Ok(b"new exe".to_vec()), |from, to| fs::rename(from, to)).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"new exe");
         let left = leftovers(&dir);
         assert_eq!(left.len(), 1);
@@ -381,7 +424,7 @@ mod tests {
     #[test]
     fn a_failed_swap_puts_the_old_exe_back() {
         let (dir, exe) = exe_dir("rollback");
-        let error = swap_in(&exe, b"new exe", |from, to| {
+        let error = update_exe(&exe, "9.0.0", || Ok(b"new exe".to_vec()), |from, to| {
             if to == exe && from.to_string_lossy().contains(".new-") {
                 return Err(io::Error::other("in use"));
             }
@@ -398,15 +441,40 @@ mod tests {
     fn one_update_at_a_time() {
         let (dir, exe) = exe_dir("lock");
         let held = try_lock(&exe).unwrap();
-        assert_eq!(swap_in(&exe, b"new exe", |from, to| fs::rename(from, to)), Err("another update is already running".into()));
+        let fetched = std::cell::Cell::new(false);
+        let fetch = || {
+            fetched.set(true);
+            Ok(b"new exe".to_vec())
+        };
+        assert_eq!(update_exe(&exe, "9.0.0", fetch, |from, to| fs::rename(from, to)), Err("another update is already running".into()));
+        assert!(!fetched.get(), "a second update stops before downloading");
         assert_eq!(fs::read(&exe).unwrap(), b"old exe");
         // Clean-up leaves a running update's files alone.
         fs::write(dir.join("t3wow.exe.new-1-2"), b"downloading").unwrap();
         clean_up_at(&exe);
         assert_eq!(leftovers(&dir), ["t3wow.exe.new-1-2"]);
         drop(held);
-        swap_in(&exe, b"new exe", |from, to| fs::rename(from, to)).unwrap();
+        update_exe(&exe, "9.0.0", || Ok(b"new exe".to_vec()), |from, to| fs::rename(from, to)).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"new exe");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_after_another_never_installs_an_older_or_the_same_version() {
+        let (dir, exe) = exe_dir("order");
+        let rename = |from: &Path, to: &Path| fs::rename(from, to);
+        update_exe(&exe, "0.6.0", || Ok(b"exe 0.6.0".to_vec()), rename).unwrap();
+        let older = update_exe(&exe, "0.5.0", || Ok(b"exe 0.5.0".to_vec()), rename);
+        assert!(older.unwrap_err().starts_with("already updated to 0.6.0"));
+        assert!(update_exe(&exe, "0.6.0", || Ok(b"again".to_vec()), rename).is_err());
+        assert_eq!(fs::read(&exe).unwrap(), b"exe 0.6.0");
+        update_exe(&exe, "0.7.0", || Ok(b"exe 0.7.0".to_vec()), rename).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"exe 0.7.0");
+        // An exe replaced by hand (another modified time): the record no longer counts.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&exe, b"exe 0.4.1, by hand").unwrap();
+        update_exe(&exe, "0.6.0", || Ok(b"exe 0.6.0".to_vec()), rename).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"exe 0.6.0");
         let _ = fs::remove_dir_all(&dir);
     }
 
