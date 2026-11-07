@@ -4,7 +4,7 @@ import { test } from "node:test";
 import fengari from "fengari";
 
 const { lua, lauxlib, lualib, to_luastring } = fengari;
-const read = (name) => readFileSync(new URL(`../../addon/T3WoW/${name}`, import.meta.url), "utf8");
+const read = (name) => readFileSync(new URL(`../addon/T3WoW/${name}`, import.meta.url), "utf8");
 
 // Runs the real addon Link.lua in a small simulated game: frames whose OnUpdate we drive,
 // fonts that load a while after SetFont (and only if the file was real when asked), slot

@@ -1,0 +1,48 @@
+# Publishes a release when a version tag is pushed (git tag v0.3.1 && git push origin v0.3.1).
+# The release carries what the companion's updater downloads (t3wow.exe and its SHA-256)
+# and the addon on its own, zipped for CurseForge or a manual install.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Versions match the tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $cargo = (Select-String -Path companion/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $addon = (Select-String -Path addon/T3WoW/T3WoW.toc -Pattern '^## Version: (.+)$').Matches[0].Groups[1].Value.Trim()
+          if ($tag -ne $cargo -or $tag -ne $addon) { throw "Tag $tag, companion $cargo, addon $addon: bump them together." }
+
+      - run: npm ci
+      - run: npm test
+
+      - run: cargo build --release --manifest-path companion/Cargo.toml
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item companion/target/release/t3wow.exe release/
+          $hash = (Get-FileHash release/t3wow.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  t3wow.exe" | Out-File -Encoding ascii -NoNewline release/t3wow.exe.sha256
+          Compress-Archive -Path addon/T3WoW -DestinationPath "release/T3WoW-${{ github.ref_name }}.zip"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

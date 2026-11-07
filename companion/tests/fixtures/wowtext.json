@@ -1,0 +1,26 @@
+[
+  {
+    "input": "**Bold** a|b `code`\n```js\nx()\n```\n## Head",
+    "output": "Bold a||b |cffc8c8a0code|r\n|cffc8c8a0x()|r\n|cffffd100Head|r"
+  },
+  {
+    "input": "- item one\n* item two\n  - nested\n\n\n\nafter gap",
+    "output": "• item one\n• item two\n  • nested\n\nafter gap"
+  },
+  {
+    "input": "see [the docs](https://x.y/z) and ![img](a.png) __under__",
+    "output": "see the docs and [img] under"
+  },
+  {
+    "input": "line\r\nwindows\rold mac",
+    "output": "line\nwindows\nold mac"
+  },
+  {
+    "input": "# Title\n\n```\n| table |\n```\ntrailing   ",
+    "output": "|cffffd100Title|r\n\n|cffc8c8a0|| table |||r\ntrailing"
+  },
+  {
+    "input": "aaaaaaaaaa|bbbbb",
+    "output": "aaaaaaaaaa||bbbbb"
+  }
+]

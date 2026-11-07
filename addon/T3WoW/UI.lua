@@ -488,7 +488,7 @@ local function renderStatus()
     elseif link.loadError then
         connected = "|cffff4040Slot addons blocked (" .. tostring(link.loadError) .. "): enable T3 WoW slots in AddOns|r"
     elseif ns.Link.Stalled() then
-        connected = "|cffff4040Companion not answering: is t3wow running?|r"
+        connected = "|cffff4040Companion not answering: is T3 WoW running in the system tray?|r"
     elseif not inbox then
         connected = "|cffa0a0a0Waiting for the companion…|r"
     elseif inbox.auth then

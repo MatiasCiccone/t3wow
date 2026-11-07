@@ -1,0 +1,328 @@
+//! The files the companion writes in the game's AddOns folder.
+//!
+//! The game reads an addon's files only when it loads that addon, and finds only files
+//! that existed when the client started. So replies travel through a pool of
+//! load-on-demand "slot" addons (each loads once per UI session), and "a reply is ready"
+//! travels through pre-made font files: a blank one never loads, a real one does.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+pub const SLOT_COUNT: u32 = 200;
+pub const SIGNAL_COUNT: u32 = 4000; // keep in step with addon/T3WoW/Link.lua
+pub const ADDON: &str = "T3WoW";
+
+pub fn slot_name(n: u32) -> String {
+    format!("{ADDON}_S{n:03}")
+}
+
+fn signal_file(n: u32) -> String {
+    format!("{n:04}.ttf")
+}
+
+/// The addon, embedded in the companion so the exe is all anyone needs.
+pub const ADDON_FILES: &[(&str, &[u8])] = &[
+    ("T3WoW.toc", include_bytes!("../../addon/T3WoW/T3WoW.toc")),
+    ("Bindings.xml", include_bytes!("../../addon/T3WoW/Bindings.xml")),
+    ("Codec.lua", include_bytes!("../../addon/T3WoW/Codec.lua")),
+    ("UI.lua", include_bytes!("../../addon/T3WoW/UI.lua")),
+    ("Link.lua", include_bytes!("../../addon/T3WoW/Link.lua")),
+    ("T3WoW.lua", include_bytes!("../../addon/T3WoW/T3WoW.lua")),
+    ("Media/logo.tga", include_bytes!("../../addon/T3WoW/Media/logo.tga")),
+];
+
+pub fn parse_version(toc: &str) -> Option<String> {
+    toc.lines()
+        .find_map(|line| line.strip_prefix("## Version:"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The `## Version:` of the addon this companion ships.
+pub fn shipped_version() -> String {
+    parse_version(&String::from_utf8_lossy(ADDON_FILES[0].1)).unwrap_or_else(|| "0".into())
+}
+
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |v: &str| v.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let (pa, pb) = (parse(a), parse(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let order = pa.get(i).unwrap_or(&0).cmp(pb.get(i).unwrap_or(&0));
+        if order.is_ne() {
+            return order;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// A 2x2 white 32-bit TGA, the smallest texture the game is sure to accept.
+fn tiny_tga() -> Vec<u8> {
+    let mut out = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0x28];
+    out.extend_from_slice(&[0xff; 16]);
+    out
+}
+
+/// A Windows text font, or None. Only copied on this PC, never shipped. Symbol fonts
+/// (Marlett and the like) don't load in the game, so these are plain text fonts.
+fn windows_font(names: &[&str]) -> Option<Vec<u8>> {
+    let dir = PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into())).join("Fonts");
+    names.iter().find_map(|name| fs::read(dir.join(name)).ok())
+}
+
+/// Every signal is a copy of this font (Lucida Console is about 110 KB), so small wins.
+fn small_font() -> Option<Vec<u8>> {
+    windows_font(&["lucon.ttf", "verdana.ttf", "arial.ttf"])
+}
+
+pub struct Repair {
+    /// "installed 0.3.0" / "updated 0.2.7 to 0.3.0" when the addon itself was written.
+    pub addon: Option<String>,
+    /// Files that did not exist before (the game only sees them after a full restart).
+    pub created: u32,
+}
+
+pub struct Slots {
+    pub addons_dir: PathBuf,
+    pub addon_dir: PathBuf,
+    interface: String,
+    font: Option<Vec<u8>>,
+}
+
+impl Slots {
+    pub fn new(addons_dir: impl Into<PathBuf>, interface: &str) -> Slots {
+        let addons_dir = addons_dir.into();
+        Slots { addon_dir: addons_dir.join(ADDON), addons_dir, interface: interface.to_string(), font: small_font() }
+    }
+
+    pub fn for_wow(wow_dir: &Path, interface: &str) -> Slots {
+        Slots::new(wow_dir.join("Interface").join("AddOns"), interface)
+    }
+
+    pub fn installed(&self) -> bool {
+        self.addon_dir.join(format!("{ADDON}.toc")).exists() && self.addons_dir.join(slot_name(SLOT_COUNT)).exists()
+    }
+
+    pub fn installed_version(&self) -> Option<String> {
+        fs::read_to_string(self.addon_dir.join(format!("{ADDON}.toc"))).ok().and_then(|toc| parse_version(&toc))
+    }
+
+    fn need_font(&self) -> io::Result<()> {
+        match self.font {
+            Some(_) => Ok(()),
+            None => Err(io::Error::other("No usable font in the Windows Fonts folder (looked for lucon, verdana, arial).")),
+        }
+    }
+
+    /// Writes the shipped addon files; the toc gets this game's interface version.
+    pub fn write_addon(&self) -> io::Result<()> {
+        for (name, data) in ADDON_FILES {
+            let path = self.addon_dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if *name == "T3WoW.toc" {
+                let toc = String::from_utf8_lossy(data)
+                    .lines()
+                    .map(|line| if line.starts_with("## Interface:") { format!("## Interface: {}", self.interface) } else { line.to_string() })
+                    .collect::<Vec<_>>()
+                    .join("\r\n");
+                fs::write(path, toc + "\r\n")?;
+            } else {
+                fs::write(path, data)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates the slot addons, blank signal files and probe files. With `reset`, existing
+    /// ones are blanked too (a fresh install); without, only missing ones are created.
+    /// Returns how many files did not exist before.
+    pub fn write_support(&self, reset: bool) -> io::Result<u32> {
+        let mut created = 0;
+        let mut put = |path: PathBuf, data: &[u8]| -> io::Result<()> {
+            let exists = path.exists();
+            if !exists {
+                created += 1;
+            }
+            if reset || !exists {
+                fs::write(path, data)?;
+            }
+            Ok(())
+        };
+        let sig = self.addon_dir.join("sig");
+        let probe = self.addon_dir.join("ctl").join("probe");
+        if reset {
+            // Older installs used .wav signals; start those folders clean.
+            let _ = fs::remove_dir_all(&sig);
+            for old in ["empty.wav", "valid.wav"] {
+                let _ = fs::remove_file(self.addon_dir.join("ctl").join(old));
+            }
+        }
+        fs::create_dir_all(&sig)?;
+        fs::create_dir_all(&probe)?;
+        for n in 1..=SIGNAL_COUNT {
+            put(sig.join(signal_file(n)), b"")?;
+        }
+        let font = self.font.clone().unwrap_or_default();
+        put(probe.join("empty.ttf"), b"")?;
+        put(probe.join("valid.ttf"), &font)?;
+        put(probe.join("flip.ttf"), b"")?;
+        put(probe.join("empty.tga"), b"")?;
+        put(probe.join("valid.tga"), &tiny_tga())?;
+        put(probe.join("flip.tga"), b"")?;
+        put(probe.join("valid2.ttf"), &windows_font(&["arial.ttf", "segoeui.ttf"]).unwrap_or_default())?;
+        for n in 1..=SLOT_COUNT {
+            let dir = self.addons_dir.join(slot_name(n));
+            fs::create_dir_all(&dir)?;
+            let toc = [
+                format!("## Interface: {}", self.interface),
+                format!("## Title: |cff808080T3 WoW slot {n:03}|r"),
+                "## Notes: Carries T3 Code updates into the game. Keep enabled.".into(),
+                "## LoadOnDemand: 1".into(),
+                format!("## Dependencies: {ADDON}"),
+                "Inbox.lua".into(),
+                String::new(),
+            ]
+            .join("\n");
+            put(dir.join(format!("{}.toc", slot_name(n))), toc.as_bytes())?;
+            put(dir.join("Inbox.lua"), b"")?;
+        }
+        Ok(created)
+    }
+
+    pub fn install(&self) -> io::Result<()> {
+        self.need_font()?;
+        fs::create_dir_all(&self.addons_dir)?;
+        self.write_addon()?;
+        self.write_support(true)?;
+        Ok(())
+    }
+
+    /// For every companion start: puts back whatever an addon manager or a cleanup removed,
+    /// and installs or updates the addon when this companion ships a newer one. Files the
+    /// game didn't have when it started only show up after a full restart of WoW.
+    pub fn repair(&self) -> io::Result<Repair> {
+        self.need_font()?;
+        fs::create_dir_all(&self.addons_dir)?;
+        let shipped = shipped_version();
+        let addon = match self.installed_version() {
+            None => {
+                self.write_addon()?;
+                Some(format!("installed {shipped}"))
+            }
+            Some(installed) if compare_versions(&shipped, &installed).is_gt() => {
+                self.write_addon()?;
+                Some(format!("updated {installed} to {shipped}"))
+            }
+            Some(_) => None,
+        };
+        Ok(Repair { addon, created: self.write_support(false)? })
+    }
+
+    pub fn uninstall(&self) -> io::Result<()> {
+        let _ = fs::remove_dir_all(&self.addon_dir);
+        for entry in fs::read_dir(&self.addons_dir)?.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&format!("{ADDON}_S")) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What the bridge does with the files; a trait so tests can watch it.
+pub trait SlotWriter: Send {
+    fn write_slot(&mut self, n: u32, lua: &str);
+    fn raise_signal(&mut self, n: u32);
+    fn clear_signals(&mut self);
+    /// Makes the probe's flip files real (or blank again); returns the types changed.
+    fn flip_probe(&mut self, real: bool) -> Vec<String>;
+}
+
+impl SlotWriter for Slots {
+    fn write_slot(&mut self, n: u32, lua: &str) {
+        if !(1..=SLOT_COUNT).contains(&n) {
+            return;
+        }
+        let file = self.addons_dir.join(slot_name(n)).join("Inbox.lua");
+        let tmp = file.with_extension("lua.tmp");
+        if fs::write(&tmp, lua).is_ok() {
+            let _ = fs::rename(&tmp, &file);
+        }
+    }
+
+    fn raise_signal(&mut self, n: u32) {
+        if let (true, Some(font)) = ((1..=SIGNAL_COUNT).contains(&n), &self.font) {
+            let _ = fs::write(self.addon_dir.join("sig").join(signal_file(n)), font);
+        }
+    }
+
+    fn clear_signals(&mut self) {
+        let dir = self.addon_dir.join("sig");
+        for n in 1..=SIGNAL_COUNT {
+            let file = dir.join(signal_file(n));
+            if fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) {
+                let _ = fs::write(&file, b"");
+            }
+        }
+    }
+
+    fn flip_probe(&mut self, real: bool) -> Vec<String> {
+        let mut changed = Vec::new();
+        for (ext, make) in [("ttf", self.font.clone().unwrap_or_default()), ("tga", tiny_tga())] {
+            let file = self.addon_dir.join("ctl").join("probe").join(format!("flip.{ext}"));
+            if file.exists() && fs::write(&file, if real { make } else { Vec::new() }).is_ok() {
+                changed.push(ext.to_string());
+            }
+        }
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("t3wow-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn repair_puts_back_missing_files_and_updates_an_older_addon() {
+        let dir = temp_dir("repair");
+        let slots = Slots::new(&dir, "16001");
+        let first = slots.repair().unwrap();
+        assert!(first.addon.unwrap().starts_with("installed "));
+        assert!(first.created > SIGNAL_COUNT);
+        assert!(slots.installed());
+        assert!(dir.join("T3WoW/Media/logo.tga").exists());
+
+        // An addon manager removed a slot and a signal file; nothing else changed.
+        fs::remove_dir_all(dir.join(slot_name(7))).unwrap();
+        fs::remove_file(dir.join("T3WoW/sig/0042.ttf")).unwrap();
+        let second = slots.repair().unwrap();
+        assert_eq!(second.addon, None);
+        assert_eq!(second.created, 3);
+        assert!(dir.join(slot_name(7)).join("Inbox.lua").exists());
+
+        // An older addon gets the shipped one, with this game's interface version.
+        let toc = dir.join("T3WoW/T3WoW.toc");
+        let old = fs::read_to_string(&toc).unwrap().replace(&format!("## Version: {}", shipped_version()), "## Version: 0.0.1");
+        fs::write(&toc, old).unwrap();
+        assert!(slots.repair().unwrap().addon.unwrap().starts_with("updated 0.0.1 to "));
+        assert!(fs::read_to_string(&toc).unwrap().contains("## Interface: 16001"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn versions_compare_numerically() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_versions("0.10.0", "0.9.9"), Greater);
+        assert_eq!(compare_versions("0.3", "0.3.0"), Equal);
+        assert_eq!(compare_versions("0.2.7", "0.3.0"), Less);
+    }
+}

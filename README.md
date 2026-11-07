@@ -1,4 +1,6 @@
-# t3wow
+<p align="center"><img src="assets/logo.png" alt="T3 WoW" width="160"></p>
+
+# T3 WoW
 
 T3 Code inside World of Warcraft: Forever. You bring your harnesses to T3 Code; this brings T3 Code into WoW.
 
@@ -11,15 +13,17 @@ An in-game window lists your T3 threads from every machine your T3 Code reaches 
 
 ## Set up
 
-1. Get `t3wow.exe` (built with `npm run build:exe`, see Develop) and double-click it. Windows may warn about an unrecognized app the first time, since it isn't signed: **More info → Run anyway**.
-2. It finds WoW: Forever (a running client, Battle.net's install record, or the usual folders; it asks if it can't), puts the addon and its update slots into `Interface\AddOns`, and opens T3's sign-in page.
-3. Approve the sign-in. If it asks for a pairing code, make one in T3 under **Settings → Sharing & access**. Choose **Full access** if your threads run in full access; T3 refuses messages to a thread that runs above the access you grant. The sign-in lasts 30 days; after that the game window says so, and the companion's next start opens the sign-in page again.
+1. Get `t3wow.exe` (built with `npm run build:exe`, see Develop) and double-click it. It's a small native program (about 4 MB, nothing else to install) that lives in the system tray, next to the clock. Windows may warn about an unrecognized app the first time, since it isn't signed: **More info → Run anyway**.
+2. It finds WoW: Forever (a running client, Battle.net's install record, or the usual folders; if it can't, its tray menu has **Choose WoW folder…**), puts the addon and its update slots into `Interface\AddOns`, and opens T3's sign-in page.
+3. Approve the sign-in. If it asks for a pairing code, make one in T3 under **Settings → Sharing & access**. Choose **Full access** if your threads run in full access; T3 refuses messages to a thread that runs above the access you grant. The sign-in lasts 30 days; after that the game window and the tray menu say so: choose **Sign in to T3…** in the tray menu.
 4. **Restart WoW completely** (not `/reload`) the first time: the game only sees addon files that existed when it started. In the AddOns list keep **T3 WoW** and the grey **T3 WoW slot** entries enabled.
-5. Leave the companion's window open while you play.
+5. Leave T3 WoW running in the tray while you play. Its menu shows the T3 and WoW status, and has **Sign out of T3** (or **Sign in to T3…**), **Start with Windows**, **Reinstall addon**, **Open log** and the update check.
 
 Every start checks the addon files: anything an addon manager or a cleanup removed is put back, and a newer addon shipped with the companion replaces an older one. If it had to create files, restart WoW once more.
 
-From a source checkout the same commands run with Node.js 20 or newer: `node companion/bin/t3wow.js` (or `run`) does all of the above; `install` reinstalls from scratch (`--wow "<path to _forever_>"` if WoW lives somewhere unusual), `login` signs in again, `status` checks the addon install, the screen capture, and one full read of your T3 threads on each machine, and `uninstall` removes the addon. `t3wow.exe` takes the same commands.
+**Updates.** The companion looks for a newer GitHub release when it starts and every 6 hours; the tray menu then offers **Update to x.y.z**, which downloads the new `t3wow.exe`, checks it against the release's SHA-256, swaps it in and restarts. The addon is part of the exe, so it updates along with it (restart WoW afterwards). An addon installed from CurseForge updates there; the companion never replaces a newer addon with an older one. `t3wow.exe update` does the same from a terminal. Release checks need the repository's releases to be public.
+
+`t3wow.exe` also works from a terminal: `run` runs in that console instead of the tray, `install` reinstalls the addon from scratch (`--wow "<path to _forever_>"` if WoW lives somewhere unusual), `login` signs in again, `status` checks the addon install and the T3 connection, and `uninstall` removes the addon.
 
 ## In the game
 
@@ -37,10 +41,10 @@ Questions and permission prompts from an agent still need answering in T3 itself
 
 ## How it connects
 
-WoW addons cannot open sockets or read files while running. The companion (`companion/`) bridges that from outside the game, without touching the game process:
+WoW addons cannot open sockets or read files while running. The companion (`companion/`, Rust) bridges that from outside the game, without touching the game process:
 
 - **Game → companion:** the addon draws each command as a strip of colored 4×4-pixel squares in the screen's top-left corner, only while a command is waiting. The companion screen-captures that corner of the WoW window four times a second and decodes it.
-- **Companion → game:** an addon marked load-on-demand reads its file from disk when it is loaded, and each loads once per UI session. `install` creates 200 such slot addons. The companion writes the latest state into the next slot, then turns a pre-made blank font file into a real one (a copy of a Windows font, Lucida Console by default); the addon sees that font load and loads the slot. The game stops noticing a font file it has checked for too long, so while waiting the addon moves to the next signal file every 25 seconds; the companion shares the PC clock, works out the same file, and makes it and its neighbours real. No `/reload` per message. Until its first update tells it which font to watch, or if fonts don’t work on a client, the addon loads slots on a timer instead, which is slower and uses up the 200 updates sooner. `/t3 status` says which mode it is in, and `/t3 probe` tests the file checks.
+- **Companion → game:** an addon marked load-on-demand reads its file from disk when it is loaded, and each loads once per UI session. The companion creates 200 such slot addons. The companion writes the latest state into the next slot, then turns a pre-made blank font file into a real one (a copy of a Windows font, Lucida Console by default); the addon sees that font load and loads the slot. The game stops noticing a font file it has checked for too long, so while waiting the addon moves to the next signal file every 25 seconds; the companion shares the PC clock, works out the same file, and makes it and its neighbours real. No `/reload` per message. Until its first update tells it which font to watch, or if fonts don’t work on a client, the addon loads slots on a timer instead, which is slower and uses up the 200 updates sooner. `/t3 status` says which mode it is in, and `/t3 probe` tests the file checks.
 - **Companion → T3:** T3's MCP endpoint on this PC (`/mcp`, signed in with OAuth). Threads on linked machines go through T3's own environment links.
 
 Every UI session has 200 updates; the window offers **Reload UI** when they run out. The companion only spends one when something you can see changed.
@@ -49,26 +53,30 @@ The addon uses only the documented addon API. The companion reads pixels in one 
 
 ## Troubleshooting
 
-- **"Waiting for the companion…"**: is `t3wow run` running? Is the game windowed? Is something covering the top-left corner?
-- **"Slot addons blocked"**: enable the T3 WoW slot addons in the AddOns list, or allow out-of-date addons if the game's interface version changed (`install --interface <number>` rewrites it).
+- **"Waiting for the companion…"**: is T3 WoW running in the tray? Is the game windowed? Is something covering the top-left corner? The tray's **Open log** shows what the companion sees.
+- **"Slot addons blocked"**: enable the T3 WoW slot addons in the AddOns list, or allow out-of-date addons if the game's interface version changed (`t3wow.exe install --interface <number>` rewrites it).
 - `/t3 status` prints the transport state in chat.
 
 ## Develop
 
+Needs Node.js 20+ (for the addon's tests) and Rust with the MSVC toolchain (for the companion).
+
 ```sh
 npm install
-npm test
+npm test            # the addon's Lua (in fengari) and the companion (cargo test)
 npm run build:exe   # dist/t3wow.exe, Windows only
 ```
 
-The tests run the addon's encoder in a Lua VM (fengari) against the companion's decoder, and the companion's bridge against a fake T3.
+- `addon/T3WoW`: the addon (Lua). `tests/` runs it in a Lua VM: the font-signal logic against a simulated game, and the contract with the companion.
+- `companion/`: the companion (Rust): screen capture (`capture.rs`), the T3 client and sign-in (`t3.rs`), the bridge (`bridge.rs`), the addon files (`slots.rs`, with the addon embedded) and the tray (`tray.rs`). `companion/tests/fixtures` holds the frames and inbox files both sides are tested against.
+- `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400).
 
-`build:exe` bundles the companion with esbuild, embeds it with the addon files and the capture script into a copy of this machine's `node.exe` (Node's single executable applications, injected with postject), and writes `dist/t3wow.exe`, about 90 MB (`T3WOW_DIST` picks another folder, e.g. while `dist\t3wow.exe` is running).
-
-It signs the exe when a code-signing certificate is configured, using `signtool.exe` from the Windows SDK and a DigiCert timestamp. Set one of:
+`build:exe` runs `cargo build --release` and copies the result to `dist/t3wow.exe` (`T3WOW_DIST` picks another folder). It signs the exe when a code-signing certificate is configured, using `signtool.exe` from the Windows SDK and a DigiCert timestamp. Set one of:
 
 - `T3WOW_SIGN_THUMBPRINT`: a certificate in your Windows certificate store, including one on a hardware token.
 - `T3WOW_SIGN_PFX` (and `T3WOW_SIGN_PASSWORD`): a `.pfx` file.
 - `T3WOW_SIGN_DLIB` and `T3WOW_SIGN_METADATA`: Azure Trusted Signing's dlib and its `metadata.json`.
 
 Without one it builds unsigned, and Windows SmartScreen warns on first run.
+
+**Releasing:** set the same version in `companion/Cargo.toml`, `addon/T3WoW/T3WoW.toc` and `package.json`, then push a tag (`git tag v0.3.1 && git push origin v0.3.1`). The Release workflow checks the versions match, runs the tests, builds on Windows, and publishes `t3wow.exe`, `t3wow.exe.sha256` (what the updater downloads) and `T3WoW-v0.3.1.zip` (the addon alone, for CurseForge).

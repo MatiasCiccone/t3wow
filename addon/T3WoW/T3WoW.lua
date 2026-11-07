@@ -9,7 +9,8 @@ function T3WoW_Toggle() ns.UI.Toggle() end
 -- (MinimapButtonButton and the like) pick it up with the rest; otherwise a plain
 -- minimap button whose name those collectors also recognise.
 
-local ICON = "Interface\\Icons\\INV_Misc_Gear_01"
+-- The T3 logo, shipped with the addon (Media\logo.tga, 64x64 with alpha).
+local ICON = "Interface\\AddOns\\T3WoW\\Media\\logo"
 local LDB_NAME = "T3 WoW"
 local WORKING = { preparing = true, queued = true, starting = true, running = true }
 
@@ -50,9 +51,8 @@ local function ownButton(settings)
     background:SetPoint("TOPLEFT", 7, -5)
     local icon = button:CreateTexture(nil, "ARTWORK")
     icon:SetTexture(ICON)
-    icon:SetSize(17, 17)
-    icon:SetPoint("TOPLEFT", 7, -6)
-    icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+    icon:SetSize(20, 20)
+    icon:SetPoint("TOPLEFT", 6, -5)
     local border = button:CreateTexture(nil, "OVERLAY")
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
     border:SetSize(53, 53)
@@ -296,7 +296,7 @@ local function welcome()
     if not seen then
         print(tag .. " " .. version .. " is installed: T3 Code inside the game.")
         print(tag .. " Type |cffffd100/t3|r or click the minimap button to open it. Right-click the button (or |cffffd100/t3 settings|r) for notifications and other settings.")
-        print(tag .. " It needs the t3wow companion running on this PC (t3wow.exe). |cffffd100/t3 status|r shows the connection.")
+        print(tag .. " It needs the T3 WoW companion (t3wow.exe) running in the system tray on this PC. |cffffd100/t3 status|r shows the connection.")
     elseif seen ~= version then
         print(tag .. " updated to " .. version .. ".")
     end
