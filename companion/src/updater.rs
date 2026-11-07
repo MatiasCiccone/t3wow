@@ -38,8 +38,14 @@ pub struct Release {
     pub sig_url: String,
 }
 
+/// Debug builds can test updates against another repository (`T3WOW_UPDATE_REPO`); release
+/// builds have no such switch, so nothing in the environment can redirect their updates.
 fn repo() -> String {
-    std::env::var("T3WOW_UPDATE_REPO").unwrap_or_else(|_| REPO.to_string())
+    #[cfg(debug_assertions)]
+    if let Ok(repo) = std::env::var("T3WOW_UPDATE_REPO") {
+        return repo;
+    }
+    REPO.to_string()
 }
 
 fn http() -> ureq::Agent {
