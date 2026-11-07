@@ -326,6 +326,10 @@ pub fn run(app: Arc<App>) {
         }
         let attention = signed_out || s.auth_needed || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some();
         app.set(t3_line, wow_line, attention, !signed_out && !s.auth_needed);
-        std::thread::sleep(Duration::from_millis(250));
+        // Mid-poll, each tick reads T3 for one request or TICK_BUDGET_MS, whichever is
+        // longer, and the capture and the controls above get their turn in between: no nap.
+        if !bridge.polling() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 }

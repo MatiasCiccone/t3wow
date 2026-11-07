@@ -3,6 +3,8 @@ use std::sync::Mutex;
 
 struct FakeT3 {
     calls: Mutex<Vec<(String, Value)>>,
+    /// When each call began, on the rig's clock.
+    call_times: Mutex<Vec<i64>>,
     threads: Mutex<Vec<Value>>,
     /// false: what's pending is an approval, which T3's pending list leaves out.
     questions: Mutex<bool>,
@@ -24,6 +26,7 @@ impl FakeT3 {
     fn new() -> Arc<FakeT3> {
         Arc::new(FakeT3 {
             calls: Mutex::new(Vec::new()),
+            call_times: Mutex::new(Vec::new()),
             threads: Mutex::new(vec![json!({
                 "threadId": "t1", "projectId": "p1", "title": "Fix tests", "status": "running",
                 "settled": false, "updatedAt": "2026-11-06T10:00:00Z", "itemCount": 3
@@ -55,11 +58,22 @@ impl FakeT3 {
     fn calls_to(&self, name: &str) -> Vec<Value> {
         self.calls.lock().unwrap().iter().filter(|(n, _)| n == name).map(|(_, a)| a.clone()).collect()
     }
+
+    /// Calls to `name`, with when each began.
+    fn calls_at(&self, name: &str) -> Vec<(Value, i64)> {
+        let times = self.call_times.lock().unwrap();
+        self.calls.lock().unwrap().iter().zip(times.iter()).filter(|((n, _), _)| n == name).map(|((_, a), t)| (a.clone(), *t)).collect()
+    }
 }
 
 impl T3 for FakeT3 {
     fn call(&self, name: &str, args: Value) -> Result<Value, T3Error> {
-        self.calls.lock().unwrap().push((name.to_string(), args.clone()));
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((name.to_string(), args.clone()));
+            let at = self.clock.lock().unwrap().as_ref().map_or(0, |clock| *clock.lock().unwrap());
+            self.call_times.lock().unwrap().push(at);
+        }
         if let (Some(ms), Some(clock)) = (self.delays.lock().unwrap().get(name), self.clock.lock().unwrap().as_ref()) {
             *clock.lock().unwrap() += ms;
         }
@@ -729,14 +743,121 @@ fn a_slow_t3_doesnt_hold_up_the_games_commands_between_poll_steps() {
 
     // Stop, pressed meanwhile, runs on the next tick, before the poll goes on.
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "stop", "id": "t1" }] }));
-    let reads_before = rig.t3.calls_to("t3_thread_read").len();
+    let first = rig.bridge.poll_run.as_ref().map(|run| run.started);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_interrupt").len(), 1);
-    assert!(rig.t3.calls_to("t3_thread_read").len() >= reads_before);
-    for _ in 0..5 {
+    // The poll under way ends, and another follows straight away for the command.
+    for _ in 0..20 {
+        rig.bridge.tick();
+        match rig.bridge.poll_run.as_ref() {
+            Some(run) if Some(run.started) == first => continue,
+            Some(_) => return,
+            None => {
+                assert!(rig.bridge.poll_at <= *rig.clock.lock().unwrap());
+                return;
+            }
+        }
+    }
+    panic!("the poll never ended");
+}
+
+#[test]
+fn a_command_waits_for_one_request_at_most_while_a_slow_poll_reads() {
+    let mut rig = Rig::new(18_500_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+
+    // Every read now takes 3 s. The next poll has plenty of them: three lists, a question
+    // check and what it waits on, a launcher, and the thread opened below, which has 120
+    // messages over 2000 items (three passes that find none, then two pages), and its question.
+    const REQUEST: i64 = 3_000;
+    for tool in ["t3_environment_links", "t3_environment_read", "t3_project_list", "t3_thread_list", "t3_thread_read", "t3_pending_request"] {
+        rig.t3.delays.lock().unwrap().insert(tool.into(), REQUEST);
+    }
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["updatedAt"] = json!("2026-11-06T10:01:00Z");
+        threads[0]["pendingRequestCount"] = json!(1);
+        threads[0]["itemCount"] = json!(2000);
+        threads.push(json!({ "threadId": "launched", "projectId": "p1", "title": "Test it", "status": "completed", "createdBy": "agent", "sender": "t1", "updatedAt": "2026-11-06T10:00:00Z" }));
+    }
+    let messages: Vec<Value> = (0..120).map(|i| json!({ "position": i, "type": "assistant_message", "text": format!("m{i}") })).collect();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+
+    // The worker's loop, as in app.rs: frames come in between ticks, with no nap mid-poll.
+    // Stop is pressed every 1.7 s, so presses land all through the poll's reads.
+    let start = *rig.clock.lock().unwrap();
+    let mut pressed: Vec<(u64, i64)> = Vec::new();
+    while *rig.clock.lock().unwrap() < start + 60_000 {
+        let now = *rig.clock.lock().unwrap();
+        while pressed.last().map_or(start + 1_000, |(_, at)| at + 1_700) <= now {
+            let at = pressed.last().map_or(start + 1_000, |(_, at)| at + 1_700);
+            pressed.push((pressed.len() as u64 + 3, at));
+        }
+        let mut q = vec![json!({ "s": 2, "t": "open", "id": "t1" })];
+        q.extend(pressed.iter().map(|(s, _)| json!({ "s": s, "t": "stop", "id": "t1" })));
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": q }));
+        rig.bridge.tick();
+        if !rig.bridge.polling() {
+            rig.advance(250);
+        }
+    }
+
+    // The poll read all of it meanwhile.
+    let pages = rig.t3.calls_to("t3_thread_read").iter().filter(|a| a["threadId"] == "t1" && a["view"] == "messages" && a["limit"] == 100).count();
+    assert_eq!(pages, 5);
+    assert!(rig.t3.calls_to("t3_thread_read").iter().any(|a| a["threadId"] == "launched"));
+    assert!(rig.t3.calls_to("t3_pending_request").iter().any(|a| a["action"] == "read"));
+    assert_eq!(rig.bridge.snapshot()["view"]["items"].as_array().unwrap().len(), VIEW_MESSAGES);
+
+    // Each Stop reached T3 within one request of being pressed.
+    let stops = rig.t3.calls_at("t3_thread_interrupt");
+    assert!(pressed.len() >= 30, "{} presses", pressed.len());
+    for (s, at) in &pressed {
+        let prefix = format!("t3wow:c1:{s}:");
+        let Some((_, ran)) = stops.iter().find(|(a, _)| str_of(&a["clientRequestId"]).starts_with(&prefix)) else { continue };
+        assert!(ran - at <= REQUEST, "Stop {s}, pressed at +{} ms, ran at +{} ms", at - start, ran - start);
+    }
+    assert!(stops.len() + 1 >= pressed.len(), "{} of {} presses ran", stops.len(), pressed.len());
+}
+
+#[test]
+fn opening_another_thread_while_the_open_one_is_read_drops_that_read() {
+    let mut rig = Rig::new(18_700_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let mut t2 = rig.t3.threads.lock().unwrap()[0].clone();
+    t2["threadId"] = json!("t2");
+    t2["title"] = json!("Other");
+    rig.t3.threads.lock().unwrap().push(t2);
+
+    // t1 changes and reads are slow: the next poll reads it again, a request at a time.
+    rig.t3.delays.lock().unwrap().insert("t3_thread_read".into(), 3_000);
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.advance(4_000);
+    while rig.bridge.poll_run.as_ref().is_none_or(|run| run.reading.is_none()) {
         rig.bridge.tick();
     }
-    assert!(rig.bridge.poll_run.is_none() || rig.bridge.repoll, "the poll ends, and another follows for the command");
+    let t1_pages = |rig: &Rig| rig.t3.calls_to("t3_thread_read").iter().filter(|a| a["threadId"] == "t1" && a["view"] == "messages").count();
+    let pages = t1_pages(&rig);
+
+    // Opening t2 meanwhile drops t1's read: it doesn't come back as the open thread, and
+    // its cache stays for a later read.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 3, "t": "open", "id": "t2" }] }));
+    rig.bridge.tick();
+    assert_eq!(t1_pages(&rig), pages);
+    assert!(rig.bridge.view_key.is_none());
+    assert_eq!(rig.bridge.view_cache.as_ref().map(|c| c.id.as_str()), Some("t1"));
+    for _ in 0..20 {
+        if rig.bridge.snapshot()["view"]["id"] == "t2" {
+            break;
+        }
+        rig.bridge.tick();
+    }
+    assert_eq!(rig.bridge.snapshot()["view"]["t"], "Other");
+    assert_eq!(t1_pages(&rig), pages);
 }
 
 #[test]

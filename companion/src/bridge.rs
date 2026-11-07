@@ -206,6 +206,8 @@ pub struct Bridge {
     view_data: Option<Value>,
     view_key: Option<String>,
     view_cache: Option<ViewCache>,
+    /// Counts commands that changed what the open thread shows (see `view_changed`).
+    view_gen: u64,
     notes: Vec<Value>,
     events: Vec<Value>,
     event_seq: i64,
@@ -309,42 +311,106 @@ const OUTCOMES_KEPT: usize = 8;
 const TICK_BUDGET_MS: i64 = 300;
 /// Mid-poll, publish only once the poll has run this long.
 const PUBLISH_MIDPOLL_MS: i64 = 2000;
+/// The open thread's messages are read at most this many pages a pass, and widened at
+/// most this many passes.
+const VIEW_PAGES: usize = 10;
+const VIEW_PASSES: usize = 4;
 
-/// A poll of T3, one step at a time.
+/// A poll of T3, one step at a time. A step makes one request at most (a list step makes
+/// one per machine, all at once), so between two requests the caller gets a turn: the
+/// game's commands, the tray's controls and the capture never wait for more than one.
 struct PollRun {
     started: i64,
     steps: VecDeque<Step>,
+    /// Each machine's list replies so far, while the lists are read.
+    lists: Vec<(String, Result<Vec<Value>, T3Error>)>,
+    /// The machine whose lists are being taken in.
+    listed: Option<Listed>,
+    /// The open thread, while it's read.
+    reading: Option<ViewRead>,
 }
 
 enum Step {
-    /// The linked machines (then each one's projects).
+    /// The linked machines, then the server's own name (then each machine's projects).
     Machines,
+    ServerName(Value),
     Projects(String),
-    /// Every machine's thread lists at once (then each one's, taken in turn).
-    Lists,
+    /// One of the three thread lists, every machine's at once.
+    List(usize),
+    /// One machine's lists, as read. Then, for it: each working thread's question check
+    /// (and what it waits on), each launcher, the status changes, each active thread that
+    /// left the lists, and keeping the lists.
     Machine(String, ThreadLists),
-    /// The open thread.
+    Question(usize),
+    QuestionKind(usize, i64),
+    Launcher(usize),
+    Track,
+    Unlisted(String, String),
+    Keep,
+    /// The open thread: its head, its messages a page at a time, its question.
     View,
+    ViewPage,
+    ViewAsk,
+    ViewAskRead(String),
 }
 
-/// The three thread lists T3's sidebar is made of, for one machine.
-fn fetch_threads(client: &dyn T3, env_arg: &Map<String, Value>) -> ThreadLists {
-    let list = |args: Value| {
-        let base = with_args(json!({ "allProjects": true, "includeSubagents": false }), args.as_object().unwrap());
-        client.call("t3_thread_list", with_args(base, env_arg))
+/// One machine's lists while they're taken in.
+struct Listed {
+    env: String,
+    threads: Vec<Value>,
+    settled_total: u64,
+    /// The working threads looked at: their pending counts stay, the machine's others go.
+    seen: Vec<String>,
+}
+
+/// The open thread while it's read.
+struct ViewRead {
+    view: View,
+    key: String,
+    /// `view_gen` when the read began: a command that changed the view since drops it.
+    gen: u64,
+    thread: Value,
+    /// When the head was read (a full read's time).
+    began: i64,
+    /// Reading on from this cache (same thread, safe to); None: a full read.
+    cache: Option<ViewCache>,
+    /// This pass's messages so far, where the next page starts, and pages read.
+    messages: Vec<Value>,
+    after: Option<u64>,
+    pages: usize,
+    /// A full read: the first item it reads, how many items back that is, passes done.
+    start: usize,
+    window: usize,
+    passes: usize,
+    /// The view for the game, once the messages are in, waiting on its question.
+    built: Option<Value>,
+}
+
+/// T3's sidebar is made of three lists per machine (open, snoozed, settled), read in turn.
+const LIST_COUNT: usize = 3;
+
+/// One of a machine's three lists.
+fn fetch_list(client: &dyn T3, n: usize, env_arg: &Map<String, Value>) -> Result<Value, T3Error> {
+    let which = match n {
+        0 => json!({ "settled": false, "snoozed": false, "limit": 80 }),
+        1 => json!({ "settled": false, "snoozed": true, "limit": 25 }),
+        _ => json!({ "settled": true, "limit": 25 }),
     };
-    let open = list(json!({ "settled": false, "snoozed": false, "limit": 80 }))?;
-    let snoozed = list(json!({ "settled": false, "snoozed": true, "limit": 25 }))?;
-    let settled = list(json!({ "settled": true, "limit": 25 }))?;
-    let items = |v: &Value| v["threads"].as_array().cloned().unwrap_or_default();
-    let mut threads: Vec<Value> = items(&open).into_iter().filter(|t| t["snoozed"] != true).collect();
-    threads.extend(items(&snoozed).into_iter().filter(|t| t["snoozed"] == true));
-    threads.extend(items(&settled));
-    threads.retain(|t| !is_subagent(t));
-    let settled_listed = items(&settled).iter().filter(|t| on_sidebar(t)).count() as u64;
-    Ok((threads, settled["total"].as_u64().unwrap_or(0).max(settled_listed)))
+    let base = with_args(json!({ "allProjects": true, "includeSubagents": false }), which.as_object().unwrap());
+    client.call("t3_thread_list", with_args(base, env_arg))
 }
 
+/// A machine's sidebar threads from its three lists, and its settled count.
+fn combine_lists(lists: &[Value]) -> (Vec<Value>, u64) {
+    let items = |n: usize| lists.get(n).and_then(|v| v["threads"].as_array()).cloned().unwrap_or_default();
+    let mut threads: Vec<Value> = items(0).into_iter().filter(|t| t["snoozed"] != true).collect();
+    threads.extend(items(1).into_iter().filter(|t| t["snoozed"] == true));
+    threads.extend(items(2));
+    threads.retain(|t| !is_subagent(t));
+    let settled_listed = items(2).iter().filter(|t| on_sidebar(t)).count() as u64;
+    let total = lists.get(2).and_then(|v| v["total"].as_u64()).unwrap_or(0);
+    (threads, total.max(settled_listed))
+}
 impl Bridge {
     pub fn new(
         client: Arc<dyn T3>,
@@ -376,6 +442,7 @@ impl Bridge {
             view_data: None,
             view_key: None,
             view_cache: None,
+            view_gen: 0,
             notes: Vec::new(),
             events: Vec::new(),
             event_seq: 0,
@@ -608,13 +675,13 @@ impl Bridge {
                 "hello" | "ui" => self.window_open = command["o"] == true,
                 "open" => {
                     self.view = (!id.is_empty()).then(|| View { env: env.clone(), id: id.clone(), depth: 1 });
-                    self.view_key = None;
+                    self.view_changed();
                 }
                 "more" => {
                     if let Some(view) = &mut self.view {
                         view.depth += 1;
                     }
-                    self.view_key = None;
+                    self.view_changed();
                 }
                 "send" if !id.is_empty() && !message.is_empty() => {
                     let args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
@@ -622,7 +689,7 @@ impl Bridge {
                     self.note("Sent.");
                     let depth = self.view.as_ref().filter(|v| v.id == id).map(|v| v.depth).unwrap_or(1);
                     self.view = Some(View { env: env.clone(), id: id.clone(), depth });
-                    self.view_key = None;
+                    self.view_changed();
                 }
                 "new" if !message.is_empty() => {
                     let title: String = message.split('\n').next().unwrap_or("").chars().take(60).collect();
@@ -638,7 +705,7 @@ impl Bridge {
                         self.view = Some(View { env: env.clone(), id: new_id.clone(), depth: 1 });
                         started = Some(new_id);
                     }
-                    self.view_key = None;
+                    self.view_changed();
                 }
                 "settle" | "unsettle" if !id.is_empty() => {
                     self.client.call("t3_thread_organize", with_args(json!({ "action": kind, "threadId": id }), &env_arg))?;
@@ -679,9 +746,9 @@ impl Bridge {
                     self.pending_counts.remove(&format!("{env}:{id}"));
                     self.note("Answered.");
                     self.pending_ask = None;
-                    self.view_key = None;
+                    self.view_changed();
                 }
-                "refresh" => self.view_key = None,
+                "refresh" => self.view_changed(),
                 _ => return Ok(()),
             }
             Ok(())
@@ -709,9 +776,9 @@ impl Bridge {
             self.slow_at = t + 60_000;
             steps.push_back(Step::Machines);
         }
-        steps.push_back(Step::Lists);
+        steps.push_back(Step::List(0));
         steps.push_back(Step::View);
-        self.poll_run = Some(PollRun { started: t, steps });
+        self.poll_run = Some(PollRun { started: t, steps, lists: Vec::new(), listed: None, reading: None });
         // This poll covers whatever asked for one.
         self.repoll = false;
     }
@@ -722,36 +789,48 @@ impl Bridge {
         self.poll_run.as_ref().is_some_and(|run| self.now_ms() - run.started > POLL_DEADLINE_MS)
     }
 
+    /// Puts steps next in the poll, in this order.
+    fn push_steps(&mut self, steps: Vec<Step>) {
+        if let Some(run) = self.poll_run.as_mut() {
+            for step in steps.into_iter().rev() {
+                run.steps.push_front(step);
+            }
+        }
+    }
+
     /// Runs the poll's next step; the last one, or a failed one, ends the poll.
     fn poll_step(&mut self) {
         let Some(step) = self.poll_run.as_mut().and_then(|run| run.steps.pop_front()) else {
             return self.finish_poll(Ok(()));
         };
         let result = match step {
-            Step::Machines => self.refresh_environments().map(|()| {
-                // Each machine's projects next, before the thread lists.
-                let envs: Vec<String> = self.envs.iter().filter(|e| e.ok).map(|e| e.id.clone()).collect();
-                if let Some(run) = self.poll_run.as_mut() {
-                    for env in envs.into_iter().rev() {
-                        run.steps.push_front(Step::Projects(env));
-                    }
-                }
-            }),
+            Step::Machines => self.read_links(),
+            Step::ServerName(links) => self.read_machines(links),
             Step::Projects(env) => {
                 self.refresh_projects(&env);
                 Ok(())
             }
-            Step::Lists => {
-                let results = self.fetch_lists();
-                if let Some(run) = self.poll_run.as_mut() {
-                    for (env, result) in results.into_iter().rev() {
-                        run.steps.push_front(Step::Machine(env, result));
-                    }
-                }
+            Step::List(n) => {
+                self.read_lists(n);
                 Ok(())
             }
             Step::Machine(env, result) => self.take_lists(env, result),
+            Step::Question(i) => self.check_question(i),
+            Step::QuestionKind(i, read_at) => self.check_waiting_on(i, read_at),
+            Step::Launcher(i) => self.find_launcher(i),
+            Step::Track => {
+                self.track_listed();
+                Ok(())
+            }
+            Step::Unlisted(key, status) => self.check_unlisted(key, status),
+            Step::Keep => {
+                self.keep_lists();
+                Ok(())
+            }
             Step::View => self.refresh_view(),
+            Step::ViewPage => self.read_view_page(),
+            Step::ViewAsk => self.read_view_ask(),
+            Step::ViewAskRead(request_id) => self.read_view_request(request_id),
         };
         match result {
             Err(error) => self.finish_poll(Err(error)),
@@ -796,44 +875,63 @@ impl Bridge {
         }
     }
 
-    /// Every reachable machine's thread lists: one machine's lists at a time each, all
-    /// machines at once.
-    fn fetch_lists(&self) -> Vec<(String, ThreadLists)> {
-        let envs: Vec<(String, Map<String, Value>)> = self.envs.iter().filter(|e| e.ok).map(|e| (e.id.clone(), self.env_arg(&e.id))).collect();
+    /// The `n`th of the three thread lists from every machine still answering, all at once;
+    /// after the last, each machine's lists are taken in, one machine after another.
+    fn read_lists(&mut self, n: usize) {
+        let mut lists = match self.poll_run.as_mut() {
+            Some(run) if n > 0 => std::mem::take(&mut run.lists),
+            Some(_) => self.envs.iter().filter(|e| e.ok).map(|e| (e.id.clone(), Ok(Vec::new()))).collect(),
+            None => return,
+        };
+        let args: Vec<Option<Map<String, Value>>> = lists.iter().map(|(env, so_far)| so_far.is_ok().then(|| self.env_arg(env))).collect();
         let client = Arc::clone(&self.client);
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = envs
+        let replies: Vec<Option<Result<Value, T3Error>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = args
                 .iter()
-                .map(|(env, arg)| {
+                .map(|arg| {
                     let client = &client;
-                    (env.clone(), scope.spawn(move || fetch_threads(client.as_ref(), arg)))
+                    arg.as_ref().map(|arg| scope.spawn(move || fetch_list(client.as_ref(), n, arg)))
                 })
                 .collect();
-            handles.into_iter().map(|(env, h)| (env, h.join().unwrap_or_else(|_| Err(T3Error::Other("thread list panicked".into()))))).collect()
-        })
+            handles
+                .into_iter()
+                .map(|h| h.map(|h| h.join().unwrap_or_else(|_| Err(T3Error::Other("thread list panicked".into())))))
+                .collect()
+        });
+        for ((_, so_far), reply) in lists.iter_mut().zip(replies) {
+            match reply {
+                Some(Ok(list)) => {
+                    if let Ok(replies) = so_far {
+                        replies.push(list);
+                    }
+                }
+                Some(Err(error)) => *so_far = Err(error),
+                None => {}
+            }
+        }
+        if n + 1 < LIST_COUNT {
+            if let Some(run) = self.poll_run.as_mut() {
+                run.lists = lists;
+                run.steps.push_front(Step::List(n + 1));
+            }
+        } else {
+            self.push_steps(lists.into_iter().map(|(env, so_far)| Step::Machine(env, so_far.map(|lists| combine_lists(&lists)))).collect());
+        }
     }
 
-    /// One machine's lists, as fetched: questions and launchers are read where needed,
-    /// status changes notify.
+    /// One machine's lists, as read: its question checks, launchers, status changes and
+    /// threads that left the lists come next, a request at a time.
     fn take_lists(&mut self, env: String, result: ThreadLists) -> Result<(), T3Error> {
         let name = if env.is_empty() { "local".to_string() } else { env.clone() };
         match result {
-            Ok((mut threads, settled_total)) => {
-                self.mark_questions(&env, &mut threads)?;
-                self.find_launchers(&env, &mut threads)?;
-                for thread in &threads {
-                    self.track_status(&env, thread);
+            Ok((threads, settled_total)) => {
+                let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
+                steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
+                steps.extend([Step::Track, Step::Keep]);
+                if let Some(run) = self.poll_run.as_mut() {
+                    run.listed = Some(Listed { env, threads, settled_total, seen: Vec::new() });
                 }
-                self.track_unlisted(&env, &threads)?;
-                self.listed_envs.insert(env.clone());
-                self.threads.insert(env.clone(), threads);
-                self.settled_totals.insert(env.clone(), settled_total);
-                if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
-                    target.ok = true;
-                }
-                if self.list_errors.remove(&env).is_some() {
-                    self.log(&format!("threads ({name}): reachable again"));
-                }
+                self.push_steps(steps);
                 Ok(())
             }
             Err(T3Error::Auth(message)) => Err(T3Error::Auth(message)),
@@ -855,7 +953,185 @@ impl Bridge {
         }
     }
 
-    fn refresh_environments(&mut self) -> Result<(), T3Error> {
+    /// The machine being taken in, its `i`th thread's id and its updatedAt.
+    fn listed_thread(&self, i: usize) -> Option<(String, String, String)> {
+        let listed = self.poll_run.as_ref()?.listed.as_ref()?;
+        let thread = listed.threads.get(i)?;
+        Some((listed.env.clone(), str_of(&thread["threadId"]).to_string(), str_of(&thread["updatedAt"]).to_string()))
+    }
+
+    fn listed_mut(&mut self) -> Option<&mut Listed> {
+        self.poll_run.as_mut()?.listed.as_mut()
+    }
+
+    /// A working thread was looked at; with a status, it waits on that.
+    fn mark_waiting(&mut self, i: usize, key: String, status: Option<&'static str>) {
+        if let Some(listed) = self.listed_mut() {
+            listed.seen.push(key);
+            if let (Some(status), Some(thread)) = (status, listed.threads.get_mut(i)) {
+                thread["status"] = json!(status);
+            }
+        }
+    }
+
+    /// A working thread whose agent waits on a question shows as "waiting" (Needs you),
+    /// as in T3's sidebar, so it notifies and leaves the Working group. The thread's
+    /// pending count is read again only when it changed or the count is old.
+    fn check_question(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some((env, id, updated)) = self.listed_thread(i) else { return Ok(()) };
+        let key = format!("{env}:{id}");
+        let now = self.now_ms();
+        let known = match self.pending_counts.get(&key) {
+            Some(p) if p.updated == updated && now - p.read_at < PENDING_RECHECK_MS => Some(p.status),
+            // No time left in this poll: the last count stands until the next one.
+            Some(p) if self.out_of_time() => Some(p.status),
+            None if self.out_of_time() => Some(None),
+            _ => None,
+        };
+        if let Some(status) = known {
+            self.mark_waiting(i, key, status);
+            return Ok(());
+        }
+        let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&env));
+        match self.client.call("t3_thread_read", args) {
+            Ok(read) if read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0) == 0 => {
+                self.pending_counts.insert(key.clone(), Pending { updated, read_at: now, status: None });
+                self.mark_waiting(i, key, None);
+            }
+            // Something's pending: what it is comes next.
+            Ok(_) => self.push_steps(vec![Step::QuestionKind(i, now)]),
+            Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+            Err(T3Error::Other(message)) => self.log(&format!("pending check ({key}): {message}")),
+        }
+        Ok(())
+    }
+
+    /// What a working thread with pending requests waits on: its count includes approvals,
+    /// which T3's pending list leaves out, so a count with nothing listed is an approval.
+    fn check_waiting_on(&mut self, i: usize, read_at: i64) -> Result<(), T3Error> {
+        let Some((env, id, updated)) = self.listed_thread(i) else { return Ok(()) };
+        let key = format!("{env}:{id}");
+        let args = with_args(json!({ "action": "list", "threadId": id }), &self.env_arg(&env));
+        match self.client.call("t3_pending_request", args) {
+            Ok(list) => {
+                let questions = list["requestIds"].as_array().is_some_and(|ids| !ids.is_empty());
+                let status = Some(if questions { "waiting" } else { "approval" });
+                self.pending_counts.insert(key.clone(), Pending { updated, read_at, status });
+                self.mark_waiting(i, key, status);
+            }
+            Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+            Err(T3Error::Other(message)) => self.log(&format!("pending check ({key}): {message}")),
+        }
+        Ok(())
+    }
+
+    /// Notes which thread launched an agent-launched thread: the sender of its first message.
+    fn find_launcher(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some((env, id, _)) = self.listed_thread(i) else { return Ok(()) };
+        let key = format!("{env}:{id}");
+        if !self.launchers.contains_key(&key) && !self.out_of_time() {
+            let args = with_args(json!({ "threadId": id, "view": "messages", "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&env));
+            match self.client.call("t3_thread_read", args) {
+                Ok(read) => {
+                    let sender = read["items"][0]["senderThreadId"].as_str().filter(|s| *s != id).map(str::to_string);
+                    self.launchers.insert(key.clone(), sender);
+                }
+                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                Err(T3Error::Other(message)) => self.log(&format!("launcher ({key}): {message}")),
+            }
+        }
+        if let Some(Some(launcher)) = self.launchers.get(&key).cloned() {
+            if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
+                thread["launcher"] = json!(launcher);
+            }
+        }
+        Ok(())
+    }
+
+    /// The machine's status changes notify, the pending counts of working threads not
+    /// looked at go, and each active thread that left its lists is read next.
+    fn track_listed(&mut self) {
+        let Some(listed) = self.poll_run.as_mut().and_then(|run| run.listed.take()) else { return };
+        for thread in &listed.threads {
+            self.track_status(&listed.env, thread);
+        }
+        let prefix = format!("{}:", listed.env);
+        self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || listed.seen.contains(k));
+        let ids: HashSet<String> = listed.threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
+        self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !ids.contains(k));
+        let gone: Vec<(String, String)> =
+            self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !ids.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
+        let mut steps = Vec::new();
+        for (key, status) in gone {
+            if working(&status) || needs_you(&status) {
+                steps.push(Step::Unlisted(key, status));
+            } else {
+                self.last_status.remove(&key);
+                self.unlisted_misses.remove(&key);
+            }
+        }
+        if let Some(run) = self.poll_run.as_mut() {
+            run.listed = Some(listed);
+        }
+        self.push_steps(steps);
+    }
+
+    /// A thread that was working or waiting on you and dropped off its machine's lists
+    /// (settled past the list's limits, say) is read once more each poll until it ends, so
+    /// its end still notifies. Every other thread no longer listed is forgotten. A poll out
+    /// of time skips the read and keeps watching; a failed read keeps watching too, until
+    /// UNLISTED_MISSES in a row (a deleted thread).
+    fn check_unlisted(&mut self, key: String, status: String) -> Result<(), T3Error> {
+        let Some(env) = self.poll_run.as_ref().and_then(|run| run.listed.as_ref()).map(|l| l.env.clone()) else { return Ok(()) };
+        let keep = if self.out_of_time() {
+            true
+        } else {
+            let id = key.get(env.len() + 1..).unwrap_or("");
+            let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&env));
+            match self.client.call("t3_thread_read", args) {
+                Ok(read) if read["thread"].is_object() => {
+                    self.unlisted_misses.remove(&key);
+                    let mut thread = read["thread"].clone();
+                    if working(str_of(&thread["status"])) && thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
+                        thread["status"] = json!(if needs_you(&status) { status.as_str() } else { "waiting" });
+                    }
+                    self.track_status(&env, &thread);
+                    working(str_of(&thread["status"])) || needs_you(str_of(&thread["status"]))
+                }
+                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                // Unreadable now (T3 busy, or the thread deleted): try again next poll, a
+                // few times.
+                _ => {
+                    let misses = self.unlisted_misses.entry(key.clone()).or_insert(0);
+                    *misses += 1;
+                    *misses < UNLISTED_MISSES
+                }
+            }
+        };
+        if !keep {
+            self.last_status.remove(&key);
+            self.unlisted_misses.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// The machine's lists, taken in: they show from now on.
+    fn keep_lists(&mut self) {
+        let Some(Listed { env, threads, settled_total, .. }) = self.poll_run.as_mut().and_then(|run| run.listed.take()) else { return };
+        self.listed_envs.insert(env.clone());
+        self.threads.insert(env.clone(), threads);
+        self.settled_totals.insert(env.clone(), settled_total);
+        if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
+            target.ok = true;
+        }
+        if self.list_errors.remove(&env).is_some() {
+            let name = if env.is_empty() { "local" } else { &env };
+            self.log(&format!("threads ({name}): reachable again"));
+        }
+    }
+
+    /// The machines T3 links (the server's own name is read next).
+    fn read_links(&mut self) -> Result<(), T3Error> {
         let result = self.client.call("t3_environment_links", json!({}))?;
         let local_env_id = result["environmentId"].as_str().map(str::to_string);
         if self.local_env_id.is_some() && local_env_id != self.local_env_id {
@@ -863,20 +1139,28 @@ impl Bridge {
             self.forget_server();
         }
         self.local_env_id = local_env_id;
-        // The server's own name: not this PC's when `login --origin` points at another machine.
+        self.push_steps(vec![Step::ServerName(result)]);
+        Ok(())
+    }
+
+    /// The server's own name (not this PC's when `login --origin` points at another
+    /// machine), then the machines as T3 links them now; each one's projects come next.
+    fn read_machines(&mut self, links: Value) -> Result<(), T3Error> {
         let name = match self.client.call("t3_environment_read", json!({})) {
             Ok(read) => read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string),
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
             Err(T3Error::Other(_)) => None,
         };
         let mut envs = vec![Env { id: self.local_env_id.clone().unwrap_or_default(), name: name.unwrap_or_else(hostname), ok: true }];
-        for link in result["links"].as_array().into_iter().flatten() {
+        for link in links["links"].as_array().into_iter().flatten() {
             let id = str_of(&link["environmentId"]).to_string();
             let name = link["label"].as_str().map(str::to_string).unwrap_or_else(|| id.chars().take(8).collect());
             envs.push(Env { id, name, ok: link["status"] == "reachable" });
         }
         self.envs = envs;
         self.forget_unlinked();
+        let steps = self.envs.iter().filter(|e| e.ok).map(|e| Step::Projects(e.id.clone())).collect();
+        self.push_steps(steps);
         Ok(())
     }
 
@@ -919,81 +1203,6 @@ impl Bridge {
         }
     }
 
-    /// A working thread whose agent waits on a question shows as "waiting" (Needs you),
-    /// as in T3's sidebar, so it notifies and leaves the Working group.
-    fn mark_questions(&mut self, env: &str, threads: &mut [Value]) -> Result<(), T3Error> {
-        let env_arg = self.env_arg(env);
-        let mut seen = Vec::new();
-        for thread in threads.iter_mut().filter(|t| working(str_of(&t["status"]))) {
-            let key = format!("{env}:{}", str_of(&thread["threadId"]));
-            let updated = str_of(&thread["updatedAt"]).to_string();
-            let now = self.now_ms();
-            let status = match self.pending_counts.get(&key) {
-                Some(p) if p.updated == updated && now - p.read_at < PENDING_RECHECK_MS => p.status,
-                // No time left in this poll: the last count stands until the next one.
-                Some(p) if self.out_of_time() => p.status,
-                None if self.out_of_time() => {
-                    seen.push(key);
-                    continue;
-                }
-                _ => match self.read_waiting_on(str_of(&thread["threadId"]), &env_arg) {
-                    Ok(status) => {
-                        self.pending_counts.insert(key.clone(), Pending { updated: updated.clone(), read_at: now, status });
-                        status
-                    }
-                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-                    Err(T3Error::Other(message)) => {
-                        self.log(&format!("pending check ({key}): {message}"));
-                        continue;
-                    }
-                },
-            };
-            seen.push(key);
-            if let Some(status) = status {
-                thread["status"] = json!(status);
-            }
-        }
-        let prefix = format!("{env}:");
-        self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || seen.contains(k));
-        Ok(())
-    }
-
-    /// What a working thread waits on: its pending-request count includes approvals,
-    /// which T3's pending list leaves out, so a count with nothing listed is an approval.
-    fn read_waiting_on(&self, thread: &str, env_arg: &Map<String, Value>) -> Result<Option<&'static str>, T3Error> {
-        let read = self.client.call("t3_thread_read", with_args(json!({ "threadId": thread, "limit": 1, "maxCharsPerItem": 1 }), env_arg))?;
-        if read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0) == 0 {
-            return Ok(None);
-        }
-        let list = self.client.call("t3_pending_request", with_args(json!({ "action": "list", "threadId": thread }), env_arg))?;
-        let questions = list["requestIds"].as_array().is_some_and(|ids| !ids.is_empty());
-        Ok(Some(if questions { "waiting" } else { "approval" }))
-    }
-
-    /// Notes which thread launched each agent-launched thread: the sender of its first message.
-    fn find_launchers(&mut self, env: &str, threads: &mut [Value]) -> Result<(), T3Error> {
-        let env_arg = self.env_arg(env);
-        for thread in threads.iter_mut().filter(|t| t["createdBy"] == "agent") {
-            let id = str_of(&thread["threadId"]).to_string();
-            let key = format!("{env}:{id}");
-            if !self.launchers.contains_key(&key) && !self.out_of_time() {
-                let args = with_args(json!({ "threadId": id, "view": "messages", "limit": 1, "maxCharsPerItem": 1 }), &env_arg);
-                match self.client.call("t3_thread_read", args) {
-                    Ok(read) => {
-                        let sender = read["items"][0]["senderThreadId"].as_str().filter(|s| *s != id).map(str::to_string);
-                        self.launchers.insert(key.clone(), sender);
-                    }
-                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-                    Err(T3Error::Other(message)) => self.log(&format!("launcher ({key}): {message}")),
-                }
-            }
-            if let Some(Some(launcher)) = self.launchers.get(&key) {
-                thread["launcher"] = json!(launcher);
-            }
-        }
-        Ok(())
-    }
-
     fn track_status(&mut self, env: &str, thread: &Value) {
         let key = format!("{env}:{}", str_of(&thread["threadId"]));
         let status = str_of(&thread["status"]).to_string();
@@ -1023,78 +1232,39 @@ impl Bridge {
         }
     }
 
-    /// Threads that were working or waiting on you and dropped off this machine's lists
-    /// (settled past the list's limits, say) are read once more each poll until they end,
-    /// so their end still notifies. Every other thread no longer listed is forgotten. A poll
-    /// out of time skips the read and keeps watching; a failed read keeps watching too, until
-    /// UNLISTED_MISSES in a row (a deleted thread).
-    fn track_unlisted(&mut self, env: &str, threads: &[Value]) -> Result<(), T3Error> {
-        let prefix = format!("{env}:");
-        let listed: HashSet<String> = threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
-        self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !listed.contains(k));
-        let gone: Vec<(String, String)> =
-            self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !listed.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
-        for (key, status) in gone {
-            let keep = if !(working(&status) || needs_you(&status)) {
-                false
-            } else if self.out_of_time() {
-                true
-            } else {
-                let args = with_args(json!({ "threadId": &key[prefix.len()..], "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(env));
-                match self.client.call("t3_thread_read", args) {
-                    Ok(read) if read["thread"].is_object() => {
-                        self.unlisted_misses.remove(&key);
-                        let mut thread = read["thread"].clone();
-                        if working(str_of(&thread["status"])) && thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
-                            thread["status"] = json!(if needs_you(&status) { status.as_str() } else { "waiting" });
-                        }
-                        self.track_status(env, &thread);
-                        working(str_of(&thread["status"])) || needs_you(str_of(&thread["status"]))
-                    }
-                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-                    // Unreadable now (T3 busy, or the thread deleted): try again next poll, a
-                    // few times.
-                    _ => {
-                        let misses = self.unlisted_misses.entry(key.clone()).or_insert(0);
-                        *misses += 1;
-                        *misses < UNLISTED_MISSES
-                    }
-                }
-            };
-            if !keep {
-                self.last_status.remove(&key);
-                self.unlisted_misses.remove(&key);
-            }
-        }
-        Ok(())
+    /// A command changed what the open thread shows: read it again, and drop a read of it
+    /// under way (it would bring back what the command just changed).
+    fn view_changed(&mut self) {
+        self.view_key = None;
+        self.view_gen += 1;
     }
 
-    /// The open thread's messages from `after` on (all of them for None), page by page.
-    fn read_messages(&self, id: &str, env_arg: &Map<String, Value>, after: Option<u64>) -> Result<Vec<Value>, T3Error> {
-        let mut messages = Vec::new();
-        let mut after = after;
-        for _ in 0..10 {
-            let mut args = json!({ "threadId": id, "view": "messages", "limit": 100, "maxCharsPerItem": 6000 });
-            if let Some(after) = after {
-                args["afterPosition"] = json!(after);
-            }
-            let result = self.client.call("t3_thread_read", with_args(args, env_arg))?;
-            messages.extend(result["items"].as_array().cloned().unwrap_or_default());
-            match (result["hasMore"] == true, result["nextPosition"].as_u64()) {
-                (true, Some(next)) => after = Some(next),
-                _ => break,
-            }
+    /// The open thread's head, when it may have changed; its messages and question are read
+    /// next, a request at a time. Its messages: only what came after the last one read when
+    /// that's safe (same thread and depth, no items gone, a run still going or just started,
+    /// read recently), re-reading that last one, which may still be growing. Otherwise a
+    /// full read of the last 80×depth items, widened until there are enough.
+    fn refresh_view(&mut self) -> Result<(), T3Error> {
+        let Some(view) = self.view.clone() else {
+            self.view_data = None;
+            self.view_cache = None;
+            return Ok(());
+        };
+        let listed = self.threads.get(&view.env).and_then(|list| list.iter().find(|t| t["threadId"] == view.id.as_str())).cloned();
+        // A thread past the lists' limits has no updatedAt to compare: look again now and then.
+        let freshness = match &listed {
+            Some(t) => format!("{}:{}", str_of(&t["updatedAt"]), str_of(&t["status"])),
+            None => format!("unlisted:{}", self.now_ms().div_euclid(UNLISTED_VIEW_TTL_MS)),
+        };
+        let key = format!("{}:{}:{}:{freshness}", view.env, view.id, view.depth);
+        if Some(&key) == self.view_key.as_ref() && self.view_data.is_some() {
+            return Ok(());
         }
-        Ok(messages)
-    }
-
-    /// The last messages of the open thread: only what came after the last one read when
-    /// that's safe (same thread and depth, no items gone, a run still going or just
-    /// started, read recently), re-reading that last one, which may still be growing.
-    /// Otherwise a full read of the last 80×depth items, widened until there are enough.
-    fn view_messages(&mut self, view: &View, thread: &Value, env_arg: &Map<String, Value>) -> Result<(Vec<Value>, bool), T3Error> {
+        let args = with_args(json!({ "threadId": view.id, "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&view.env));
+        let head = self.client.call("t3_thread_read", args)?;
+        let thread = head["thread"].clone();
         let item_count = thread["itemCount"].as_u64().unwrap_or(0) as usize;
-        let status = str_of(&thread["status"]).to_string();
+        let status = str_of(&thread["status"]);
         let now = self.now_ms();
         let cache = self.view_cache.take().filter(|c| {
             c.env == view.env
@@ -1103,72 +1273,122 @@ impl Bridge {
                 && item_count >= c.item_count
                 && now - c.read_at < VIEW_FULL_READ_MS
                 // A run that ended may have tidied its messages.
-                && (!working(&c.status) || working(&status))
+                && (!working(&c.status) || working(status))
         });
         let last = cache.as_ref().and_then(|c| c.messages.last()).and_then(|m| m["position"].as_u64());
-        let (messages, earlier, read_at) = match (cache, last) {
-            (Some(cache), Some(last)) => {
-                let newer = self.read_messages(&view.id, env_arg, last.checked_sub(1))?;
+        let (cache, after, start, window) = match last {
+            Some(last) => (cache, last.checked_sub(1), 0, 0),
+            None => {
+                let window = 80 * view.depth;
+                let start = item_count.saturating_sub(window);
+                (None, (start > 0).then_some(start as u64), start, window)
+            }
+        };
+        let gen = self.view_gen;
+        if let Some(run) = self.poll_run.as_mut() {
+            run.reading = Some(ViewRead {
+                view,
+                key,
+                gen,
+                thread,
+                began: now,
+                cache,
+                messages: Vec::new(),
+                after,
+                pages: 0,
+                start,
+                window,
+                passes: 0,
+                built: None,
+            });
+        }
+        self.push_steps(vec![Step::ViewPage]);
+        Ok(())
+    }
+
+    /// The open thread's read under way, unless a command changed the view since it began:
+    /// that read is dropped (the poll after this one reads the view again).
+    fn view_read(&mut self) -> Option<&mut ViewRead> {
+        let gen = self.view_gen;
+        let run = self.poll_run.as_mut()?;
+        if run.reading.as_ref().is_some_and(|r| r.gen != gen) {
+            let dropped = run.reading.take().and_then(|r| r.cache);
+            if self.view_cache.is_none() {
+                self.view_cache = dropped;
+            }
+            return None;
+        }
+        self.poll_run.as_mut()?.reading.as_mut()
+    }
+
+    /// One page of the open thread's messages, VIEW_PAGES at most a pass. A full read that
+    /// found too few widens, VIEW_PASSES at most; then the view for the game is built.
+    fn read_view_page(&mut self) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let mut args = json!({ "threadId": read.view.id, "view": "messages", "limit": 100, "maxCharsPerItem": 6000 });
+        if let Some(after) = read.after {
+            args["afterPosition"] = json!(after);
+        }
+        let env = read.view.env.clone();
+        let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
+        let Some(read) = self.view_read() else { return Ok(()) };
+        read.messages.extend(result["items"].as_array().cloned().unwrap_or_default());
+        read.pages += 1;
+        let next = match (result["hasMore"] == true, result["nextPosition"].as_u64()) {
+            (true, Some(next)) if read.pages < VIEW_PAGES => Some(next),
+            _ => None,
+        };
+        let widen = next.is_none() && read.cache.is_none() && {
+            read.passes += 1;
+            read.messages.len() < VIEW_MESSAGES * read.view.depth && read.start > 0 && read.passes < VIEW_PASSES
+        };
+        if let Some(next) = next {
+            read.after = Some(next);
+        } else if widen {
+            read.window *= 4;
+            read.start = (read.thread["itemCount"].as_u64().unwrap_or(0) as usize).saturating_sub(read.window);
+            read.after = (read.start > 0).then_some(read.start as u64);
+            read.messages.clear();
+            read.pages = 0;
+        } else {
+            self.build_view();
+            return Ok(());
+        }
+        self.push_steps(vec![Step::ViewPage]);
+        Ok(())
+    }
+
+    /// The view for the game, from the messages read; its question is read next, if it has one.
+    fn build_view(&mut self) {
+        let Some(mut read) = self.poll_run.as_mut().and_then(|run| run.reading.take()) else { return };
+        let View { env, id, depth } = read.view.clone();
+        let newer = std::mem::take(&mut read.messages);
+        let (messages, earlier, read_at) = match read.cache.take() {
+            Some(cache) => {
+                let last = cache.messages.last().and_then(|m| m["position"].as_u64()).unwrap_or(0);
                 let mut messages: Vec<Value> = cache.messages.into_iter().filter(|m| m["position"].as_u64().is_some_and(|p| p < last)).collect();
                 messages.extend(newer);
                 (messages, cache.earlier, cache.read_at)
             }
-            _ => {
-                let want = VIEW_MESSAGES * view.depth;
-                let mut messages = Vec::new();
-                let mut window = 80 * view.depth;
-                let mut start = 0;
-                for _ in 0..4 {
-                    start = item_count.saturating_sub(window);
-                    messages = self.read_messages(&view.id, env_arg, (start > 0).then_some(start as u64))?;
-                    if messages.len() >= want || start == 0 {
-                        break;
-                    }
-                    window *= 4;
-                }
-                (messages, start > 0, now)
-            }
+            None => (newer, read.start > 0, read.began),
         };
         // Keep a few views' worth: older ones only matter after "show earlier".
-        let keep = VIEW_MESSAGES * view.depth * 4;
+        let keep = VIEW_MESSAGES * depth * 4;
         let trimmed = messages.len() > keep;
         let messages: Vec<Value> = messages[messages.len().saturating_sub(keep)..].to_vec();
         let earlier = earlier || trimmed;
+        let thread = &read.thread;
         self.view_cache = Some(ViewCache {
-            env: view.env.clone(),
-            id: view.id.clone(),
-            depth: view.depth,
-            item_count,
-            status,
+            env: env.clone(),
+            id: id.clone(),
+            depth,
+            item_count: thread["itemCount"].as_u64().unwrap_or(0) as usize,
+            status: str_of(&thread["status"]).to_string(),
             read_at,
             messages: messages.clone(),
             earlier,
         });
-        Ok((messages, earlier))
-    }
-
-    fn refresh_view(&mut self) -> Result<(), T3Error> {
-        let Some(view_wanted) = self.view.clone() else {
-            self.view_data = None;
-            self.view_cache = None;
-            return Ok(());
-        };
-        let View { env, id, depth } = view_wanted.clone();
-        let listed = self.threads.get(&env).and_then(|list| list.iter().find(|t| t["threadId"] == id.as_str())).cloned();
-        // A thread past the lists' limits has no updatedAt to compare: look again now and then.
-        let freshness = match &listed {
-            Some(t) => format!("{}:{}", str_of(&t["updatedAt"]), str_of(&t["status"])),
-            None => format!("unlisted:{}", self.now_ms().div_euclid(UNLISTED_VIEW_TTL_MS)),
-        };
-        let key = format!("{env}:{id}:{depth}:{freshness}");
-        if Some(&key) == self.view_key.as_ref() && self.view_data.is_some() {
-            return Ok(());
-        }
-        let env_arg = self.env_arg(&env);
-        let head = self.client.call("t3_thread_read", with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 }), &env_arg))?;
-        let thread = head["thread"].clone();
         let want = VIEW_MESSAGES * depth;
-        let (messages, earlier) = self.view_messages(&view_wanted, &thread, &env_arg)?;
         let mut items: Vec<Value> = Vec::new();
         let mut chars = 0;
         for item in messages.iter().rev().take(want) {
@@ -1187,7 +1407,7 @@ impl Bridge {
         let more = messages.len() > items.len() || earlier;
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
         let status = if pending && working(str_of(&thread["status"])) { "waiting" } else { str_of(&thread["status"]) };
-        let mut view = json!({
+        read.built = Some(json!({
             "e": env,
             "id": id,
             "t": plain(str_of(&thread["title"]), 120),
@@ -1196,25 +1416,65 @@ impl Bridge {
             "at": iso_seconds(str_of(&thread["updatedAt"])),
             "more": more,
             "items": items,
-        });
-        // A question the agent is waiting on goes to the game with the conversation.
-        // Approvals can't be answered through T3's tools: the window points to T3 instead.
-        // If the question can't be read this time, the one shown stays.
+        }));
+        if let Some(run) = self.poll_run.as_mut() {
+            run.reading = Some(read);
+        }
+        if pending {
+            self.push_steps(vec![Step::ViewAsk]);
+        } else {
+            self.finish_view(None);
+        }
+    }
+
+    /// The question the open thread waits on: which request it is (it's read next).
+    fn read_view_ask(&mut self) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        let args = with_args(json!({ "action": "list", "threadId": id }), &self.env_arg(&env));
+        match self.client.call("t3_pending_request", args) {
+            Ok(list) => match list["requestIds"].as_array().and_then(|ids| ids.first()).and_then(Value::as_str) {
+                Some(request_id) => self.push_steps(vec![Step::ViewAskRead(request_id.to_string())]),
+                None => self.finish_view(Some(Ok(None))),
+            },
+            Err(error) => self.finish_view(Some(Err(error))),
+        }
+        Ok(())
+    }
+
+    /// The question the open thread waits on, read; the view is then done.
+    fn read_view_request(&mut self, request_id: String) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        let args = with_args(json!({ "action": "read", "threadId": id, "requestId": request_id }), &self.env_arg(&env));
+        let ask = self.client.call("t3_pending_request", args).map(|request| Self::pending_ask(&env, &id, &request_id, &request));
+        self.finish_view(Some(ask));
+        Ok(())
+    }
+
+    /// The open thread's view goes to the game, with its question (`ask`: None when nothing
+    /// is pending). A question the agent is waiting on goes with the conversation.
+    /// Approvals can't be answered through T3's tools: the window points to T3 instead.
+    /// If the question can't be read this time, the one shown stays.
+    fn finish_view(&mut self, ask: Option<Result<Option<(PendingAsk, Value)>, T3Error>>) {
+        let Some(read) = self.poll_run.as_mut().and_then(|run| run.reading.take()) else { return };
+        let View { env, id, .. } = read.view;
+        let thread = read.thread;
+        let Some(mut view) = read.built else { return };
+        let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
         let shown_ask = self.view_data.as_ref().filter(|v| v["e"] == env.as_str() && v["id"] == id.as_str()).map(|v| v["ask"].clone()).filter(|a| !a.is_null());
         let previous = self.pending_ask.take().filter(|a| a.env == env && a.thread == id);
-        if pending {
-            match self.read_pending(&env, &id, &env_arg) {
-                Ok(Some((ask, value))) => {
+        match ask {
+            Some(Ok(Some((ask, value)))) => {
+                view["ask"] = value;
+                self.pending_ask = Some(ask);
+            }
+            Some(Ok(None)) | None => {}
+            Some(Err(error)) => {
+                self.log(&format!("pending question: {error}"));
+                if let (Some(ask), Some(value)) = (previous, shown_ask) {
                     view["ask"] = value;
                     self.pending_ask = Some(ask);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.log(&format!("pending question: {error}"));
-                    if let (Some(ask), Some(value)) = (previous, shown_ask) {
-                        view["ask"] = value;
-                        self.pending_ask = Some(ask);
-                    }
                 }
             }
         }
@@ -1226,20 +1486,12 @@ impl Bridge {
             }
         }
         self.view_data = Some(view);
-        self.view_key = Some(key);
-        Ok(())
+        self.view_key = Some(read.key);
     }
 
-    /// The first question the agent is waiting on in a thread, for the game: a short token,
-    /// and each question with its options. The full ids stay here; the game answers by index.
-    fn read_pending(&self, env: &str, thread: &str, env_arg: &Map<String, Value>) -> Result<Option<(PendingAsk, Value)>, T3Error> {
-        let list = self.client.call("t3_pending_request", with_args(json!({ "action": "list", "threadId": thread }), env_arg))?;
-        let Some(request_id) = list["requestIds"].as_array().and_then(|ids| ids.first()).and_then(Value::as_str) else {
-            return Ok(None);
-        };
-        let request = self
-            .client
-            .call("t3_pending_request", with_args(json!({ "action": "read", "threadId": thread, "requestId": request_id }), env_arg))?;
+    /// The first question of a pending request, for the game: a short token, and each
+    /// question with its options. The full ids stay here; the game answers by index.
+    fn pending_ask(env: &str, thread: &str, request_id: &str, request: &Value) -> Option<(PendingAsk, Value)> {
         let mut questions = Vec::new();
         let mut shown = Vec::new();
         for q in request["questions"].as_array().into_iter().flatten() {
@@ -1256,11 +1508,11 @@ impl Bridge {
             }));
         }
         if questions.is_empty() {
-            return Ok(None);
+            return None;
         }
         let token = format!("{:08x}", hash_of(&json!(request_id)) as u32);
         let ask = PendingAsk { env: env.to_string(), thread: thread.to_string(), token: token.clone(), request_id: request_id.to_string(), questions };
-        Ok(Some((ask, json!({ "k": token, "qs": shown }))))
+        Some((ask, json!({ "k": token, "qs": shown })))
     }
 
     /// Turns the game's answer (per question: a 1-based option index, a list of them, or
@@ -1492,9 +1744,14 @@ impl Bridge {
         }
     }
 
+    /// A poll is under way: the caller should tick again soon.
+    pub fn polling(&self) -> bool {
+        self.poll_run.is_some()
+    }
+
     /// One step: run the game's commands, read T3 when it's time, publish what changed.
-    /// A poll runs a step at a time for up to TICK_BUDGET_MS, then gives the caller (and
-    /// the game's next commands, the tray's controls) a turn.
+    /// A poll runs a step (one request) at a time for up to TICK_BUDGET_MS, then gives the
+    /// caller (and the game's next commands, the tray's controls) a turn.
     pub fn tick(&mut self) {
         self.run_commands();
         let now = self.now_ms();
