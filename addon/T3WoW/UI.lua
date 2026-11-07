@@ -565,8 +565,10 @@ local STATUS_ICON = {
 }
 
 -- Notifications stack down from this anchor; "Move notifications" in settings shows it.
+-- It has a notification's exact size and place, so where you drop it is where the first
+-- notification appears.
 local toastAnchor = CreateFrame("Frame", "T3WoWToastAnchor", UIParent, "BackdropTemplate")
-toastAnchor:SetSize(TOAST_WIDTH, 24)
+toastAnchor:SetSize(TOAST_WIDTH, TOAST_HEIGHT)
 toastAnchor:SetFrameStrata("DIALOG")
 toastAnchor:SetClampedToScreen(true)
 toastAnchor:SetMovable(true)
@@ -574,15 +576,18 @@ toastAnchor:RegisterForDrag("LeftButton")
 toastAnchor:SetBackdrop({
     bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 12,
-    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    tile = true, tileSize = 16, edgeSize = 16,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 },
 })
-toastAnchor:SetBackdropColor(0.1, 0.4, 0.8, 0.8)
+toastAnchor:SetBackdropColor(0.1, 0.4, 0.8, 0.85)
 toastAnchor:SetAlpha(0)
 toastAnchor:EnableMouse(false)
-local anchorLabel = toastAnchor:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-anchorLabel:SetPoint("CENTER")
-anchorLabel:SetText("T3 WoW notifications: drag to move")
+local anchorTitle = toastAnchor:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+anchorTitle:SetPoint("CENTER", 0, 8)
+anchorTitle:SetText("T3 WoW notifications appear here")
+local anchorHint = toastAnchor:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+anchorHint:SetPoint("CENTER", 0, -9)
+anchorHint:SetText("Drag to move, then click Done moving")
 toastAnchor:SetScript("OnDragStart", toastAnchor.StartMoving)
 toastAnchor:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
@@ -764,26 +769,44 @@ local function checkbox(text, key, get, set)
     return check
 end
 
-local function durationText()
-    local d = settings().duration
-    return "Stay on screen: " .. (d == 0 and "until clicked" or (d .. " seconds"))
+local function durationName(d)
+    return d == 0 and "Until clicked" or (d .. " seconds")
 end
 
+local refreshToastControls -- set below, once the controls exist
+
 sectionLabel("Notifications")
-checkbox("On-screen notification", "toasts")
+checkbox("On-screen notification", "toasts", nil, function(value)
+    settings().toasts = value
+    refreshToastControls()
+end)
 checkbox("Line in chat", "chat")
 checkbox("Sound", "sound")
-local durationButton = button(settingsPanel, durationText(), 226, nil)
-durationButton:SetPoint("TOPLEFT", 22, layoutY - 2)
-durationButton:SetScript("OnClick", function(self)
-    local s, nextIndex = settings(), 1
-    for index, d in ipairs(DURATIONS) do
-        if d == s.duration then nextIndex = index % #DURATIONS + 1 end
+
+-- How long notifications stay: a dropdown.
+local durationLabel = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+durationLabel:SetPoint("TOPLEFT", 24, layoutY - 8)
+durationLabel:SetText("Stay on screen")
+local durationMenu = CreateFrame("Frame", "T3WoWDurationMenu", settingsPanel, "UIDropDownMenuTemplate")
+durationMenu:SetPoint("LEFT", durationLabel, "RIGHT", -6, -2)
+UIDropDownMenu_SetWidth(durationMenu, 110)
+UIDropDownMenu_Initialize(durationMenu, function(_, level)
+    for _, d in ipairs(DURATIONS) do
+        local info = UIDropDownMenu_CreateInfo()
+        info.text = durationName(d)
+        -- UIDropDownMenu_Initialize also runs this once while the addon loads, before
+        -- saved settings exist, so read them without creating anything.
+        local saved = T3WoWDB and T3WoWDB.settings
+        info.checked = saved ~= nil and saved.duration == d
+        info.func = function()
+            settings().duration = d
+            UIDropDownMenu_SetText(durationMenu, durationName(d))
+            CloseDropDownMenus()
+        end
+        UIDropDownMenu_AddButton(info, level)
     end
-    s.duration = DURATIONS[nextIndex]
-    self:SetText(durationText())
 end)
-layoutY = layoutY - 30
+layoutY = layoutY - 34
 local moveButton = button(settingsPanel, "Move notifications", 110, nil)
 moveButton:SetPoint("TOPLEFT", 22, layoutY - 2)
 local testButton = button(settingsPanel, "Test", 110, function()
@@ -808,6 +831,22 @@ local function setAnchorUnlocked(unlocked)
 end
 moveButton:SetScript("OnClick", function() setAnchorUnlocked(toastAnchor:GetAlpha() == 0) end)
 
+-- The duration, moving and testing only matter for on-screen notifications.
+refreshToastControls = function()
+    local on = settings().toasts and true or false
+    UIDropDownMenu_SetText(durationMenu, durationName(settings().duration))
+    if on then
+        UIDropDownMenu_EnableDropDown(durationMenu)
+        durationLabel:SetTextColor(1, 1, 1)
+    else
+        UIDropDownMenu_DisableDropDown(durationMenu)
+        durationLabel:SetTextColor(0.5, 0.5, 0.5)
+        setAnchorUnlocked(false)
+    end
+    moveButton:SetEnabled(on)
+    testButton:SetEnabled(on)
+end
+
 sectionLabel("Notify when a thread")
 checkbox("Finishes", "onCompleted")
 checkbox("Needs you", "onWaiting")
@@ -822,7 +861,7 @@ checkbox("Show minimap button", nil,
 
 settingsPanel:SetScript("OnShow", function()
     for _, check in ipairs(checks) do check:SetChecked(check.get() and true or false) end
-    durationButton:SetText(durationText())
+    refreshToastControls()
 end)
 settingsPanel:SetScript("OnHide", function() setAnchorUnlocked(false) end)
 
