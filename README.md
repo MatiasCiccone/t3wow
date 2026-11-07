@@ -4,7 +4,11 @@
 
 T3 Code inside World of Warcraft: Forever. You bring your harnesses to T3 Code; this brings T3 Code into WoW.
 
-An in-game window lists your T3 threads from every machine your T3 Code reaches (this PC and its linked environments), shows a thread's conversation, and lets you message it, start a new thread, stop a run, and settle or unsettle a thread. That is all it does.
+An in-game window lists your T3 threads from every machine your T3 Code reaches (this PC and its linked environments), shows a thread's conversation, and lets you message it, answer an agent's questions, start a new thread, stop a run, and settle or unsettle a thread. When a thread finishes, fails or needs you, a notification slides in.
+
+<p align="center"><img src="assets/screenshots/question.png" alt="The T3 WoW window: a thread whose agent asks two questions, with option buttons and Send answer" width="720"></p>
+
+More screenshots are in [`assets/screenshots`](assets/screenshots).
 
 ## What you need
 
