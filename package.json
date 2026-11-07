@@ -13,6 +13,6 @@
     "build:exe": "node scripts/build-exe.mjs"
   },
   "devDependencies": {
-    "fengari": "^0.1.4"
+    "fengari": "^0.1.5"
   }
 }
