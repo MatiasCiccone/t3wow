@@ -1,15 +1,18 @@
 //! The companion's work, on a background thread: find WoW and T3, keep the addon files in
 //! place, sign in when needed, and run the bridge. The tray (or the console, for `run`)
-//! only shows what this reports.
+//! only shows what this reports: the status lines, what is under way (`activity`), and a
+//! notice for every action's start, success or failure (`take_notices`).
 
 use crate::bridge::{Bridge, CaptureMessage};
-use crate::config::{config_dir, now_ms, Config, Trust};
+use crate::config::{config_dir, now_ms, server_label, unencrypted_over_network, Config, Trust};
 use crate::log;
 use crate::slots::{Slots, SLOT_COUNT};
 
 use crate::t3::{self, McpClient, T3};
-use crate::updater::{self, Release};
-use std::path::PathBuf;
+use crate::updater::{self, Release, Step};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -45,6 +48,35 @@ pub enum Update {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Level {
+    Info,
+    Warning,
+    Error,
+}
+
+/// A notification from the tray: what an action did, or why it failed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Notice {
+    pub level: Level,
+    pub title: String,
+    pub text: String,
+}
+
+impl Notice {
+    pub fn new(level: Level, title: impl Into<String>, text: impl Into<String>) -> Notice {
+        Notice { level, title: title.into(), text: text.into() }
+    }
+}
+
+/// Work the tray shows while it runs (one line each, in this order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Task {
+    SignIn,
+    Update,
+}
+
 pub struct App {
     pub status: Mutex<Status>,
     pub control: Mutex<Option<Sender<Control>>>,
@@ -52,7 +84,33 @@ pub struct App {
     sign_in_run: AtomicU64,
     pub wow_dir: Mutex<Option<PathBuf>>,
     pub update: Mutex<Update>,
+    activities: Mutex<BTreeMap<Task, String>>,
+    notices: Mutex<VecDeque<Notice>>,
+    /// The release a notice went out for: one per new release, not one per check.
+    announced: Mutex<Option<String>>,
 }
+
+/// "T3 on this PC" / "T3 at http://box:3773", from `config::server_label`.
+pub fn t3_named(label: &str) -> String {
+    if label == server_label(None) {
+        format!("T3 on {label}")
+    } else {
+        format!("T3 at {label}")
+    }
+}
+
+/// The tray's line while an update runs.
+pub fn update_step_text(version: &str, step: Step) -> String {
+    match step {
+        Step::Downloading(Some(percent)) => format!("Downloading update {version}… {percent}%"),
+        Step::Downloading(None) => format!("Downloading update {version}…"),
+        Step::Checking => format!("Checking the download of {version}…"),
+        Step::Installing => format!("Installing update {version}…"),
+    }
+}
+
+/// Said whenever the game has to restart to see new addon files.
+pub const RESTART_WOW: &str = "Quit WoW completely and start it again: /reload doesn't load new addon files.";
 
 impl App {
     pub fn new() -> Arc<App> {
@@ -62,6 +120,9 @@ impl App {
             sign_in_run: AtomicU64::new(0),
             wow_dir: Mutex::new(None),
             update: Mutex::new(Update::NotChecked),
+            activities: Mutex::new(BTreeMap::new()),
+            notices: Mutex::new(VecDeque::new()),
+            announced: Mutex::new(None),
         })
     }
 
@@ -69,15 +130,56 @@ impl App {
         *self.status.lock().unwrap() = Status { t3: t3.into(), wow: wow.into(), attention, signed_in };
     }
 
+    /// Logs a notice and queues it for the tray to show.
+    pub fn notify(&self, notice: Notice) {
+        log::line(&format!("{}: {}", notice.title, notice.text));
+        let mut notices = self.notices.lock().unwrap();
+        // A tray that isn't there (`run`) never takes them: keep the newest few.
+        if notices.len() >= 20 {
+            notices.pop_front();
+        }
+        notices.push_back(notice);
+    }
+
+    pub fn take_notices(&self) -> Vec<Notice> {
+        self.notices.lock().unwrap().drain(..).collect()
+    }
+
+    /// Sets (or, with None, ends) the line shown while `task` runs.
+    pub fn set_activity(&self, task: Task, line: Option<String>) {
+        let mut activities = self.activities.lock().unwrap();
+        match line {
+            Some(line) => activities.insert(task, line),
+            None => activities.remove(&task),
+        };
+    }
+
+    /// What is under way, one line per task; None when nothing is.
+    pub fn activity(&self) -> Option<String> {
+        let activities = self.activities.lock().unwrap();
+        (!activities.is_empty()).then(|| activities.values().cloned().collect::<Vec<_>>().join("\n"))
+    }
+
     /// Forgets the current T3's sign-in; the menu then offers Sign in again.
     pub fn sign_out(&self) {
-        Config::update(Config::sign_out);
-        log::line("Signed out of T3.");
+        let config = Config::update(Config::sign_out);
+        let name = t3_named(&server_label(config.origin.as_deref()));
+        self.notify(Notice::new(Level::Info, "Signed out of T3", format!("Signed out of {name}. Choose Sign in to T3… to sign in again.")));
         self.send(Control::SignedOut);
     }
 
-    /// Looks for a newer release in the background (once at a time).
-    pub fn check_updates(self: &Arc<App>) {
+    /// Saves the tray's "Commands from the game" and applies it at once.
+    pub fn set_trust(&self, trust: Trust) {
+        // Saved first, so the worker's next look at config.json agrees.
+        Config::update(|c| c.game_commands = Some(trust));
+        self.send(Control::Trust(trust));
+        self.notify(Notice::new(Level::Info, format!("Commands from the game: {}", trust.label()), trust.description()));
+    }
+
+    /// Looks for a newer release in the background (once at a time). `asked`: chosen from
+    /// the menu, so the result is announced whatever it is; the timed checks only announce
+    /// a new release, once.
+    pub fn check_updates(self: &Arc<App>, asked: bool) {
         {
             let mut update = self.update.lock().unwrap();
             if matches!(*update, Update::Checking | Update::Installing(_)) {
@@ -85,35 +187,65 @@ impl App {
             }
             *update = Update::Checking;
         }
+        if asked {
+            self.set_activity(Task::Update, Some("Checking for updates…".into()));
+        }
         let app = Arc::clone(self);
         std::thread::spawn(move || {
+            let current = updater::current_version();
             let result = match updater::check() {
                 Ok(Some(release)) => {
-                    log::line(&format!("Update available: {}", release.version));
+                    let mut announced = app.announced.lock().unwrap();
+                    if asked || announced.as_ref() != Some(&release.version) {
+                        let v = &release.version;
+                        app.notify(Notice::new(Level::Info, "T3 WoW update", format!("T3 WoW {v} is out (you have {current}). Choose Update to {v} in the tray menu.")));
+                        *announced = Some(v.clone());
+                    }
                     Update::Available(release)
                 }
-                Ok(None) => Update::UpToDate,
+                Ok(None) => {
+                    if asked {
+                        app.notify(Notice::new(Level::Info, "T3 WoW is up to date", format!("You have {current}, the newest release.")));
+                    }
+                    Update::UpToDate
+                }
                 Err(error) => {
-                    log::line(&format!("Update check failed: {error}"));
+                    if asked {
+                        app.notify(Notice::new(Level::Error, "Couldn't check for updates", error.clone()));
+                    } else {
+                        log::line(&format!("Update check failed: {error}"));
+                    }
                     Update::Failed(error)
                 }
             };
             *app.update.lock().unwrap() = result;
+            if asked {
+                app.set_activity(Task::Update, None);
+            }
         });
     }
 
-    /// Downloads and swaps in the release; `then` runs on success (the tray restarts).
+    /// Downloads and swaps in the release, showing how far it has got; `then` runs on success
+    /// (the tray restarts, and the new companion says it was updated).
     pub fn install_update(self: &Arc<App>, release: Release, then: impl FnOnce() + Send + 'static) {
-        *self.update.lock().unwrap() = Update::Installing(release.version.clone());
+        let version = release.version.clone();
+        *self.update.lock().unwrap() = Update::Installing(version.clone());
+        self.set_activity(Task::Update, Some(update_step_text(&version, Step::Downloading(None))));
+        self.notify(Notice::new(Level::Info, format!("Updating T3 WoW to {version}"), "Downloading it now. T3 WoW restarts by itself when it's done."));
         let app = Arc::clone(self);
-        std::thread::spawn(move || match updater::install(&release) {
+        std::thread::spawn(move || match updater::install(&release, &|step| app.set_activity(Task::Update, Some(update_step_text(&version, step)))) {
             Ok(()) => {
-                log::line(&format!("Updated to {}; restarting.", release.version));
+                app.set_activity(Task::Update, Some("Restarting T3 WoW…".into()));
+                let text = format!("Updated from {} and restarted. If WoW is running, it needs a restart to load the new addon: {RESTART_WOW}", updater::current_version());
+                notice_after_restart(&Notice::new(Level::Info, format!("T3 WoW updated to {version}"), text));
+                log::line(&format!("Updated to {version}; restarting."));
                 then();
             }
             Err(error) => {
-                log::line(&format!("Update to {} failed: {error}", release.version));
-                *app.update.lock().unwrap() = Update::Failed(error);
+                app.set_activity(Task::Update, None);
+                app.notify(Notice::new(Level::Error, format!("Update to {version} failed"), format!("{error}. Choose Update to {version} in the tray menu to try again.")));
+                // Still out there: the menu offers it again.
+                *app.update.lock().unwrap() = Update::Available(release);
             }
         });
     }
@@ -124,50 +256,146 @@ impl App {
         }
     }
 
-    /// Opens T3's sign-in page in the browser and waits for the approval in the background.
-    /// Asked again while one waits, it starts over: the old wait ends and a new page opens.
+    /// Signs in to the T3 in use again, through the browser.
     pub fn sign_in(self: &Arc<App>) {
-        self.connect_in_background(None, true);
+        self.connect(None, false);
     }
 
-    /// Moves the companion to another T3: `Some(url)` for one on another machine, `None`
-    /// for the one on this PC (what `t3wow.exe login --origin` does, for the tray). Uses
-    /// that T3's saved sign-in, or opens its sign-in page first; a failed or cancelled
-    /// sign-in leaves the companion where it was. Once saved, the worker moves at once and
-    /// the game drops everything the previous T3 showed (`Bridge::set_login`).
-    #[allow(dead_code)] // for the tray's connect-to-another-T3 entry
-    pub fn connect(self: &Arc<App>, origin: Option<String>) {
-        self.connect_in_background(Some(origin), false);
-    }
-
-    /// `t3::connect` on its own thread; a newer sign-in or connect ends a waiting one.
-    fn connect_in_background(self: &Arc<App>, origin: Option<Option<String>>, fresh: bool) {
+    /// Signs in, and with `switch_to` moves to that T3 (`Some(None)`: the one on this PC),
+    /// in the background, through `t3::connect`, the one path for both. Asked again while a
+    /// browser sign-in waits, it starts over: the old wait ends.
+    pub fn connect(self: &Arc<App>, switch_to: Option<Option<String>>, reuse_saved: bool) {
         let run = self.sign_in_run.fetch_add(1, Ordering::SeqCst) + 1;
         let app = Arc::clone(self);
         std::thread::spawn(move || {
             let cancelled = || app.sign_in_run.load(Ordering::SeqCst) != run;
-            // A sign-in is saved for the server that issued it, even if `login --origin`
-            // moved the companion elsewhere meanwhile: the worker pairs tokens with servers.
-            match t3::connect(origin, fresh, &|m| log::line(m), &cancelled) {
+            let to = switch_to.as_ref().map(|origin| t3_named(&server_label(origin.as_deref())));
+            app.set_activity(Task::SignIn, Some(match &to {
+                Some(name) => format!("Connecting to {name}…"),
+                None => "Signing in to T3…".into(),
+            }));
+            let opened = || {
+                app.set_activity(Task::SignIn, Some("Waiting for you to approve the sign-in in your browser…".into()));
+                app.notify(Notice::new(
+                    Level::Info,
+                    "Approve the sign-in in your browser",
+                    "T3's sign-in page is open in your browser. If it asks for a pairing code, make one in T3 under Settings → Sharing & access.",
+                ));
+            };
+            let result = t3::connect(switch_to, reuse_saved, &|m| log::line(m), &opened, &cancelled);
+            if !cancelled() {
+                app.set_activity(Task::SignIn, None);
+            }
+            match result {
                 Ok(connected) => {
-                    match connected.signed {
-                        Some(signed) => {
-                            let scope = if signed.scope.is_empty() { "no scope reported" } else { &signed.scope };
-                            log::line(&format!("Signed in to {} ({scope}).", connected.origin));
-                        }
-                        None => log::line(&format!("Connecting to {} with its saved sign-in.", connected.origin)),
+                    let name = t3_named(&connected.label);
+                    let (title, mut text) = match (connected.switched, &connected.scope) {
+                        (true, None) => ("Switched T3", format!("T3 WoW now uses {name}, with the sign-in saved for it.")),
+                        (true, Some(_)) => ("Switched T3", format!("Signed in: T3 WoW now uses {name}.")),
+                        (false, _) => ("Signed in to T3", format!("T3 WoW is signed in to {name}.")),
+                    };
+                    let mut level = Level::Info;
+                    if unencrypted_over_network(&connected.origin) {
+                        text.push_str(" The connection is plain HTTP, so the sign-in token crosses your network unencrypted.");
+                        level = Level::Warning;
                     }
+                    app.notify(Notice::new(level, title, text));
                     app.send(Control::SignedIn);
                 }
                 Err(_) if cancelled() => log::line("Started the sign-in over."),
-                Err(error) => log::line(&format!("Can't sign in: {error}")),
+                Err(error) => {
+                    let (title, stays) = match &to {
+                        Some(_) => ("Couldn't switch T3", format!(" T3 WoW stays on {}.", t3_named(&server_label(Config::load().origin.as_deref())))),
+                        None => ("Sign-in to T3 failed", String::new()),
+                    };
+                    app.notify(Notice::new(Level::Error, title, format!("{error}{stays}")));
+                }
             }
         });
     }
 }
 
-fn wait(rx: &Receiver<Control>, seconds: u64) -> Option<Control> {
-    rx.recv_timeout(Duration::from_secs(seconds)).ok()
+fn restart_notice_file() -> PathBuf {
+    config_dir().join("restart-notice.json")
+}
+
+/// Keeps a notice for the companion that starts next (an update or a new WoW folder restarts
+/// it, and a notification from this one would vanish with its tray icon).
+pub fn notice_after_restart(notice: &Notice) {
+    save_notice_at(&restart_notice_file(), notice);
+}
+
+/// The notice the previous companion left, once.
+pub fn take_restart_notice() -> Option<Notice> {
+    take_notice_at(&restart_notice_file())
+}
+
+fn save_notice_at(file: &Path, notice: &Notice) {
+    if let Err(error) = std::fs::write(file, serde_json::to_string(notice).unwrap_or_default()) {
+        log::line(&format!("Couldn't keep the notice for after the restart: {error}"));
+    }
+}
+
+fn take_notice_at(file: &Path) -> Option<Notice> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let _ = std::fs::remove_file(file);
+    serde_json::from_str(&text).ok()
+}
+
+/// New addon files the running game hasn't loaded: WoW reads addon files only when it starts.
+struct RestartNote {
+    /// For the tray's WoW line.
+    line: String,
+    /// Said when WoW is seen running with the old files (None: said already).
+    notice: Option<Notice>,
+}
+
+/// Whether the restart note still applies: until a WoW that was running stops, or, when WoW
+/// wasn't running, once the screen capture has had time to see it (it then starts with the
+/// new files).
+fn restart_note_stays(wow_running: bool, seen_running: bool, since: Duration) -> bool {
+    if seen_running {
+        wow_running
+    } else {
+        // The capture looks for WoW as soon as it starts, so a few seconds is plenty; much
+        // longer and a WoW started meanwhile (with the new files) would be told to restart.
+        wow_running || since < Duration::from_secs(5)
+    }
+}
+
+/// Reinstalls the addon, saying how it went. True when it worked.
+fn reinstall(app: &App, slots: &Slots) -> bool {
+    match slots.install() {
+        Ok(()) => {
+            app.notify(Notice::new(
+                Level::Info,
+                "Addon reinstalled",
+                format!("Reinstalled in {}. If WoW is running, it needs a restart to load it: {RESTART_WOW}", slots.addons_dir.display()),
+            ));
+            true
+        }
+        Err(error) => {
+            app.notify(Notice::new(Level::Error, "Reinstalling the addon failed", error.to_string()));
+            false
+        }
+    }
+}
+
+/// Waits up to `seconds` for a control before the bridge runs, acting on a Reinstall (the
+/// rest are picked up by the caller's next look at the config).
+fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) {
+    if let Ok(Control::Reinstall) = rx.recv_timeout(Duration::from_secs(seconds)) {
+        match slots {
+            Some(slots) => {
+                reinstall(app, slots);
+            }
+            None => app.notify(Notice::new(
+                Level::Error,
+                "Can't reinstall the addon yet",
+                "T3 WoW hasn't found the WoW folder: choose it with Choose WoW folder… in the tray menu first.",
+            )),
+        }
+    }
 }
 
 /// The worker loop. Never returns.
@@ -186,14 +414,14 @@ pub fn run(app: Arc<App>) {
             break dir;
         }
         app.set("T3: waiting", "WoW: Forever folder not found: choose it from this menu", true, Config::load().token().is_some());
-        let _ = wait(&control_rx, 5);
+        wait(&app, &control_rx, 5, None);
     };
     *app.wow_dir.lock().unwrap() = Some(wow_dir.clone());
     let interface = Config::load().interface();
 
     // 2. The addon files: put back what's missing, install or update the addon.
     let slots = Slots::for_wow(&wow_dir, &interface);
-    let mut restart_note = None;
+    let mut restart: Option<RestartNote> = None;
     match slots.repair() {
         Ok(repair) => {
             if let Some(addon) = &repair.addon {
@@ -203,15 +431,22 @@ pub fn run(app: Arc<App>) {
                 log::line(&format!("Created {} missing addon files", repair.created));
             }
             if repair.addon.is_some() || repair.created > 0 {
-                restart_note = Some("restart WoW to load the new addon files".to_string());
+                let what = match &repair.addon {
+                    Some(addon) => format!("The addon was {addon}"),
+                    None => "Missing addon files were put back".to_string(),
+                };
+                restart = Some(RestartNote {
+                    line: "restart WoW to load the new addon files (not /reload)".into(),
+                    notice: Some(Notice::new(Level::Warning, "Restart WoW to load the new addon", format!("{what}, but the running game still has the old files. {RESTART_WOW}"))),
+                });
             }
         }
-        Err(error) => log::line(&format!("Couldn't write the addon files: {error}")),
+        Err(error) => app.notify(Notice::new(Level::Error, "Couldn't write the addon files", error.to_string())),
     }
 
     // 3. T3 (on this PC, or the saved origin) and a sign-in for it. The browser opens by
     //    itself once per start; after that, the tray's Sign in to T3… opens it again. A
-    //    terminal `login` is picked up too.
+    //    terminal `login` or the tray's T3 server menu is picked up too.
     let mut asked = false;
     let (mut key, origin, token) = loop {
         match t3::target() {
@@ -223,9 +458,14 @@ pub fn run(app: Arc<App>) {
                     app.sign_in();
                 }
             }
-            None => app.set("T3 Code isn't running on this PC", "WoW: waiting for T3", true, false),
+            None => app.set(
+                "T3 Code isn't running on this PC: start it, or choose T3 server > Connect to T3 on another machine…",
+                "WoW: waiting for T3",
+                true,
+                false,
+            ),
         }
-        let _ = wait(&control_rx, 5);
+        wait(&app, &control_rx, 5, Some(&slots));
     };
 
     // 4. The bridge, fed by the screen capture.
@@ -252,6 +492,9 @@ pub fn run(app: Arc<App>) {
     let mut checked_origin = Instant::now();
     let mut recheck = false;
     let mut signed_out = false;
+    // For the restart note: the bridge only knows WoW runs once the capture has looked.
+    let mut restart_since = Instant::now();
+    let mut seen_running = false;
     loop {
         while let Ok(message) = capture_rx.try_recv() {
             bridge.on_capture(message);
@@ -271,15 +514,15 @@ pub fn run(app: Arc<App>) {
                     bridge.set_client(client.clone());
                     bridge.sign_out();
                 }
-                Control::Reinstall => match slots.install() {
-                    Ok(()) => {
-                        log::line("Reinstalled the addon. Restart WoW to load it.");
-                        restart_note = Some("restart WoW to load the reinstalled addon".into());
+                Control::Reinstall => {
+                    if reinstall(&app, &slots) {
+                        // Its notice already said to restart WoW.
+                        restart = Some(RestartNote { line: "restart WoW to load the reinstalled addon (not /reload)".into(), notice: None });
+                        (restart_since, seen_running) = (Instant::now(), false);
                         // The reinstall blanked the slots and signals already written: write them again.
                         bridge.republish();
                     }
-                    Err(error) => log::line(&format!("Reinstall failed: {error}")),
-                },
+                }
                 Control::Trust(trust) => bridge.set_trust(trust),
             }
         }
@@ -330,29 +573,109 @@ pub fn run(app: Arc<App>) {
         };
         let used = s.slot.saturating_sub(1).min(SLOT_COUNT);
         let wow_line = match (s.wow_running, s.in_game, s.signals) {
-            (false, _, _) => "WoW: not running".to_string(),
-            (true, false, _) => "WoW: running, waiting for the addon (log in, or /reload)".to_string(),
-            (true, true, _) if s.write_problem.is_some() => {
-                format!("WoW: {}", s.write_problem.as_deref().unwrap_or("").chars().take(70).collect::<String>())
-            }
-            (true, true, _) if used >= SLOT_COUNT => "WoW: in game, all 200 updates used: Reload UI in the game".to_string(),
-            (true, true, true) => format!("WoW: in game, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
-            (true, true, false) if s.signals_out => format!("WoW: in game, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
-            (true, true, false) => format!("WoW: in game, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
+            (false, _, _) => "not running".to_string(),
+            (true, false, _) => "running, waiting for the addon (log in, or /reload)".to_string(),
+            (true, true, _) if s.write_problem.is_some() => s.write_problem.as_deref().unwrap_or("").chars().take(70).collect::<String>(),
+            (true, true, _) if used >= SLOT_COUNT => "in game, all 200 updates used: Reload UI in the game".to_string(),
+            (true, true, true) => format!("in game, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) if s.signals_out => format!("in game, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) => format!("in game, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
         };
-        let wow_line = match &restart_note {
-            Some(note) if s.wow_running => format!("{wow_line} ({note})"),
-            _ => wow_line,
-        };
-        if !s.wow_running {
-            restart_note = None;
+        // The restart comes first, where the tray's tooltip still shows it.
+        if s.wow_running {
+            seen_running = true;
         }
-        let attention = signed_out || s.auth_needed || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some();
+        if restart.is_some() && !restart_note_stays(s.wow_running, seen_running, restart_since.elapsed()) {
+            restart = None;
+        }
+        let wow_line = match &mut restart {
+            Some(note) if s.wow_running => {
+                if let Some(notice) = note.notice.take() {
+                    app.notify(notice);
+                }
+                format!("WoW: {}; {wow_line}", note.line)
+            }
+            _ => format!("WoW: {wow_line}"),
+        };
+        let restart_needed = restart.is_some() && s.wow_running;
+        let attention = signed_out || s.auth_needed || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some() || restart_needed;
         app.set(t3_line, wow_line, attention, !signed_out && !s.auth_needed);
         // Mid-poll, each tick reads T3 for one request or TICK_BUDGET_MS, whichever is
         // longer, and the capture and the controls above get their turn in between: no nap.
         if !bridge.polling() {
             std::thread::sleep(Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notices_queue_for_the_tray_and_the_oldest_make_room() {
+        let app = App::new();
+        app.notify(Notice::new(Level::Info, "a", "1"));
+        app.notify(Notice::new(Level::Error, "b", "2"));
+        assert_eq!(app.take_notices(), [Notice::new(Level::Info, "a", "1"), Notice::new(Level::Error, "b", "2")]);
+        assert!(app.take_notices().is_empty(), "each is taken once");
+        for n in 0..25 {
+            app.notify(Notice::new(Level::Info, "n", n.to_string()));
+        }
+        let kept = app.take_notices();
+        assert_eq!(kept.len(), 20);
+        assert_eq!(kept[0].text, "5");
+    }
+
+    #[test]
+    fn the_activity_line_shows_each_running_task_until_it_ends() {
+        let app = App::new();
+        assert_eq!(app.activity(), None);
+        app.set_activity(Task::Update, Some(update_step_text("0.6.0", Step::Downloading(Some(42)))));
+        assert_eq!(app.activity().as_deref(), Some("Downloading update 0.6.0… 42%"));
+        app.set_activity(Task::SignIn, Some("Signing in to T3…".into()));
+        assert_eq!(app.activity().as_deref(), Some("Signing in to T3…\nDownloading update 0.6.0… 42%"));
+        app.set_activity(Task::Update, None);
+        app.set_activity(Task::SignIn, None);
+        assert_eq!(app.activity(), None);
+    }
+
+    #[test]
+    fn update_steps_read_as_progress() {
+        assert_eq!(update_step_text("0.6.0", Step::Downloading(None)), "Downloading update 0.6.0…");
+        assert_eq!(update_step_text("0.6.0", Step::Checking), "Checking the download of 0.6.0…");
+        assert_eq!(update_step_text("0.6.0", Step::Installing), "Installing update 0.6.0…");
+        assert_eq!(t3_named("this PC"), "T3 on this PC");
+        assert_eq!(t3_named("http://box:3773"), "T3 at http://box:3773");
+    }
+
+    #[test]
+    fn a_notice_left_for_the_next_start_is_shown_once() {
+        let dir = std::env::temp_dir().join(format!("t3wow-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("restart-notice.json");
+        assert_eq!(take_notice_at(&file), None);
+        let notice = Notice::new(Level::Info, "T3 WoW updated to 0.6.0", "Updated from 0.5.0.");
+        save_notice_at(&file, &notice);
+        assert_eq!(take_notice_at(&file), Some(notice));
+        assert_eq!(take_notice_at(&file), None);
+        std::fs::write(&file, "not json").unwrap();
+        assert_eq!(take_notice_at(&file), None, "a damaged one is dropped");
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_restart_note_lasts_until_the_game_that_had_the_old_files_stops() {
+        let early = Duration::from_secs(1);
+        let late = Duration::from_secs(60);
+        // Just started: the capture hasn't looked yet, so the note waits for it.
+        assert!(restart_note_stays(false, false, early));
+        // WoW wasn't running: it will start with the new files.
+        assert!(!restart_note_stays(false, false, late));
+        // WoW runs with the old files, however long ago they changed...
+        assert!(restart_note_stays(true, true, late));
+        // ...until it stops.
+        assert!(!restart_note_stays(false, true, early));
     }
 }

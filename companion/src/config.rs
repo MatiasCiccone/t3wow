@@ -50,6 +50,86 @@ pub fn canonical_origin(origin: &str) -> String {
     format!("{scheme}://{authority}{path}")
 }
 
+/// The address typed into the tray's "Connect to T3 on another machine…" box, as an origin:
+/// `192.168.1.20:3773`, `gaming-pc.lan:3773`, or a full `http(s)://` URL. Without a scheme
+/// it is plain HTTP (how T3 serves a LAN) and needs the port, since T3 doesn't run on 80.
+pub fn parse_origin_input(input: &str) -> Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("Type the address of the PC running T3, like 192.168.1.20:3773.".into());
+    }
+    if input.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("The address can't contain spaces.".into());
+    }
+    let (scheme, rest, explicit) = match input.split_once("://") {
+        Some((scheme, rest)) => match scheme.to_ascii_lowercase().as_str() {
+            "http" => ("http", rest, true),
+            "https" => ("https", rest, true),
+            _ => return Err(format!("{scheme}:// isn't a web address: use http:// or https://, or just host:port.")),
+        },
+        None => ("http", input, false),
+    };
+    if rest.contains(['?', '#']) {
+        return Err("Leave out anything after ? or #: just the host and port.".into());
+    }
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if authority.contains('@') {
+        return Err("Leave out the user name: just the host and port.".into());
+    }
+    // [fe80::1]:3773 for IPv6; everything else is host[:port].
+    let (host, port) = if let Some(after) = authority.strip_prefix('[') {
+        let (inside, tail) = after.split_once(']').ok_or("An IPv6 address needs its closing ].")?;
+        if inside.is_empty() || !inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+            return Err(format!("[{inside}] isn't an IPv6 address."));
+        }
+        let host = &authority[..inside.len() + 2];
+        match tail {
+            "" => (host, None),
+            _ => (host, Some(tail.strip_prefix(':').ok_or("Put a : between the address and the port.")?)),
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if host.is_empty() {
+        return Err("The address needs a host name or IP address before the port.".into());
+    }
+    if !host.starts_with('[') && !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_') {
+        return Err(format!("{host} isn't a host name or IP address."));
+    }
+    match port {
+        Some(port) if port.parse::<u16>().is_ok_and(|p| p > 0) => {}
+        Some(port) => return Err(format!("{port} isn't a port number (1 to 65535).")),
+        None if !explicit => return Err(format!("Add the port T3 listens on, like {host}:3773.")),
+        None => {}
+    }
+    Ok(canonical_origin(&format!("{scheme}://{authority}{path}")))
+}
+
+/// Plain HTTP to another machine: the sign-in token crosses the network unencrypted.
+pub fn unencrypted_over_network(origin: &str) -> bool {
+    let origin = canonical_origin(origin);
+    let Some(rest) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let host = match authority.split_once(']') {
+        Some((inside, _)) if authority.starts_with('[') => format!("{inside}]"),
+        _ => authority.split(':').next().unwrap_or("").to_string(),
+    };
+    !(host == "localhost" || host == "[::1]" || host.starts_with("127."))
+}
+
+/// The T3 in use, as the tray names it: this PC, or the other machine's origin.
+pub fn server_label(origin: Option<&str>) -> String {
+    match origin {
+        None => "this PC".into(),
+        Some(origin) => canonical_origin(origin),
+    }
+}
+
 /// How far the companion trusts commands from the game. Any addon in the game can draw
 /// the strip, so this caps what one could make T3 do.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +156,15 @@ impl Trust {
             Trust::Full => "Full",
             Trust::NoNewThreads => "No new threads",
             Trust::ReadOnly => "Read-only",
+        }
+    }
+
+    /// What it means, for the tray's confirmation.
+    pub fn description(self) -> &'static str {
+        match self {
+            Trust::Full => "Commands from the game can do everything the T3 WoW window offers.",
+            Trust::NoNewThreads => "Commands from the game can do everything but start new threads.",
+            Trust::ReadOnly => "Commands from the game can only read: messages, answers, new threads, Stop and Settle are refused.",
         }
     }
 
@@ -131,6 +220,10 @@ pub struct Config {
     /// The T3 on another machine (`login --origin`); none means the T3 on this PC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The other machine's T3 used last, kept when switching back to this PC so the tray's
+    /// T3 server menu can switch to it again in one click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_remote: Option<String>,
     /// The tray's "Commands from the game"; none means Full.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_trust")]
     pub game_commands: Option<Trust>,
@@ -284,6 +377,25 @@ impl Config {
         Ok(())
     }
 
+    /// Saves a sign-in for the server `key` (none: the one saved for it was checked and still
+    /// works) and, with `switch_to`, makes that T3 the one the companion uses (`Some(None)`:
+    /// the T3 on this PC). The one place the T3 in use changes: `login --origin` and the
+    /// tray's T3 server menu both come here, through `t3::connect`, and only once the sign-in
+    /// succeeded. Nothing changes when the sign-in can't be saved.
+    pub fn apply_sign_in(&mut self, key: &str, sign_in: Option<(&str, Option<f64>)>, switch_to: Option<Option<String>>) -> Result<(), String> {
+        if let Some((token, expires_at)) = sign_in {
+            self.set_sign_in(key, token, expires_at)?;
+        }
+        if let Some(origin) = switch_to {
+            let origin = origin.map(|o| canonical_origin(&o));
+            if origin.is_some() {
+                self.last_remote.clone_from(&origin);
+            }
+            self.origin = origin;
+        }
+        Ok(())
+    }
+
     /// Forgets the current server's sign-in (its client registration stays).
     pub fn sign_out(&mut self) {
         if let Some(server) = self.servers.get_mut(&self.server_key()) {
@@ -405,6 +517,58 @@ mod tests {
         assert_eq!(canonical_origin("HTTP://Box.Lan:3773/"), "http://box.lan:3773");
         assert_eq!(canonical_origin("https://t3.example.com:443"), "https://t3.example.com");
         assert_eq!(canonical_origin("http://10.0.0.2:80/t3/"), "http://10.0.0.2/t3");
+    }
+
+    #[test]
+    fn typed_addresses_become_origins() {
+        assert_eq!(parse_origin_input(" 192.168.1.20:3773 ").as_deref(), Ok("http://192.168.1.20:3773"));
+        assert_eq!(parse_origin_input("Gaming-PC.lan:3773/").as_deref(), Ok("http://gaming-pc.lan:3773"));
+        assert_eq!(parse_origin_input("http://box:3773").as_deref(), Ok("http://box:3773"));
+        assert_eq!(parse_origin_input("HTTPS://t3.example.com").as_deref(), Ok("https://t3.example.com"));
+        assert_eq!(parse_origin_input("http://box").as_deref(), Ok("http://box"), "a full URL may use the default port");
+        assert_eq!(parse_origin_input("https://proxy.lan/t3/").as_deref(), Ok("https://proxy.lan/t3"));
+        assert_eq!(parse_origin_input("[fe80::1]:3773").as_deref(), Ok("http://[fe80::1]:3773"));
+        assert_eq!(parse_origin_input("http://[::1]").as_deref(), Ok("http://[::1]"));
+        for bad in [
+            "", "   ", "box", "192.168.1.20", ":3773", "box:", "box:99999", "box:0", "box:abc", "ftp://box:21", "box :3773", "user@box:3773", "box:3773?x=1",
+            "http://box:3773#a", "bad host!:3773", "bad!host:3773", "[::1", "[zz]:1", "[::1]3773",
+        ] {
+            assert!(parse_origin_input(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(parse_origin_input("box").unwrap_err().contains("box:3773"), "it says what's missing");
+    }
+
+    #[test]
+    fn plain_http_to_another_machine_is_flagged() {
+        assert!(unencrypted_over_network("http://192.168.1.20:3773"));
+        assert!(unencrypted_over_network("HTTP://Box.lan:3773/"));
+        assert!(!unencrypted_over_network("https://box.lan"));
+        assert!(!unencrypted_over_network("http://127.0.0.1:3773"));
+        assert!(!unencrypted_over_network("http://localhost:3773"));
+        assert!(!unencrypted_over_network("http://[::1]:3773"));
+        assert!(unencrypted_over_network("http://[fe80::1]:3773"));
+        assert_eq!(server_label(None), "this PC");
+        assert_eq!(server_label(Some("HTTP://Box:3773/")), "http://box:3773");
+    }
+
+    #[test]
+    fn a_sign_in_switches_the_t3_in_use_only_when_it_is_saved() {
+        let mut config = Config::default();
+        config.apply_sign_in("http://box:3773", Some(("remote", None)), Some(Some("HTTP://Box:3773/".into()))).unwrap();
+        assert_eq!(config.origin.as_deref(), Some("http://box:3773"));
+        assert_eq!(config.last_remote.as_deref(), Some("http://box:3773"));
+        assert_eq!(config.saved_token(&config.server_key()).as_deref(), Some("remote"));
+        // Back to this PC with its saved sign-in: the other machine's stays, and is remembered.
+        config.set_sign_in(LOCAL, "local", None).unwrap();
+        config.apply_sign_in(LOCAL, None, Some(None)).unwrap();
+        assert_eq!(config.origin, None);
+        assert_eq!(config.last_remote.as_deref(), Some("http://box:3773"));
+        assert_eq!(config.saved_token(&config.server_key()).as_deref(), Some("local"));
+        assert_eq!(config.saved_token("http://box:3773").as_deref(), Some("remote"));
+        // A fresh sign-in without a switch stays on the T3 in use.
+        config.apply_sign_in(LOCAL, Some(("local-2", None)), None).unwrap();
+        assert_eq!(config.origin, None);
+        assert_eq!(config.saved_token(LOCAL).as_deref(), Some("local-2"));
     }
 
     #[test]

@@ -111,13 +111,51 @@ fn newer_release(release: &Value, current: &str, signed: bool) -> Result<Option<
     Ok(Some(Release { exe_url: url(EXE)?, sha_url: url(SHA)?, sig_url, version }))
 }
 
+/// How far an update has got, for the tray.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Step {
+    /// The percentage downloaded, when the server says how big the file is.
+    Downloading(Option<u8>),
+    Checking,
+    Installing,
+}
+
 fn download(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    download_with_progress(url, limit, &|_| {})
+}
+
+fn download_with_progress(url: &str, limit: u64, progress: &dyn Fn(Option<u8>)) -> Result<Vec<u8>, String> {
     let mut response = http().get(url).call().map_err(|e| format!("download failed: {e}"))?;
     let status = response.status().as_u16();
     if status != 200 {
         return Err(format!("download failed: {status}"));
     }
-    response.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| format!("download failed: {e}"))
+    let total = response.body().content_length();
+    read_counting(response.body_mut().with_config().limit(limit).reader(), total, progress).map_err(|e| format!("download failed: {e}"))
+}
+
+/// Reads all of `reader`, telling `progress` the percentage of `total` (when known) read so
+/// far, each time it changes; once at the start either way.
+fn read_counting(mut reader: impl io::Read, total: Option<u64>, progress: &dyn Fn(Option<u8>)) -> io::Result<Vec<u8>> {
+    let total = total.filter(|&t| t > 0);
+    let mut data = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut shown = total.map(|_| 0u8);
+    progress(shown);
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(0) => return Ok(data),
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        data.extend_from_slice(&chunk[..read]);
+        let percent = total.map(|t| (data.len() as u64 * 100 / t).min(100) as u8);
+        if percent != shown {
+            shown = percent;
+            progress(percent);
+        }
+    }
 }
 
 /// Checks the signature file (the 64-byte Ed25519 signature in base64) over `data`.
@@ -173,8 +211,9 @@ fn check_exe(exe: &[u8], expected_sha: &str) -> Result<(), String> {
 }
 
 /// Downloads the release, checks it, and swaps it in for the running exe (Windows lets a
-/// running exe be renamed, not overwritten). The caller restarts the companion.
-pub fn install(release: &Release) -> Result<(), String> {
+/// running exe be renamed, not overwritten). The caller restarts the companion. `step`
+/// hears how far it has got.
+pub fn install(release: &Release, step: &dyn Fn(Step)) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     update_exe(
         &exe,
@@ -187,8 +226,10 @@ pub fn install(release: &Release) -> Result<(), String> {
                 _ => None,
             };
             let expected = trusted_checksum(&sha_file, sig_file.as_deref(), key)?;
-            let exe_bytes = download(&release.exe_url, MAX_EXE_BYTES)?;
+            let exe_bytes = download_with_progress(&release.exe_url, MAX_EXE_BYTES, &|percent| step(Step::Downloading(percent)))?;
+            step(Step::Checking);
             check_exe(&exe_bytes, &expected)?;
+            step(Step::Installing);
             Ok(exe_bytes)
         },
         |from, to| fs::rename(from, to),
@@ -525,6 +566,27 @@ mod tests {
         update_exe(&exe, "0.6.0", || Ok(b"exe 0.6.0".to_vec()), rename).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"exe 0.6.0");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_download_reports_its_progress_as_it_grows() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let data = vec![7u8; 200 * 1024];
+        let read = read_counting(io::Cursor::new(data.clone()), Some(data.len() as u64), &|p| seen.borrow_mut().push(p)).unwrap();
+        assert_eq!(read, data);
+        let seen = seen.into_inner();
+        assert_eq!(seen.first(), Some(&Some(0)));
+        assert_eq!(seen.last(), Some(&Some(100)));
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "each report is new and larger: {seen:?}");
+
+        // No size given: one report without a percentage.
+        let seen = std::cell::RefCell::new(Vec::new());
+        read_counting(io::Cursor::new(vec![1u8; 10]), None, &|p| seen.borrow_mut().push(p)).unwrap();
+        assert_eq!(seen.into_inner(), [None]);
+        // A size that turns out too small never reports past 100.
+        let seen = std::cell::RefCell::new(Vec::new());
+        read_counting(io::Cursor::new(vec![1u8; 100]), Some(10), &|p| seen.borrow_mut().push(p)).unwrap();
+        assert_eq!(seen.into_inner(), [Some(0), Some(100)]);
     }
 
     /// Fails while RELEASE_PUBLIC_KEY is the placeholder. Ignored so everyday tests pass
