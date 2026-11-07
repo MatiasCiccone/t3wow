@@ -39,9 +39,18 @@ return table.concat({ t.k, t.ack, t.envs[1].name, tostring(t.envs[2].ok), t.thre
   t.view.items[1].x, #t.view.items, t.events[1].s, t.settledTotal, t["end"], t["with space"], t.ns, t.nt }, "|")`);
   assert.equal(
     back,
-    [inbox.k, inbox.ack, inbox.envs[0].name, "false", inbox.threads[0].t, "true", inbox.view.items[0].x, 2, "completed",
+    [inbox.k, inbox.ack, inbox.envs[0].name, "false", inbox.threads[0].t, "true", inbox.view.items[0].x, 3, "completed",
       inbox.settledTotal, inbox.end, inbox["with space"], inbox.ns, inbox.nt].join("|"),
   );
+});
+
+test("a message's segments (prose, code, a table) load in the game intact", () => {
+  const { g } = JSON.parse(fixture("inbox.json")).view.items[2];
+  const source = fixture("inbox.lua").replace("T3WoW_Inbox =", "local T3WoW_Inbox =");
+  const back = runLua(`${source}
+local g = T3WoW_Inbox.view.items[3].g
+return table.concat({ g[1], g[2].c, g[3].t[1][2], g[3].t[2][1], g[3].a, #g }, "~")`);
+  assert.equal(back, [g[0], g[1].c, g[2].t[0][1], g[2].t[1][0], g[2].a, 3].join("~"));
 });
 
 test("an answer from the window encodes the way the companion reads it", () => {

@@ -46,6 +46,7 @@ local function fontString()
     return self.font
   end
   function fs:SetText(text) self.text = text end
+  function fs:SetFontObject(font) self.fontObject = font end
   function fs:GetText() return self.text or "" end
   function fs:Show() self.hidden = false end
   function fs:Hide() self.hidden = true end

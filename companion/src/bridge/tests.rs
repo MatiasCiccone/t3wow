@@ -1044,6 +1044,19 @@ fn conversation(texts: &[&str]) -> Vec<Value> {
 }
 
 #[test]
+fn a_message_with_code_also_comes_in_segments_and_its_text_stays_as_before() {
+    let mut rig = Rig::new(23_000_000);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["plain", "Run `npm test`:\n```\nok | fail\n```"]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let view = rig.bridge.snapshot()["view"].clone();
+    let items = view["items"].as_array().unwrap();
+    assert_eq!(items[0], json!({ "r": "u", "x": "plain" }), "no segments without code");
+    assert_eq!(items[1]["x"], "Run |cffc8c8a0npm test|r:\n|cffc8c8a0ok || fail|r");
+    assert_eq!(items[1]["g"], json!(["Run \u{1}npm test\u{2}:", { "c": "ok | fail" }]));
+}
+
+#[test]
 fn the_open_thread_reads_only_whats_new_and_still_sees_its_last_message_grow() {
     let mut rig = Rig::new(23_000_000);
     rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["one", "two", "three"]));

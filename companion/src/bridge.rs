@@ -4,7 +4,7 @@
 
 use crate::codec::decode_cells;
 use crate::config::Trust;
-use crate::lua::{plain, to_lua, wow_text};
+use crate::lua::{plain, to_lua, wow_segments, wow_text};
 use crate::slots::{SlotWriter, SIGNAL_COUNT, SLOT_COUNT};
 use crate::t3::{T3Error, T3};
 use serde::{Deserialize, Serialize};
@@ -1590,13 +1590,25 @@ impl Bridge {
             if kind != "user_message" && kind != "assistant_message" {
                 continue;
             }
-            let text = wow_text(str_of(&item["text"]), 6000) + if item["textTruncated"] == true { "\n…" } else { "" };
-            let length = text.encode_utf16().count();
+            let truncated = item["textTruncated"] == true;
+            let text = wow_text(str_of(&item["text"]), 6000) + if truncated { "\n…" } else { "" };
+            let mut length = text.encode_utf16().count();
+            let mut shown = json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text });
+            // A message with code or a table also comes cut into segments, which this addon
+            // draws in its monospace font. Older addons read only the text, as does copying.
+            let mut segments = wow_segments(str_of(&item["text"]), 6000);
+            if !segments.is_empty() {
+                if truncated {
+                    segments.push(json!("…"));
+                }
+                length += segments.iter().map(|s| s.to_string().encode_utf16().count()).sum::<usize>();
+                shown["g"] = json!(segments);
+            }
             if chars + length > VIEW_CHARS && !items.is_empty() {
                 break;
             }
             chars += length;
-            items.insert(0, json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text }));
+            items.insert(0, shown);
         }
         let more = messages.len() > items.len() || earlier;
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;

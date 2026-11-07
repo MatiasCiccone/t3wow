@@ -42,6 +42,8 @@ pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("Media/Inter-Regular.ttf", include_bytes!("../../addon/T3WoW/Media/Inter-Regular.ttf")),
     ("Media/Inter-SemiBold.ttf", include_bytes!("../../addon/T3WoW/Media/Inter-SemiBold.ttf")),
     ("Media/Inter-OFL.txt", include_bytes!("../../addon/T3WoW/Media/Inter-OFL.txt")),
+    ("Media/JetBrainsMono-Regular.ttf", include_bytes!("../../addon/T3WoW/Media/JetBrainsMono-Regular.ttf")),
+    ("Media/JetBrainsMono-OFL.txt", include_bytes!("../../addon/T3WoW/Media/JetBrainsMono-OFL.txt")),
     ("LICENSE", include_bytes!("../../addon/T3WoW/LICENSE")),
 ];
 

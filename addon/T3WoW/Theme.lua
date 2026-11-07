@@ -11,6 +11,8 @@ local format, floor = string.format, math.floor
 local MEDIA = "Interface\\AddOns\\T3WoW\\Media\\"
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local ARIAL_NARROW, FRIZ = "Fonts\\ARIALN.TTF", "Fonts\\FRIZQT__.TTF"
+-- The game has no monospace font: code and tables are drawn in JetBrains Mono, bundled.
+local MONO = MEDIA .. "JetBrainsMono-Regular.ttf"
 
 local function hex(code, alpha)
     return { tonumber(code:sub(1, 2), 16) / 255, tonumber(code:sub(3, 4), 16) / 255, tonumber(code:sub(5, 6), 16) / 255, alpha or 1 }
@@ -28,8 +30,10 @@ Skin.THEMES = {
         shapes = {
             panel = { art = ROUND, c = 8 }, control = { art = ROUND, c = 8 }, pill = { art = ROUND, c = "half" },
         },
-        fonts = { regular = MEDIA .. "Inter-Regular.ttf", strong = MEDIA .. "Inter-SemiBold.ttf", heading = MEDIA .. "Inter-SemiBold.ttf" },
-        sizes = { text = 13, strong = 13, small = 11, title = 15, label = 11, button = 12, pill = 10 },
+        fonts = {
+            regular = MEDIA .. "Inter-Regular.ttf", strong = MEDIA .. "Inter-SemiBold.ttf", heading = MEDIA .. "Inter-SemiBold.ttf", mono = MONO,
+        },
+        sizes = { text = 13, strong = 13, small = 11, title = 15, label = 11, button = 12, pill = 10, code = 12 },
         shadow = false,
         check = "toggle", pillAlpha = 0.14,
         rowHeight = 44, compactHeight = 24,
@@ -40,13 +44,14 @@ Skin.THEMES = {
             accent = hex("fafafa"), primary = hex("fafafa"), primaryRing = hex("fafafa"), primaryText = hex("09090b"),
             selected = hex("1c1c1f"), selectedRing = hex("3f3f46"), input = hex("151517"), focus = hex("52525b"),
             off = hex("3f3f46"), knob = hex("a1a1aa"), knobOn = hex("09090b"), scroll = hex("2e2e33"), warn = hex("fb923c"),
+            code = hex("e4e4e7"), codeBg = hex("18181b"),
         },
     },
     flat = {
         name = "Flat",
         shapes = { panel = { art = SQUARE, c = "px" }, control = { art = SQUARE, c = "px" }, pill = { art = SQUARE, c = "px" } },
-        fonts = { regular = ARIAL_NARROW, strong = ARIAL_NARROW, heading = ARIAL_NARROW },
-        sizes = { text = 14, strong = 14, small = 11, title = 15, label = 11, button = 13, pill = 11 },
+        fonts = { regular = ARIAL_NARROW, strong = ARIAL_NARROW, heading = ARIAL_NARROW, mono = MONO },
+        sizes = { text = 14, strong = 14, small = 11, title = 15, label = 11, button = 13, pill = 11, code = 12 },
         shadow = true,
         check = "fill", pillAlpha = 0.16,
         rowHeight = 42, compactHeight = 22,
@@ -57,13 +62,14 @@ Skin.THEMES = {
             accent = hex("8f8fff"), primary = hex("23233a"), primaryRing = hex("8f8fff"), primaryText = hex("ffffff"),
             selected = hex("8f8fff", 0.16), selectedRing = hex("8f8fff"), input = hex("0c0c0c"), focus = hex("8f8fff"),
             off = hex("0c0c0c"), knob = hex("3a3a3a"), knobOn = hex("8f8fff"), scroll = hex("3a3a3a"), warn = hex("ff8000"),
+            code = hex("dcdcdc"), codeBg = hex("0c0c0c"),
         },
     },
     classic = {
         name = "Classic",
         shapes = { panel = { art = CLASSIC, c = 8 }, control = { art = CLASSIC, c = 8 }, pill = { art = CLASSIC, c = "half" } },
-        fonts = { regular = ARIAL_NARROW, strong = ARIAL_NARROW, heading = FRIZ },
-        sizes = { text = 14, strong = 13, small = 11, title = 14, label = 12, button = 12, pill = 11 },
+        fonts = { regular = ARIAL_NARROW, strong = ARIAL_NARROW, heading = FRIZ, mono = MONO },
+        sizes = { text = 14, strong = 13, small = 11, title = 14, label = 12, button = 12, pill = 11, code = 12 },
         shadow = true,
         check = "tick", pillAlpha = 0,
         rowHeight = 42, compactHeight = 22,
@@ -74,6 +80,7 @@ Skin.THEMES = {
             accent = hex("ffd100"), primary = hex("2a2a2f"), primaryRing = hex("ffd100"), primaryText = hex("ffd100"),
             selected = hex("ffd100", 0.18), selectedRing = hex("ffd100"), input = { 0, 0, 0, 0.8 }, focus = hex("ffd100"),
             off = hex("0b0b0b"), knob = hex("7a7a7a"), knobOn = hex("ffd100"), scroll = hex("5a5a5a"), warn = hex("ff8000"),
+            code = hex("e6e2c8"), codeBg = { 0, 0, 0, 0.55 },
         },
     },
 }
@@ -103,9 +110,11 @@ local function resolve(key)
     local E = key == "flat" and elvui()
     local locale = GetLocale and GetLocale()
     if locale == "zhCN" or locale == "zhTW" or locale == "koKR" then
+        -- The bundled fonts have no CJK glyphs, so the client's own font draws everything, code
+        -- too: a table's columns may then not line up, but every character shows.
         local native = (ChatFontNormal and ChatFontNormal.GetFont and ChatFontNormal:GetFont()) or STANDARD_TEXT_FONT
         if native then
-            local t = setmetatable({ fonts = { regular = native, strong = native, heading = native } }, { __index = base })
+            local t = setmetatable({ fonts = { regular = native, strong = native, heading = native, mono = native } }, { __index = base })
             if not E then return t end
             base = t
         end
@@ -155,7 +164,7 @@ local FONT_ROLES = {
     muted = { "regular", "small", "muted" }, title = { "heading", "title", "heading" }, label = { "heading", "label", "label" },
     button = { "heading", "button", "text" }, buttonPrimary = { "heading", "button", "primaryText" },
     buttonGhost = { "heading", "button", "muted" }, buttonDisabled = { "heading", "button", "dim" },
-    pill = { "strong", "pill", "text" },
+    pill = { "strong", "pill", "text" }, mono = { "mono", "code", "code" },
 }
 Skin.fonts = {}
 for role in pairs(FONT_ROLES) do Skin.fonts[role] = CreateFont("T3WoWFont_" .. role) end
