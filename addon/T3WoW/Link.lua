@@ -87,6 +87,10 @@ local function signalPath(n) return format("%ssig\\%04d.ttf", ROOT, n) end
 -- are hidden and emptied, and checks slow down when nothing is happening.
 -- A real font can take a moment to load, so the last FONT_RECENT checks keep being read.
 local FONT_RECENT = 12
+-- Font strings are never freed, so a UI session makes at most this many checks; past it,
+-- slots load on the timer until the next Reload UI.
+local FONT_BUDGET = 20000
+local FONT_BUDGET_OUT = "this UI session made its 20000 font checks; Reload UI to watch signals again"
 local fontHolder = CreateFrame("Frame", nil, UIParent)
 fontHolder:SetSize(2, 2)
 fontHolder:SetPoint("BOTTOMRIGHT")
@@ -252,6 +256,9 @@ local function receive(inbox)
     state.inboxAt = GetTime()
     -- An answer from the companion: loads on the timer can go back to their quick pace.
     if inbox.u == nil or inbox.u == state.uiSession then state.unanswered = 0 end
+    -- Nothing seen yet (a fresh install): only the last minute's events are news, not
+    -- everything the companion still lists.
+    if db.lastEvent == nil then db.lastEvent = ((inbox.now or time()) - 60) * 1000 end
     for _, event in ipairs(inbox.events or {}) do
         if event.n > (db.lastEvent or 0) then
             db.lastEvent = event.n
@@ -320,7 +327,8 @@ function Link.SlotsLow() return state.nextSlot - 1 >= SLOT_WARN end
 -- loading) the test font can take a while, so a slow check is retried, never taken as
 -- "fonts don't work"; only a blank font loading rules signals out. Until then slots
 -- load on the timer.
-local CAPABILITY_TIMEOUT, CAPABILITY_RETRY = 4, 3
+-- A test font that never loads in this many tries means fonts can't signal here.
+local CAPABILITY_TIMEOUT, CAPABILITY_RETRY, CAPABILITY_TRIES = 4, 3, 12
 local function updateCapability(now)
     if state.signals ~= "checking" then return end
     local c = state.capability
@@ -343,6 +351,11 @@ local function updateCapability(now)
         state.signals = "on"
         state.signalCheck = nil
         trace(format("font check passed (attempt %d, %.1fs)", state.capabilityAttempts, now - c.at))
+    elseif now - c.at > CAPABILITY_TIMEOUT and state.capabilityAttempts >= CAPABILITY_TRIES then
+        state.signals = "off"
+        state.signalCheck = format("the test font never loaded in %d tries (Reinstall addon from the T3 WoW tray menu, then restart WoW)",
+            state.capabilityAttempts)
+        trace("font check: the test font never loaded, signals off")
     elseif now - c.at > CAPABILITY_TIMEOUT then
         trace(format("font check attempt %d: test font not loaded after %ds, retrying",
             state.capabilityAttempts, CAPABILITY_TIMEOUT))
@@ -400,7 +413,13 @@ poller:SetScript("OnUpdate", function(_, delta)
         end
         local quiet = #db.queue == 0 and now - math.max(state.inboxAt or 0, state.lastSentAt or 0) > QUIET_AFTER
         local every = quiet and RECHECK_QUIET_SECONDS or RECHECK_SECONDS
+        if state.fontStrings >= FONT_BUDGET then
+            state.signals, state.signalCheck = "off", FONT_BUDGET_OUT
+            trace("signals off: font check budget used")
+            return
+        end
         if watched <= SIGNAL_COUNT and (not state.lastCheckAt or now - state.lastCheckAt >= every) then
+
             startFontCheck(signalPath(watched), watched)
             state.lastCheckAt = now
             state.checksOfWatched = (state.checksOfWatched or 0) + 1

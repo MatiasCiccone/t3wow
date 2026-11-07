@@ -237,7 +237,7 @@ local function watchFlips(candidates)
             for _, method in ipairs(candidates) do
                 if not seen[method] then say(method.name .. " never noticed the change.") end
             end
-            say("done. Paste these lines to Claude.")
+            say("done. To report a problem, include these lines in a bug report.")
         end
     end
 end
@@ -264,7 +264,7 @@ local function runProbe()
             left = left - 1
             if left > 0 then return end
             if #candidates == 0 then
-                say("no method tells a blank file from a real one (if a flip file was already real, restart WoW to reset it). Paste these lines to Claude.")
+                say("no method tells a blank file from a real one (if a flip file was already real, restart WoW to reset it). To report a problem, include these lines in a bug report.")
             else
                 watchFlips(candidates)
             end
