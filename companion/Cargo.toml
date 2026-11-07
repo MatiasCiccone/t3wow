@@ -1,6 +1,6 @@
 [package]
 name = "t3wow"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "T3 WoW companion: brings T3 Code into World of Warcraft: Forever"
 license = "MIT"
