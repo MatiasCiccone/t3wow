@@ -60,6 +60,17 @@ export function releaseKey(pem, updaterSource = readFileSync(UPDATER, "utf8")) {
   return key;
 }
 
+/**
+ * The key to sign a release with, or null while release signing isn't set up at all (no
+ * T3WOW_SIGNING_KEY and the placeholder RELEASE_PUBLIC_KEY): companions built that way
+ * install a release with a valid SHA-256 alone. Half set up (only one of the two) throws,
+ * since that release would be refused, or would strand its companions.
+ */
+export function signingKey(pem, updaterSource = readFileSync(UPDATER, "utf8")) {
+  if ((!pem || !pem.trim()) && embeddedPublicKey(updaterSource) === null) return null;
+  return releaseKey(pem, updaterSource);
+}
+
 /** The signature file's contents for `data` (the checksum file's exact bytes). */
 export function signatureFile(key, data) {
   const signature = sign(null, data, key);

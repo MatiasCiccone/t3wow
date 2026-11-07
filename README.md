@@ -29,7 +29,7 @@ Keep the addon and the companion at the same version. A newer addon with an olde
 
 Sign-ins are kept per T3: switching between the T3 on this PC and one on another machine doesn't sign you out of either. They are saved in `%APPDATA%\t3wow\config.json`, encrypted for your Windows user, so copying that folder to another PC or Windows user means signing in again. A sign-in only ever goes to the T3 that issued it.
 
-**Updates.** The companion looks for a newer GitHub release when it starts and every 6 hours. When there is one, a notification pops up from the tray and the menu offers **Update to x.y.z**, which downloads the new `t3wow.exe` and installs it only if the release's SHA-256 file carries a valid signature made with the project's release key (the companion has the public half built in) and the download matches that SHA-256. A release that is unsigned, signed with another key or altered is refused. It then swaps the exe in and restarts. The addon is part of the exe, so it updates along with it (restart WoW afterwards). An addon installed from CurseForge updates there; the companion never replaces a newer addon with an older one. Releases are published to the public [t3wow-releases](https://github.com/MatiasCiccone/t3wow-releases) repository while this one stays private.
+**Updates.** The companion looks for a newer GitHub release when it starts and every 6 hours. When there is one, a notification pops up from the tray and the menu offers **Update to x.y.z**, which downloads the new `t3wow.exe` and installs it only if the download matches the release's SHA-256 file. Release signing is being set up: once a companion has the project's release key built in, it also requires that SHA-256 file to carry a valid signature made with that key, and refuses a release that is unsigned, signed with another key or altered. Companions released before that check the SHA-256 only. It then swaps the exe in and restarts. The addon is part of the exe, so it updates along with it (restart WoW afterwards). An addon installed from CurseForge updates there; the companion never replaces a newer addon with an older one. Releases are published to the public [t3wow-releases](https://github.com/MatiasCiccone/t3wow-releases) repository while this one stays private.
 
 `t3wow.exe` also works from a terminal:
 
@@ -37,7 +37,7 @@ Sign-ins are kept per T3: switching between the T3 on this PC and one on another
 - `install` reinstalls the addon from scratch (`--wow "<path to _forever_>"` if WoW lives somewhere unusual, `--interface <number>` to set the interface version).
 - `login` signs in again. `--origin <url>` points the companion at a T3 on another machine, and `--origin local` goes back to the T3 on this PC once it's running. The new T3 is saved only once its sign-in succeeds: a failed or cancelled sign-in leaves the companion on the T3 it had. A running companion picks up the new T3 and sign-in within 30 seconds.
 - `status` checks the addon install and the T3 connection. `status --origin <url>` (or `local`) checks that T3 with its own saved sign-in, without switching to it. Other commands don't take `--origin`.
-- `update` downloads and installs the newest release, with the same signature and SHA-256 checks as the tray. It doesn't restart a companion running in the tray: quit it from its menu and start it again. Only one update runs at a time; a second one stops with "another update is already running".
+- `update` downloads and installs the newest release, with the same checks as the tray. It doesn't restart a companion running in the tray: quit it from its menu and start it again. Only one update runs at a time; a second one stops with "another update is already running".
 - `uninstall` removes the addon.
 
 ## In the game
@@ -136,24 +136,24 @@ Without one it builds unsigned, and Windows SmartScreen warns on first run. This
 
 **Repository rules:** pull requests merge by rebase only (linear history), branches are deleted after merging, and Dependabot opens security fixes and weekly updates. `.github/rulesets/main.json` protects `main`: no force pushes or deletion, linear history, changes only through pull requests that pass CI (`test`) and get the code owner's review (`.github/CODEOWNERS`); repository admins can bypass. GitHub enforces rulesets on public repositories, or on private ones with GitHub Pro; apply it with `gh api repos/MatiasCiccone/t3wow/rulesets --input .github/rulesets/main.json`.
 
-**Releasing:** set the same version in `companion/Cargo.toml`, `addon/T3WoW/T3WoW.toc` and `package.json`, then push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The Release workflow checks that all three match the tag and that the release key is set up, runs the tests, builds on Windows, signs the SHA-256 file, and publishes `t3wow.exe`, `t3wow.exe.sha256`, `t3wow.exe.sha256.sig` (what the updater downloads and checks) and `T3WoW-v0.4.0.zip` (the addon alone, for CurseForge) to the public `MatiasCiccone/t3wow-releases`. The notes list the `feat` and `fix` commit subjects since the previous tag, without their prefixes; other commits stay out. It needs two secrets:
+**Releasing:** set the same version in `companion/Cargo.toml`, `addon/T3WoW/T3WoW.toc` and `package.json`, then push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The Release workflow checks that all three match the tag and checks the release key, runs the tests, builds on Windows, signs the SHA-256 file once signing is set up, and publishes `t3wow.exe`, `t3wow.exe.sha256`, `t3wow.exe.sha256.sig` when signed (what the updater downloads and checks) and `T3WoW-v0.4.0.zip` (the addon alone, for CurseForge) to the public `MatiasCiccone/t3wow-releases`. The notes list the `feat` and `fix` commit subjects since the previous tag, without their prefixes; other commits stay out. It needs two secrets:
 
 - `RELEASES_TOKEN`: a fine-grained token with Contents read and write on `t3wow-releases` only.
-- `T3WOW_SIGNING_KEY`: the release key's private half.
+- `T3WOW_SIGNING_KEY`: the release key's private half (until it's set up, see below, releases go out unsigned).
 
 The same zip is uploaded to the [CurseForge project](https://www.curseforge.com/wow/addons) (ID 1788778) with the `CURSEFORGE_TOKEN` secret, filed under the WoW Forever version whose API version is the `.toc`'s `## Interface`; without that secret, this step is skipped.
 
-**The release key**, set up once, on your own PC, before the first signed release. Until both halves are in place, every update is refused and the Release workflow stops at its **Release key** step.
+**The release key**, set up once, on your own PC. Until both halves are in place, releases go out unsigned (the workflow says so in a warning) and companions check only the SHA-256. With only one half in place, the Release workflow stops at its **Release key** step, since that release would be refused or would leave its companions unable to update.
 
 1. Make the key pair, with the private half outside the repository (the folder must exist; the script refuses a path inside the repository or an existing file):
    `node scripts/gen-signing-key.mjs C:\Users\<you>\keys\t3wow-release-key.pem`
    It prints a line `const RELEASE_PUBLIC_KEY: [u8; 32] = [ … ];`.
-2. In `companion/src/updater.rs`, replace `const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];` with that line and delete the `// REPLACE before release` comment above it. Keep the line in that form: `scripts/sign-release.mjs` reads the key from it. Then `cargo test -- --ignored the_release_public_key_is_set` (in `companion/`) and `npm test` must pass.
+2. In `companion/src/updater.rs`, replace `const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];` with that line and update the placeholder comment above it. Keep the line in that form: `scripts/sign-release.mjs` reads the key from it. Then `cargo test -- --ignored the_release_public_key_is_set` (in `companion/`) and `npm test` must pass.
 3. Add the private half as the secret: `gh secret set T3WOW_SIGNING_KEY --repo MatiasCiccone/t3wow < C:\Users\<you>\keys\t3wow-release-key.pem`
 4. Back the `.pem` up somewhere safe and offline. If it's lost, no new release can update existing companions; everyone would have to download a new `t3wow.exe` by hand.
 5. Optionally, check it locally: `$env:T3WOW_SIGNING_KEY = Get-Content -Raw <path>; node scripts/sign-release.mjs --check`, then `Remove-Item Env:T3WOW_SIGNING_KEY`.
 
-Companions up to 0.4.1 check only the SHA-256 and ignore the signature, so they still update to signed releases. Every companion after that requires the signature.
+Companions built with the placeholder key (0.4.1, and releases until the key is in) check only the SHA-256 and ignore the signature, so they still update to signed releases. Every companion built with the real key requires the signature.
 
 ## License
 

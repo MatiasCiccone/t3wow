@@ -1,11 +1,13 @@
 # Publishes a release when a version tag is pushed (git tag v0.4.0 && git push origin v0.4.0).
 # The source repository is private, so the release goes to the public
 # MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
-# t3wow.exe, its SHA-256, the SHA-256's signature, and the addon on its own (zipped, for
+# t3wow.exe, its SHA-256, the SHA-256's signature (once signing is set up), and the addon on its own (zipped, for
 # CurseForge or a manual install). Publishing there needs the RELEASES_TOKEN secret: a
 # fine-grained token with Contents read and write on t3wow-releases only. Signing needs the
 # T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
-# scripts/gen-signing-key.mjs), whose public half is in companion/src/updater.rs. The addon zip is also uploaded to the
+# scripts/gen-signing-key.mjs), whose public half is in companion/src/updater.rs. Until both
+# are set up, releases go out unsigned with a warning (companions with the placeholder key
+# accept that); with only one of the two, the release fails. The addon zip is also uploaded to the
 # CurseForge project with the CURSEFORGE_TOKEN secret (a CurseForge API token).
 # Actions are pinned to commit SHAs (Dependabot keeps them current).
 name: Release
@@ -44,7 +46,8 @@ jobs:
           $npm = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($tag -ne $cargo -or $tag -ne $addon -or $tag -ne $npm) { throw "Tag ${tag}, companion ${cargo}, addon ${addon}, package.json ${npm}: bump them together." }
 
-      # Companions refuse a release without a valid signature, so check the key first.
+      # Companions with the real key refuse a release without a valid signature, so check the
+      # key first (a warning, not a failure, while signing isn't set up at all).
       - name: Release key
         env:
           T3WOW_SIGNING_KEY: ${{ secrets.T3WOW_SIGNING_KEY }}

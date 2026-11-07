@@ -1,10 +1,10 @@
 //! Updates from the project's GitHub releases. Each release carries t3wow.exe, its
-//! SHA-256 (t3wow.exe.sha256) and an Ed25519 signature of that checksum file
-//! (t3wow.exe.sha256.sig), made in CI with the release key (see
+//! SHA-256 (t3wow.exe.sha256) and, once release signing is set up, an Ed25519 signature of
+//! that checksum file (t3wow.exe.sha256.sig), made in CI with the release key (see
 //! .github/workflows/release.yml and scripts/sign-release.mjs). An update installs only
-//! when the signature verifies with the key below and the exe matches the checksum. The
-//! addon is embedded in the exe, so updating the companion also updates the addon on its
-//! next start.
+//! when the exe matches the checksum and, with a real key below, the signature verifies.
+//! The addon is embedded in the exe, so updating the companion also updates the addon on
+//! its next start.
 
 use crate::slots::compare_versions;
 use base64::engine::general_purpose::STANDARD;
@@ -26,16 +26,24 @@ const SHA: &str = "t3wow.exe.sha256";
 const SIG: &str = "t3wow.exe.sha256.sig";
 
 /// The public half of the release key: `node scripts/gen-signing-key.mjs` prints it.
-// REPLACE before release: this all-zero placeholder verifies nothing, so every update is
-// refused until the real key is here (the release workflow refuses to sign until then).
+// Placeholder until release signing is set up: while it's all zeros, updates need only a
+// valid SHA-256 (see `release_key`); once the real key is here, every release must be signed.
 const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];
+
+/// The release key's public half, or None while it's the placeholder: signing isn't set up
+/// yet, so a release with a valid SHA-256 installs without a signature, as in 0.4.1. Once
+/// the real key is built in, a release must carry a valid signature made with it.
+fn release_key() -> Option<&'static [u8; 32]> {
+    (RELEASE_PUBLIC_KEY != [0; 32]).then_some(&RELEASE_PUBLIC_KEY)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: String,
     pub exe_url: String,
     pub sha_url: String,
-    pub sig_url: String,
+    /// Required once release signing is set up.
+    pub sig_url: Option<String>,
 }
 
 /// Debug builds can test updates against another repository (`T3WOW_UPDATE_REPO`); release
@@ -78,12 +86,12 @@ pub fn check() -> Result<Option<Release>, String> {
         code => return Err(format!("GitHub answered {code}")),
     }
     let release: Value = response.body_mut().read_json().map_err(|e| e.to_string())?;
-    newer_release(&release, current_version())
+    newer_release(&release, current_version(), release_key().is_some())
 }
 
-/// The release if it is newer than `current`. A newer release without its checksum or
-/// signature is an error, not a quiet "up to date": it can't be installed.
-fn newer_release(release: &Value, current: &str) -> Result<Option<Release>, String> {
+/// The release if it is newer than `current`. A newer release without its checksum (or,
+/// when `signed`, its signature) is an error, not a quiet "up to date": it can't be installed.
+fn newer_release(release: &Value, current: &str, signed: bool) -> Result<Option<Release>, String> {
     let Some(version) = release["tag_name"].as_str().map(|tag| tag.trim_start_matches('v').to_string()) else {
         return Ok(None);
     };
@@ -99,7 +107,8 @@ fn newer_release(release: &Value, current: &str) -> Result<Option<Release>, Stri
             .map(str::to_string)
             .ok_or_else(|| format!("release {version} has no {name}, so it can't be installed"))
     };
-    Ok(Some(Release { exe_url: url(EXE)?, sha_url: url(SHA)?, sig_url: url(SIG)?, version }))
+    let sig_url = if signed { Some(url(SIG)?) } else { url(SIG).ok() };
+    Ok(Some(Release { exe_url: url(EXE)?, sha_url: url(SHA)?, sig_url, version }))
 }
 
 fn download(url: &str, limit: u64) -> Result<Vec<u8>, String> {
@@ -143,7 +152,16 @@ fn signed_checksum(sha_file: &[u8], sig_file: &[u8], public_key: &[u8; 32]) -> R
     parse_checksum(sha_file)
 }
 
-/// Checks a downloaded exe: a Windows program with the signed SHA-256.
+/// The SHA-256 a release vouches for: from its signed checksum file when the companion has
+/// a release key, else from the checksum file alone.
+fn trusted_checksum(sha_file: &[u8], sig_file: Option<&[u8]>, key: Option<&[u8; 32]>) -> Result<String, String> {
+    match key {
+        Some(key) => signed_checksum(sha_file, sig_file.ok_or("the release isn't signed, so it can't be installed")?, key),
+        None => parse_checksum(sha_file),
+    }
+}
+
+/// Checks a downloaded exe: a Windows program with the release's SHA-256.
 fn check_exe(exe: &[u8], expected_sha: &str) -> Result<(), String> {
     if exe.len() < 64 * 1024 || !exe.starts_with(b"MZ") {
         return Err("the download is not a Windows program".into());
@@ -162,9 +180,13 @@ pub fn install(release: &Release) -> Result<(), String> {
         &exe,
         &release.version,
         || {
+            let key = release_key();
             let sha_file = download(&release.sha_url, MAX_SMALL_FILE_BYTES)?;
-            let sig_file = download(&release.sig_url, MAX_SMALL_FILE_BYTES)?;
-            let expected = signed_checksum(&sha_file, &sig_file, &RELEASE_PUBLIC_KEY)?;
+            let sig_file = match (key, &release.sig_url) {
+                (Some(_), Some(url)) => Some(download(url, MAX_SMALL_FILE_BYTES)?),
+                _ => None,
+            };
+            let expected = trusted_checksum(&sha_file, sig_file.as_deref(), key)?;
             let exe_bytes = download(&release.exe_url, MAX_EXE_BYTES)?;
             check_exe(&exe_bytes, &expected)?;
             Ok(exe_bytes)
@@ -302,25 +324,52 @@ mod tests {
     #[test]
     fn only_a_newer_signed_release_counts() {
         assert_eq!(
-            newer_release(&release("v0.4.0"), "0.3.0"),
+            newer_release(&release("v0.4.0"), "0.3.0", true),
             Ok(Some(Release {
                 version: "0.4.0".into(),
                 exe_url: "https://x/exe".into(),
                 sha_url: "https://x/sha".into(),
-                sig_url: "https://x/sig".into(),
+                sig_url: Some("https://x/sig".into()),
             }))
         );
-        assert_eq!(newer_release(&release("v0.3.0"), "0.3.0"), Ok(None));
-        assert_eq!(newer_release(&release("v0.2.9"), "0.3.0"), Ok(None));
+        assert_eq!(newer_release(&release("v0.3.0"), "0.3.0", true), Ok(None));
+        assert_eq!(newer_release(&release("v0.2.9"), "0.3.0", true), Ok(None));
         let mut pre = release("v1.0.0");
         pre["prerelease"] = json!(true);
-        assert_eq!(newer_release(&pre, "0.3.0"), Ok(None));
+        assert_eq!(newer_release(&pre, "0.3.0", true), Ok(None));
         // A newer release missing any of its files can't be installed, and says so.
         for missing in [EXE, SHA, SIG] {
             let mut partial = release("v1.0.0");
             partial["assets"].as_array_mut().unwrap().retain(|a| a["name"] != missing);
-            assert_eq!(newer_release(&partial, "0.3.0"), Err(format!("release 1.0.0 has no {missing}, so it can't be installed")));
+            assert_eq!(newer_release(&partial, "0.3.0", true), Err(format!("release 1.0.0 has no {missing}, so it can't be installed")));
         }
+    }
+
+    #[test]
+    fn before_signing_is_set_up_a_release_needs_its_checksum_but_no_signature() {
+        let mut unsigned = release("v1.0.0");
+        unsigned["assets"].as_array_mut().unwrap().retain(|a| a["name"] != SIG);
+        let found = newer_release(&unsigned, "0.3.0", false).unwrap().unwrap();
+        assert_eq!(found.sig_url, None);
+        assert_eq!(newer_release(&release("v1.0.0"), "0.3.0", false).unwrap().unwrap().sig_url, Some("https://x/sig".into()));
+        for missing in [EXE, SHA] {
+            let mut partial = release("v1.0.0");
+            partial["assets"].as_array_mut().unwrap().retain(|a| a["name"] != missing);
+            assert!(newer_release(&partial, "0.3.0", false).is_err(), "{missing}");
+        }
+
+        let exe = exe();
+        let sha = format!("{}  t3wow.exe", hex(&Sha256::digest(&exe))).into_bytes();
+        // No key: the checksum file alone, which still has to be well formed and match.
+        let expected = trusted_checksum(&sha, None, None).unwrap();
+        assert!(check_exe(&exe, &expected).is_ok());
+        assert!(trusted_checksum(b"not a checksum", None, None).is_err());
+        // With a key: a signature is required, and must verify.
+        let (pair, public) = key_pair();
+        assert!(trusted_checksum(&sha, None, Some(&public)).is_err());
+        assert_eq!(trusted_checksum(&sha, Some(&sig_file(&pair, &sha)), Some(&public)), Ok(expected));
+        let (stranger, _) = key_pair();
+        assert!(trusted_checksum(&sha, Some(&sig_file(&stranger, &sha)), Some(&public)).is_err());
     }
 
     fn exe() -> Vec<u8> {
@@ -479,8 +528,8 @@ mod tests {
     }
 
     /// Fails while RELEASE_PUBLIC_KEY is the placeholder. Ignored so everyday tests pass
-    /// before the real key is in; run it with `cargo test -- --ignored` before a release
-    /// (the release workflow's signing step checks the same thing).
+    /// before the real key is in; run it with `cargo test -- --ignored` once you've embedded
+    /// the key.
     #[test]
     #[ignore = "fails until the real release public key replaces the placeholder"]
     fn the_release_public_key_is_set() {

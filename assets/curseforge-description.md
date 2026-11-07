@@ -59,7 +59,7 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 3. Restart WoW completely the first time (not /reload). In the AddOns list, keep T3 WoW and the grey T3 WoW slot entries enabled.
 4. Leave the companion running while you play. Its tray menu shows the T3 and WoW status, and has sign in and out, Choose WoW folder, Reinstall addon, Match WoW's interface version, Commands from the game, Open log, Start with Windows and the update check.
 
-The companion checks for a new version when it starts and every 6 hours, and updates itself from the tray menu. It installs an update only when the release is signed with the project's release key and the download matches its checksum. The companion includes the addon, so the addon updates with it. If you install the addon from CurseForge, it updates here, and the companion never replaces a newer addon with an older one.
+The companion checks for a new version when it starts and every 6 hours, and updates itself from the tray menu. It installs an update only when the download matches the release's checksum (and, once release signing is set up, when the release is signed with the project's release key). The companion includes the addon, so the addon updates with it. If you install the addon from CurseForge, it updates here, and the companion never replaces a newer addon with an older one.
 
 ## Trust and streaming
 
