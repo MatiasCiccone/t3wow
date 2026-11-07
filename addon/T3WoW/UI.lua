@@ -169,9 +169,10 @@ local function renderList()
     for _, h in ipairs(headers) do h:Hide() end
     local groups = { working = {}, open = {}, snoozed = {}, settled = {} }
     -- Threads an agent launched sit under the thread that launched them when both are in
-    -- the same group, as in T3's sidebar, and don't count in it. Away from their launcher
-    -- (settled while it's open, or it isn't listed) they show on their own only while
-    -- they're working or need you; otherwise T3's sidebar has no row for them either.
+    -- the same group, as in T3's sidebar, and don't count in it. In another group than
+    -- their launcher (settled while it's open, say) they stand on their own in theirs.
+    -- With their launcher not listed at all, settled ones still show under Settled, and
+    -- others only while they're working or need you; T3's sidebar has no row for them.
     local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open" end
     local threads = inbox and inbox.threads or {}
     local byId, launched = {}, {}
@@ -182,7 +183,7 @@ local function renderList()
             local key = t.e .. ":" .. t.par
             launched[key] = launched[key] or {}
             table.insert(launched[key], t)
-        elseif not t.par or WORKING[t.s] or (t.s == "waiting" and not t.set) then
+        elseif not t.par or parent or t.set or WORKING[t.s] or t.s == "waiting" or t.s == "approval" then
             table.insert(groups[groupOf(t)], t)
         end
     end
