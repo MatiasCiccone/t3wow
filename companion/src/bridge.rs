@@ -1813,6 +1813,11 @@ impl Bridge {
         if let Some(code) = self.trust.code() {
             out.insert("trust".into(), json!(code));
         }
+        // The addon version on disk, so the game can say when it needs a restart of WoW to
+        // load newer files (left out when unknown).
+        if let Some(version) = self.slots.addon_version() {
+            out.insert("av".into(), json!(plain(&version, 20)));
+        }
         Value::Object(out)
     }
 
@@ -1837,6 +1842,7 @@ impl Bridge {
             "out": data["out"],
             "auth": data["auth"],
             "trust": data["trust"],
+            "av": data["av"],
             "open": self.window_open,
             // A question appearing (or going away) in the open thread is urgent too.
             "view": if data["view"].is_null() {

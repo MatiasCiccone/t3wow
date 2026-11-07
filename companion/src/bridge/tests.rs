@@ -168,6 +168,8 @@ struct Written {
     cleared: u32,
     /// While set, every write fails with this error.
     failing: Option<String>,
+    /// The addon version "on disk".
+    addon_version: Option<String>,
 }
 
 struct FakeSlots(Arc<Mutex<Written>>);
@@ -197,6 +199,9 @@ impl SlotWriter for FakeSlots {
     }
     fn flip_probe(&mut self, _real: bool) -> Vec<String> {
         Vec::new()
+    }
+    fn addon_version(&self) -> Option<String> {
+        self.0.lock().unwrap().addon_version.clone()
     }
 }
 
@@ -1227,6 +1232,27 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
     assert!(rig.bridge.snapshot()["trust"].is_null());
+}
+
+#[test]
+fn the_game_learns_which_addon_version_is_on_disk() {
+    // Unknown (no toc to read): left out, as an older companion does.
+    let mut rig = Rig::new(30_000_000);
+    assert!(rig.bridge.snapshot().get("av").is_none());
+
+    // Known: in every update, so the game can tell it loaded older files.
+    rig.written.lock().unwrap().addon_version = Some("0.6.0".into());
+    assert_eq!(rig.bridge.snapshot()["av"], "0.6.0");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("av=\"0.6.0\""), "{}", rig.slot(1));
+
+    // A change on disk (a reinstall, a CurseForge update) is urgent: it goes out even with
+    // the window closed and nothing else new.
+    rig.written.lock().unwrap().addon_version = Some("0.7.0".into());
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert!(rig.slot(2).contains("av=\"0.7.0\""), "{}", rig.slot(2));
 }
 
 /// `n` settled threads, newest first.
