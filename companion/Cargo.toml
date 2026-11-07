@@ -16,6 +16,8 @@ path = "src/main.rs"
 base64 = "0.23"
 getrandom = "0.4"
 regex = "1"
+# Ed25519 to check release signatures (already built for ureq's TLS).
+ring = { version = "0.17", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"

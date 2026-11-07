@@ -1548,6 +1548,7 @@ dependencies = [
  "getrandom 0.4.3",
  "regex",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
