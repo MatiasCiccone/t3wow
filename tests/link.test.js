@@ -111,3 +111,41 @@ assert(Link.Stalled(), "not stalled")
 return "ok"
 `);
 });
+
+test("a fresh install doesn't replay the companion's older events as alerts", () => {
+  runGame(`
+Link.Init()
+inboxes.T3WoW_S001 = { k = "c1", ack = 1, now = time(), events = {
+  { n = (time() - 3600) * 1000, e = "", id = "t1", t = "An hour ago", s = "completed" },
+  { n = (time() - 5) * 1000, e = "", id = "t2", t = "Just now", s = "completed" },
+} }
+tick(1)
+assert(#alerts == 1 and alerts[1].t == "Just now", "alerts: " .. #alerts)
+return "ok"
+`, { db: `{ client = "c1", seq = 0, queue = {} }` });
+});
+
+test("a test font that never loads turns signals off after a dozen tries", () => {
+  runGame(`
+Link.Init()
+tick(120)
+assert(Link.Status().signals == "off", Link.Status().signals)
+assert(Link.Status().signalCheck:find("never loaded"), Link.Status().signalCheck)
+return "ok"
+`);
+});
+
+test("past the font check budget, signals give way to the timer", () => {
+  runGame(`
+real[PROBE_VALID] = true
+Link.Init()
+inboxes.T3WoW_S001 = { k = "c1", u = Link.state.uiSession, ack = 1, ns = 100, nt = time() }
+tick(6)
+assert(Link.Status().signals == "on", Link.Status().signals)
+Link.state.fontStrings = 19999
+tick(5)
+assert(Link.Status().signals == "off", Link.Status().signals)
+assert(Link.Status().signalCheck:find("font checks"), Link.Status().signalCheck)
+return "ok"
+`);
+});

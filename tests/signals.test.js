@@ -20,7 +20,7 @@ assert(watched == 100 + math.floor((time() - (EPOCH + 6)) / 25), "watching " .. 
 
 -- The companion publishes: the file it computed and its neighbours become real.
 for n = watched - 1, watched + 1 do real[string.format("Interface\\\\AddOns\\\\T3WoW\\\\sig\\\\%04d.ttf", n)] = true end
-inboxes.T3WoW_S002 = { k = "c1", ack = 1, ns = watched + 2, nt = time(), events = { { n = 7, e = "", id = "t1", t = "Done", s = "completed" } } }
+inboxes.T3WoW_S002 = { k = "c1", ack = 1, ns = watched + 2, nt = time(), events = { { n = time() * 1000, e = "", id = "t1", t = "Done", s = "completed" } } }
 local before = clock
 for _ = 1, 40 do
   tick(0.25)
