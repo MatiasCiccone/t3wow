@@ -207,8 +207,37 @@ mod win {
         }
     }
 
+    /// Per-monitor (v2) DPI awareness, so the window's position and the screen copy are both
+    /// in physical pixels on every monitor, whatever its scaling; system awareness alone can
+    /// offset the capture on a scaled second monitor. Call it on the capture thread: when the
+    /// process's awareness is already set (the tray's windows, a manifest), the thread can
+    /// still be per-monitor aware on its own. Windows before 10 1703 lacks both functions
+    /// (looked up at run time, so the exe still starts there) and gets the old system-wide
+    /// call. Not unit-testable: it changes process state and only matters on mixed-DPI
+    /// monitors.
     pub fn set_dpi_aware() {
-        unsafe { SetProcessDPIAware() };
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        const PER_MONITOR_AWARE_V2: isize = -4; // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        let user32: Vec<u16> = "user32.dll".encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let module = GetModuleHandleW(user32.as_ptr());
+            if !module.is_null() {
+                if let Some(function) = GetProcAddress(module, c"SetProcessDpiAwarenessContext".as_ptr().cast()) {
+                    let set_process: unsafe extern "system" fn(isize) -> BOOL = std::mem::transmute(function);
+                    if set_process(PER_MONITOR_AWARE_V2) != 0 {
+                        return;
+                    }
+                }
+                if let Some(function) = GetProcAddress(module, c"SetThreadDpiAwarenessContext".as_ptr().cast()) {
+                    // Returns the previous context, null on failure.
+                    let set_thread: unsafe extern "system" fn(isize) -> isize = std::mem::transmute(function);
+                    if set_thread(PER_MONITOR_AWARE_V2) != 0 {
+                        return;
+                    }
+                }
+            }
+            SetProcessDPIAware();
+        }
     }
 }
 
@@ -219,10 +248,10 @@ pub use win::{find_wow, wow_processes};
 /// starting or stopping, and each new strip.
 #[cfg(windows)]
 pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
-    win::set_dpi_aware();
     std::thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
+            win::set_dpi_aware();
             let magic = magic_cells();
             let mut last_key: Option<Option<String>> = None;
             let mut last_cells: Vec<u8> = Vec::new();
