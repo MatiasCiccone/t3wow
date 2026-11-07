@@ -751,7 +751,9 @@ do
         local more = total() > room
         if more then
             while n > 1 and total() + 4 > room do n = n - 1 end
-            if total() + 4 > room then cap = math.max(1, room - 4) end
+            if total() + 4 > room then
+                if room >= 5 then cap = room - 4 else n = 0 end -- no room for a column: "…" alone
+            end
         end
         local lines = {}
         for i, row in ipairs(cells) do
