@@ -11,19 +11,19 @@ name = "t3wow"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.22"
-getrandom = "0.2"
+base64 = "0.23"
+getrandom = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
-ureq = { version = "2", features = ["json"] }
+sha2 = "0.11"
+ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(windows)'.dependencies]
-rfd = "0.15"
-tray-icon = "0.19"
-winreg = "0.52"
-windows-sys = { version = "0.59", features = [
+rfd = "0.17"
+tray-icon = "0.26"
+winreg = "0.56"
+windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Security",
