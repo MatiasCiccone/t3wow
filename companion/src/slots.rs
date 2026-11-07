@@ -460,6 +460,25 @@ mod tests {
     }
 
     #[test]
+    fn an_install_with_an_impossible_interface_version_goes_back_to_the_shipped_one() {
+        // The fallback for an impossible saved version is the shipped addon's own number.
+        let expected = format!("## Interface: {}", crate::config::DEFAULT_INTERFACE);
+        assert!(String::from_utf8_lossy(ADDON_FILES[0].1).lines().any(|line| line.trim_end() == expected));
+
+        // What 0.5.0's Match WoW's interface version… wrote on 2026-11-07.
+        let dir = temp_dir("bad-interface");
+        fixture_slots(&dir, "1607186").install().unwrap();
+        let mut config = crate::config::Config::default();
+        config.interface = Some("1607186".into());
+        let interface = config.interface();
+        assert_eq!(fixture_slots(&dir, &interface).set_interface().unwrap(), 1 + SLOT_COUNT);
+        assert!(fs::read_to_string(dir.join("T3WoW/T3WoW.toc")).unwrap().contains("## Interface: 16001\r\n"));
+        let slot_toc = fs::read_to_string(dir.join(slot_name(SLOT_COUNT)).join(format!("{}.toc", slot_name(SLOT_COUNT)))).unwrap();
+        assert!(slot_toc.starts_with("## Interface: 16001\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn clearing_the_slots_blanks_every_update_and_nothing_else() {
         let dir = temp_dir("clear-slots");
         let mut slots = fixture_slots(&dir, "16001");
