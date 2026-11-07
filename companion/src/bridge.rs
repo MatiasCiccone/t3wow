@@ -34,8 +34,14 @@ fn working(status: &str) -> bool {
 
 /// T3's sidebar files subagent threads, and threads an agent launched, under the thread
 /// they came from. Linked machines don't always apply includeSubagents, so check here too.
+/// Subagents never show; threads an agent launched show under the thread that launched
+/// them, as in T3's sidebar, and don't count in their group.
+fn is_subagent(thread: &Value) -> bool {
+    thread["parentThreadId"].is_string()
+}
+
 fn on_sidebar(thread: &Value) -> bool {
-    !thread["parentThreadId"].is_string() && thread["createdBy"] != "agent"
+    !is_subagent(thread) && thread["createdBy"] != "agent"
 }
 
 fn hash_of(value: &Value) -> u64 {
@@ -162,6 +168,8 @@ pub struct Bridge {
     /// `updatedAt` and the time they were read at: T3's list says "running" while an agent
     /// waits on a question, and only a thread read has the count.
     pending_counts: HashMap<String, (String, i64, u64)>,
+    /// The thread that launched each agent-launched thread (None: unknown), read once.
+    launchers: HashMap<String, Option<String>>,
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
     commands: VecDeque<(String, Value)>,
@@ -226,7 +234,7 @@ fn fetch_threads(client: &dyn T3, env_arg: &Map<String, Value>) -> ThreadLists {
     let mut threads: Vec<Value> = items(&open).into_iter().filter(|t| t["snoozed"] != true).collect();
     threads.extend(items(&snoozed).into_iter().filter(|t| t["snoozed"] == true));
     threads.extend(items(&settled));
-    threads.retain(on_sidebar);
+    threads.retain(|t| !is_subagent(t));
     let settled_listed = items(&settled).iter().filter(|t| on_sidebar(t)).count() as u64;
     Ok((threads, settled["total"].as_u64().unwrap_or(0).max(settled_listed)))
 }
@@ -266,6 +274,7 @@ impl Bridge {
             last_status: HashMap::new(),
             pending_counts: HashMap::new(),
             listed_envs: HashSet::new(),
+            launchers: HashMap::new(),
             commands: VecDeque::new(),
             last_publish_at: 0,
             last_published_hash: None,
@@ -520,6 +529,7 @@ impl Bridge {
             match result {
                 Ok((mut threads, settled_total)) => {
                     self.mark_questions(&env, &mut threads)?;
+                    self.find_launchers(&env, &mut threads)?;
                     for thread in &threads {
                         self.track_status(&env, thread);
                     }
@@ -603,6 +613,30 @@ impl Bridge {
         }
         let prefix = format!("{env}:");
         self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || seen.contains(k));
+        Ok(())
+    }
+
+    /// Notes which thread launched each agent-launched thread: the sender of its first message.
+    fn find_launchers(&mut self, env: &str, threads: &mut [Value]) -> Result<(), T3Error> {
+        let env_arg = self.env_arg(env);
+        for thread in threads.iter_mut().filter(|t| t["createdBy"] == "agent") {
+            let id = str_of(&thread["threadId"]).to_string();
+            let key = format!("{env}:{id}");
+            if !self.launchers.contains_key(&key) {
+                let args = with_args(json!({ "threadId": id, "view": "messages", "limit": 1, "maxCharsPerItem": 1 }), &env_arg);
+                match self.client.call("t3_thread_read", args) {
+                    Ok(read) => {
+                        let sender = read["items"][0]["senderThreadId"].as_str().filter(|s| *s != id).map(str::to_string);
+                        self.launchers.insert(key.clone(), sender);
+                    }
+                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                    Err(T3Error::Other(message)) => self.log(&format!("launcher ({key}): {message}")),
+                }
+            }
+            if let Some(Some(launcher)) = self.launchers.get(&key) {
+                thread["launcher"] = json!(launcher);
+            }
+        }
         Ok(())
     }
 
@@ -796,6 +830,9 @@ impl Bridge {
                 });
                 if t["snoozed"] == true {
                     entry["sn"] = json!(true);
+                }
+                if let Some(launcher) = t["launcher"].as_str() {
+                    entry["par"] = json!(launcher);
                 }
                 entry["at"] = json!(iso_seconds(str_of(&t["updatedAt"])));
                 let project = project_title.get(&format!("{env}:{}", str_of(&t["projectId"]))).map(String::as_str).unwrap_or("");

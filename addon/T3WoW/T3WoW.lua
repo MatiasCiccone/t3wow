@@ -298,7 +298,9 @@ local function welcome()
         print(tag .. " Type |cffffd100/t3|r or click the minimap button to open it. Right-click the button (or |cffffd100/t3 settings|r) for notifications and other settings.")
         print(tag .. " It needs the T3 WoW companion (t3wow.exe) running in the system tray on this PC. |cffffd100/t3 status|r shows the connection.")
     elseif seen ~= version then
-        print(tag .. " updated to " .. version .. ".")
+        print(tag .. " updated to " .. version .. ". Type |cffffd100/t3|r to open it.")
+    else
+        print(tag .. " loaded. Type |cffffd100/t3|r to open it.")
     end
 end
 

@@ -168,9 +168,20 @@ local function renderList()
     for _, r in ipairs(rows) do r:Hide() end
     for _, h in ipairs(headers) do h:Hide() end
     local groups = { working = {}, open = {}, snoozed = {}, settled = {} }
-    for _, t in ipairs(inbox and inbox.threads or {}) do
-        local key = (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open"
-        table.insert(groups[key], t)
+    -- Threads an agent launched sit under the thread that launched them, as in T3's
+    -- sidebar, and don't count in the group; with their launcher not listed, they stand alone.
+    local threads = inbox and inbox.threads or {}
+    local listed, launched = {}, {}
+    for _, t in ipairs(threads) do listed[t.e .. ":" .. t.id] = true end
+    for _, t in ipairs(threads) do
+        local parent = t.par and (t.e .. ":" .. t.par)
+        if parent and listed[parent] then
+            launched[parent] = launched[parent] or {}
+            table.insert(launched[parent], t)
+        else
+            local key = (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open"
+            table.insert(groups[key], t)
+        end
     end
     local y, rowIndex, headerIndex = 0, 0, 0
     for _, group in ipairs({ { "open", "Open" }, { "working", "Working" }, { "snoozed", "Snoozed" }, { "settled", "Settled" } }) do
@@ -189,7 +200,11 @@ local function renderList()
         h:Show()
         y = y + 24
         if not collapsed[key] then
-            for _, t in ipairs(groups[key]) do
+            local placed = {}
+            local function place(t, indent)
+                local id = t.e .. ":" .. t.id
+                if placed[id] then return end
+                placed[id] = true
                 rowIndex = rowIndex + 1
                 local r = row(rowIndex)
                 r.thread = t
@@ -199,11 +214,14 @@ local function renderList()
                 r.status:SetText(statusText(t.s))
                 r.age:SetText(age(t.at))
                 local isSelected = selected and not selected.new and selected.id == t.id
-                r.highlight:SetColorTexture(1, 0.82, 0, isSelected and 0.25 or 0.04)
-                r:SetPoint("TOPLEFT", 0, -y)
+                r.highlight:SetColorTexture(1, 0.82, 0, isSelected and 0.25 or (indent > 0 and 0.02 or 0.04))
+                r:SetPoint("TOPLEFT", indent, -y)
+                r:SetWidth(LIST_WIDTH - 40 - indent)
                 r:Show()
                 y = y + 38
+                for _, child in ipairs(launched[id] or {}) do place(child, math.min(indent + 14, 42)) end
             end
+            for _, t in ipairs(groups[key]) do place(t, 0) end
         end
     end
     listChild:SetHeight(math.max(y, 1))
@@ -1056,7 +1074,25 @@ function UI.Refresh()
     renderStatus()
 end
 
+-- The first update of a UI session says in chat that the companion reached the game.
+local announced = false
+local function announce(data)
+    if announced then return end
+    announced = true
+    local tag = "|cff8f8fffT3 WoW|r"
+    if data.auth then
+        print(tag .. " companion connected. |cffff4040" .. tostring(data.auth) .. "|r")
+        return
+    end
+    local waiting = 0
+    for _, t in ipairs(data.threads or {}) do
+        if t.s == "waiting" and not t.set then waiting = waiting + 1 end
+    end
+    print(tag .. " connected to T3." .. (waiting > 0 and format(" |cffff8000%d %s you.|r", waiting, waiting == 1 and "thread needs" or "threads need") or ""))
+end
+
 function UI.OnInbox(data)
+    announce(data)
     inbox = data
     notice = nil
     UI.Refresh()

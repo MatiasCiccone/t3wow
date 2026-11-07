@@ -27,9 +27,11 @@ Every start checks the addon files: anything an addon manager or a cleanup remov
 
 ## In the game
 
+Each login and reload says in chat that T3 WoW loaded, then that it connected to T3 once the companion's first update arrives (and how many threads need you).
+
 `/t3`, the **T3 WoW** minimap button, or a key bound under **Options → Keybindings → AddOns → T3 WoW** opens the window. The button registers through LibDBIcon when another addon has loaded it, so collectors like MinimapButtonButton gather it with your other buttons. Right-click it (or `/t3 settings`, or **Settings** in the window) for the settings.
 
-- Pick a thread on the left; **Open**, **Working**, **Snoozed** and **Settled** match T3's sidebar. The machine name is under each title.
+- Pick a thread on the left; **Open**, **Working**, **Snoozed** and **Settled** match T3's sidebar. The machine name is under each title. Threads an agent started sit indented under the thread that started them, as in T3. A thread whose agent is asking you something shows **Needs you**.
 - Type in the box and press **Enter** (Shift+Enter for a new line). Sending to a busy thread steers it or queues, as in T3.
 - **New Thread** asks for the machine and project, then starts a thread with your message as its task.
 - **Stop** interrupts a running thread. **Settle** / **Unsettle** moves it between Open and Settled.
