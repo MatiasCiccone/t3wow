@@ -697,7 +697,7 @@ local function renderStatus()
     local link = ns.Link.Status()
     local connected
     if ns.Link.Exhausted() then
-        connected = "|cffff8000Out of update slots: Reload UI|r"
+        connected = "|cffff8000All 200 updates of this session used: Reload UI|r"
     elseif link.loadError then
         connected = "|cffff4040Slot addons blocked (" .. tostring(link.loadError) .. "): enable T3 WoW slots in AddOns|r"
     elseif ns.Link.Stalled() then
@@ -706,11 +706,14 @@ local function renderStatus()
         connected = "|cffa0a0a0Waiting for the companion…|r"
     elseif inbox.auth then
         connected = "|cffff4040" .. inbox.auth .. "|r"
+    elseif ns.Link.SlotsLow() then
+        connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
     else
         connected = "|cff40c040Connected|r"
     end
     connection:SetText(connected)
-    reload:SetShown(ns.Link.Exhausted() or link.loadError ~= nil)
+    reload:SetShown(ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil)
+
     local line = notice
     if not line and inbox and inbox.notes and #inbox.notes > 0 then
         local last = inbox.notes[#inbox.notes]

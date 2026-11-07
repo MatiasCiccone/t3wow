@@ -25,6 +25,9 @@ pub const SIGNAL_PERIOD: i64 = 25;
 const VIEW_MESSAGES: usize = 24;
 const VIEW_CHARS: usize = 40_000;
 
+/// Why the game was told to stop watching signals.
+const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart WoW for updates within a second";
+
 /// How long a working thread's pending-question count is trusted without a re-read.
 const PENDING_RECHECK_MS: i64 = 20_000;
 
@@ -142,7 +145,16 @@ pub struct BridgeStatus {
     pub in_game: bool,
     pub signals: bool,
     pub machines: usize,
+    /// The next slot the game loads (1..=200; past 200 it has used them all).
+    pub slot: u32,
+    /// This game process used up its signal files: updates come on a timer until WoW restarts.
+    pub signals_out: bool,
+    /// Writing the game's update files keeps failing.
+    pub write_problem: Option<String>,
 }
+
+/// After this many failed publishes in a row, the tray shows the error.
+const WRITE_FAILURES_SHOWN: u32 = 3;
 
 pub struct Bridge {
     client: Arc<dyn T3>,
@@ -188,6 +200,13 @@ pub struct Bridge {
     polled_ok: bool,
     /// The question shown in the game for the open thread, with the ids T3 needs back.
     pending_ask: Option<PendingAsk>,
+    /// Why signals stopped (this game process used every signal file), until WoW restarts.
+    signals_out: Option<String>,
+    /// The UI session whose running out of slots was logged.
+    slots_out_logged: Option<String>,
+    /// The last failure writing update files, and how many publishes in a row failed.
+    write_error: Option<String>,
+    write_failures: u32,
 }
 
 /// A working thread's pending requests, as last read.
@@ -303,6 +322,10 @@ impl Bridge {
             poll_error: None,
             polled_ok: false,
             pending_ask: None,
+            signals_out: None,
+            slots_out_logged: None,
+            write_error: None,
+            write_failures: 0,
         }
     }
 
@@ -368,8 +391,11 @@ impl Bridge {
             auth_needed: self.auth_error.is_some(),
             wow_running: self.link.wow_key.as_deref().is_some_and(|k| !k.is_empty()),
             in_game: self.link.ui_session.is_some(),
-            signals: self.link.polling == Some(false),
+            signals: self.link.polling == Some(false) && self.signals_out.is_none(),
             machines: self.envs.iter().filter(|e| e.ok).count(),
+            slot: self.link.slot,
+            signals_out: self.signals_out.is_some(),
+            write_problem: self.write_error.clone().filter(|_| self.write_failures >= WRITE_FAILURES_SHOWN),
         }
     }
 
@@ -384,6 +410,7 @@ impl Bridge {
                     // A new client process hasn't loaded any signal font: all start blank again.
                     self.slots.clear_signals();
                     self.slots.flip_probe(false);
+                    self.signals_out = None;
                     self.link.signal = 1;
                     self.link.signal_time = self.now_seconds();
                     self.link.wow_key = Some(key);
@@ -983,10 +1010,14 @@ impl Bridge {
         if Some(urgent_hash) == self.last_urgent_hash && t - self.last_publish_at < ROUTINE_GAP_MS {
             return;
         }
-        let polling = self.link.polling == Some(true);
         if self.link.slot > SLOT_COUNT {
+            if self.slots_out_logged != self.link.ui_session {
+                self.slots_out_logged = self.link.ui_session.clone();
+                self.log("The game used all 200 update slots of this UI session: Reload UI in the game for more");
+            }
             return;
         }
+        let mut polling = self.link.polling == Some(true) || self.signals_out.is_some();
         let now_s = t.div_euclid(1000);
         // ns/nt: where and when the game's next wait starts. Polling doesn't move it.
         let mut wait = (self.link.signal, self.link.signal_time);
@@ -996,33 +1027,69 @@ impl Bridge {
             // file it should be watching now and both neighbours.
             let watched = self.watched_signal(now_s);
             if watched + 1 > SIGNAL_COUNT {
-                return;
+                // Past the last file: the game notices that too and loads slots on a timer.
+                self.signals_out = Some(SIGNALS_OUT.into());
+                self.log("This WoW session used all its signal files: updates come on a timer until WoW restarts");
+                polling = true;
+            } else {
+                raise.extend(self.link.signal.max(watched.saturating_sub(1))..=watched + 1);
+                wait = (watched + 2, now_s);
+                if wait.0 + 1 > SIGNAL_COUNT {
+                    // The next wait has no files left: this update (the last one a signal
+                    // brings) tells the game to load slots on a timer from now on.
+                    self.signals_out = Some(SIGNALS_OUT.into());
+                    self.log("This WoW session used all its signal files: updates come on a timer until WoW restarts");
+                }
             }
-            raise.extend(self.link.signal.max(watched.saturating_sub(1))..=watched + 1);
-            wait = (watched + 2, now_s);
         }
         let mut inbox = data;
         inbox["now"] = json!(now_s);
+        if let Some(reason) = &self.signals_out {
+            inbox["sigoff"] = json!(reason);
+        }
         // Write a few slots ahead so a missed count on either side still finds fresh data,
-        // and only then raise the signals that send the game to read them.
+        // and only then raise the signals that send the game to read them. Nothing counts
+        // as published unless every write worked.
+        let mut written = Ok(());
         for slot in self.link.slot..(self.link.slot + 3).min(SLOT_COUNT + 1) {
             inbox["slot"] = json!(slot);
             inbox["ns"] = json!(wait.0);
             inbox["nt"] = json!(wait.1);
-            self.slots.write_slot(slot, &format!("T3WoW_Inbox = {}\n", to_lua(&inbox)));
+            written = written.and_then(|_| self.slots.write_slot(slot, &format!("T3WoW_Inbox = {}\n", to_lua(&inbox))));
         }
-        if !polling {
-            for n in raise {
-                self.slots.raise_signal(n);
+        for n in raise {
+            written = written.and_then(|_| self.slots.raise_signal(n));
+        }
+        self.last_publish_at = t;
+        if let Err(error) = written {
+            let message = format!("Couldn't write the game's update files: {error}");
+            if self.write_error.as_ref() != Some(&message) {
+                self.log(&message);
             }
+            self.write_error = Some(message);
+            self.write_failures += 1;
+            return;
+        }
+        if self.write_error.take().is_some() {
+            self.log("Writing the game's update files works again");
+        }
+        self.write_failures = 0;
+        if !polling {
             self.link.slot += 1;
             self.link.signal = wait.0;
             self.link.signal_time = wait.1;
         }
-        self.last_publish_at = t;
         self.last_published_hash = Some(hash);
         self.last_urgent_hash = Some(urgent_hash);
         self.save_state();
+    }
+
+    /// Sends the current state again, as if the game had never had it (after Reinstall
+    /// blanked the slot and signal files).
+    pub fn republish(&mut self) {
+        self.last_published_hash = None;
+        self.last_urgent_hash = None;
+        self.last_publish_at = 0;
     }
 
     /// Runs the game's queued commands. Each counts as done (acked) once it ran, and only

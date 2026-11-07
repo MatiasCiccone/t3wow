@@ -24,6 +24,9 @@ function GetPhysicalScreenSize() return 1920, 1080 end
 function date(_, t) return tostring(t or time()) end
 function print(text) printed[#printed + 1] = text end
 STANDARD_TEXT_FONT = "Fonts\\\\STANDARD.TTF"
+ROOT = "Interface\\\\AddOns\\\\T3WoW\\\\"
+PROBE_VALID = ROOT .. "ctl\\\\probe\\\\valid.ttf"
+function sigPath(n) return string.format("%ssig\\\\%04d.ttf", ROOT, n) end
 
 -- Like the game (as traces showed): a font string whose font load failed never loads a
 -- font afterwards, whatever it is asked for.

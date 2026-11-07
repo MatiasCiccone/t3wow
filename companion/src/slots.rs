@@ -285,29 +285,37 @@ impl Slots {
 
 /// What the bridge does with the files; a trait so tests can watch it.
 pub trait SlotWriter: Send {
-    fn write_slot(&mut self, n: u32, lua: &str);
-    fn raise_signal(&mut self, n: u32);
+    fn write_slot(&mut self, n: u32, lua: &str) -> io::Result<()>;
+    fn raise_signal(&mut self, n: u32) -> io::Result<()>;
     fn clear_signals(&mut self);
     /// Makes the probe's flip files real (or blank again); returns the types changed.
     fn flip_probe(&mut self, real: bool) -> Vec<String>;
 }
 
+/// Writes through a temporary file, so the game never reads a half-written one.
+fn write_whole(file: &Path, data: &[u8]) -> io::Result<()> {
+    let mut tmp = file.as_os_str().to_owned();
+    tmp.push(".tmp");
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, file).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
+}
+
 impl SlotWriter for Slots {
-    fn write_slot(&mut self, n: u32, lua: &str) {
+    fn write_slot(&mut self, n: u32, lua: &str) -> io::Result<()> {
         if !(1..=SLOT_COUNT).contains(&n) {
-            return;
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("no slot {n}")));
         }
-        let file = self.addons_dir.join(slot_name(n)).join("Inbox.lua");
-        let tmp = file.with_extension("lua.tmp");
-        if fs::write(&tmp, lua).is_ok() {
-            let _ = fs::rename(&tmp, &file);
-        }
+        write_whole(&self.addons_dir.join(slot_name(n)).join("Inbox.lua"), lua.as_bytes())
     }
 
-    fn raise_signal(&mut self, n: u32) {
-        if let (true, Some(font)) = ((1..=SIGNAL_COUNT).contains(&n), &self.font) {
-            let _ = fs::write(self.addon_dir.join("sig").join(signal_file(n)), font);
+    fn raise_signal(&mut self, n: u32) -> io::Result<()> {
+        if !(1..=SIGNAL_COUNT).contains(&n) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("no signal file {n}")));
         }
+        let font = self.font.as_ref().ok_or_else(|| io::Error::other("no font to raise a signal with"))?;
+        write_whole(&self.addon_dir.join("sig").join(signal_file(n)), font)
     }
 
     fn clear_signals(&mut self) {
