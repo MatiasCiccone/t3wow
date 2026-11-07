@@ -984,6 +984,33 @@ statusLine:SetPoint("RIGHT", stop, "LEFT", -12, 0)
 statusLine:SetJustifyH("LEFT")
 statusLine:SetWordWrap(false)
 
+-- The companion names the addon version on disk (inbox.av; older companions leave it out).
+-- WoW reads addon files only when it starts, so a newer one there waits for a full
+-- restart of WoW: /reload isn't enough. The version this addon was loaded as is read now.
+local addonName = ...
+local getMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+local LOADED_VERSION = getMetadata and getMetadata(addonName, "Version")
+local restartSaid = false -- said in chat this UI session
+
+local function versionNumbers(v)
+    if type(v) ~= "string" or not v:find("^%d+[%d%.]*$") then return nil end
+    local numbers = {}
+    for n in v:gmatch("%d+") do numbers[#numbers + 1] = tonumber(n) end
+    return numbers
+end
+
+-- What to say when the addon on disk is newer than this one (nil otherwise).
+local function restartNote()
+    local disk, loaded = versionNumbers(inbox and inbox.av), versionNumbers(LOADED_VERSION)
+    if not disk or not loaded then return nil end
+    for i = 1, math.max(#disk, #loaded) do
+        local a, b = disk[i] or 0, loaded[i] or 0
+        if a ~= b then
+            return a > b and format("T3 WoW %s is installed: restart WoW to load it (/reload isn't enough)", inbox.av) or nil
+        end
+    end
+end
+
 local function renderStatus()
     local link = ns.Link.Status()
     local connected
@@ -997,6 +1024,8 @@ local function renderStatus()
         connected = "|cffa0a0a0Waiting for the companion…|r"
     elseif inbox.auth then
         connected = "|cffff4040" .. inbox.auth .. "|r"
+    elseif restartNote() then
+        connected = "|cffff8000" .. restartNote() .. "|r"
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
     elseif inbox.trust and TRUST_NAME[inbox.trust] then
@@ -1524,6 +1553,10 @@ end
 function UI.OnInbox(data)
     announce(data)
     inbox = data
+    if not restartSaid and restartNote() then
+        restartSaid = true
+        print("|cff8f8fffT3 WoW|r |cffff8000" .. restartNote() .. ".|r")
+    end
     notice = takeOutcomes(data)
     -- The run ended (or the thread dropped off the list's working states): Stop is done.
     local t = stopping and listedThread(stopping.env, stopping.id)
