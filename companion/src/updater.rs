@@ -2,7 +2,7 @@
 //! SHA-256 (t3wow.exe.sha256) and, once release signing is set up, an Ed25519 signature of
 //! that checksum file (t3wow.exe.sha256.sig), made in CI with the release key (see
 //! .github/workflows/release.yml and scripts/sign-release.mjs). An update installs only
-//! when the exe matches the checksum and, with a real key below, the signature verifies.
+//! when the exe matches the checksum and, once the real key is built in, the signature verifies.
 //! The addon is embedded in the exe, so updating the companion also updates the addon on
 //! its next start.
 
@@ -25,10 +25,9 @@ const EXE: &str = "t3wow.exe";
 const SHA: &str = "t3wow.exe.sha256";
 const SIG: &str = "t3wow.exe.sha256.sig";
 
-/// The public half of the release key: `node scripts/gen-signing-key.mjs` prints it.
-// Placeholder until release signing is set up: while it's all zeros, updates need only a
-// valid SHA-256 (see `release_key`); once the real key is here, every release must be signed.
-const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];
+// The public half of the release key, in its own file (all zeros until signing is set up).
+mod release_key;
+use release_key::RELEASE_PUBLIC_KEY;
 
 /// The release key's public half, or None while it's the placeholder: signing isn't set up
 /// yet, so a release with a valid SHA-256 installs without a signature, as in 0.4.1. Once

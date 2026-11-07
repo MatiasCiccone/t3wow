@@ -5,10 +5,12 @@
 # CurseForge or a manual install). Publishing there needs the RELEASES_TOKEN secret: a
 # fine-grained token with Contents read and write on t3wow-releases only. Signing needs the
 # T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
-# scripts/gen-signing-key.mjs), whose public half is in companion/src/updater.rs. Until both
+# scripts/gen-signing-key.mjs), whose public half is in companion/src/updater/release_key.rs. Until both
 # are set up, releases go out unsigned with a warning (companions with the placeholder key
 # accept that); with only one of the two, the release fails. The addon zip is also uploaded to the
 # CurseForge project with the CURSEFORGE_TOKEN secret (a CurseForge API token).
+# t3wow.exe gets an Authenticode signature (SSL.com eSigner) once the ESIGNER_* secrets are set;
+# without them it goes out unsigned with a warning. See docs/release-signing.md.
 # Actions are pinned to commit SHAs (Dependabot keeps them current).
 name: Release
 
@@ -28,6 +30,10 @@ env:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      # Authenticode signing (SSL.com eSigner) runs only once its secrets are set; see
+      # docs/release-signing.md. 'true' or 'false': secrets can't appear in a step's if.
+      AUTHENTICODE: ${{ secrets.ESIGNER_TOTP_SECRET != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,20 +55,83 @@ jobs:
       # Companions with the real key refuse a release without a valid signature, so check the
       # key first (a warning, not a failure, while signing isn't set up at all).
       - name: Release key
+        id: key
         env:
           T3WOW_SIGNING_KEY: ${{ secrets.T3WOW_SIGNING_KEY }}
         run: node scripts/sign-release.mjs --check
+
+      # Once a release has gone out signed, an unsigned one means both the key and the secret
+      # went missing (say, release_key.rs back to the placeholder and the secret deleted).
+      # Companions that require the signature would refuse it, so stop instead.
+      - name: Signed releases stay signed
+        if: steps.key.outputs.signed != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          $latest = gh release list --repo $env:RELEASES_REPO --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName'
+          if ($LASTEXITCODE -ne 0) { throw "Couldn't list the releases on $env:RELEASES_REPO." }
+          if (-not $latest) { "No earlier release on $env:RELEASES_REPO."; exit 0 }
+          $assets = gh release view $latest --repo $env:RELEASES_REPO --json assets --jq '.assets[].name'
+          if ($LASTEXITCODE -ne 0) { throw "Couldn't read release $latest on $env:RELEASES_REPO." }
+          if ($assets -contains "t3wow.exe.sha256.sig") {
+            "::error::$latest went out signed, so this release must be too: put back the release key (companion/src/updater/release_key.rs) and the T3WOW_SIGNING_KEY secret. See docs/release-signing.md."
+            exit 1
+          }
+          "$latest went out unsigned too: this one can."
 
       - run: npm ci
       - run: npm test
 
       - run: cargo build --release --manifest-path companion/Cargo.toml
 
-      - name: Package
+      - name: Stage t3wow.exe
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
           Copy-Item companion/target/release/t3wow.exe release/
+
+      # Authenticode signs t3wow.exe in place, which changes its bytes, so it comes before the
+      # SHA-256 (and the release key's signature of it). Without the ESIGNER_* secrets the exe
+      # goes out without it, and Windows SmartScreen shows "unrecognized app" as before.
+      - name: Authenticode not set up
+        if: env.AUTHENTICODE != 'true'
+        run: echo "::warning::No ESIGNER_TOTP_SECRET secret, so t3wow.exe goes out without an Authenticode signature. See docs/release-signing.md."
+
+      - name: Authenticode (SSL.com eSigner)
+        if: env.AUTHENTICODE == 'true'
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.ESIGNER_USERNAME }}
+          password: ${{ secrets.ESIGNER_PASSWORD }}
+          credential_id: ${{ secrets.ESIGNER_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ESIGNER_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}\release\t3wow.exe
+          override: true
+          malware_block: false
+          environment_name: PROD
+
+      - name: Check the Authenticode signature
+        if: env.AUTHENTICODE == 'true'
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Where-Object { $_.Directory.Parent.Name -match '^\d+(\.\d+){3}$' } |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe isn't in the Windows SDK on this runner." }
+          & $signtool.FullName verify /pa /v release/t3wow.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for t3wow.exe." }
+          $sig = Get-AuthenticodeSignature release/t3wow.exe
+          if ($sig.Status -ne 'Valid') { throw "The Authenticode signature is $($sig.Status)." }
+          # Without a timestamp the signature would stop being valid when the certificate expires.
+          if (-not $sig.TimeStamperCertificate) { throw "The Authenticode signature has no timestamp." }
+          "Signed by $($sig.SignerCertificate.Subject)"
+
+      - name: Package
+        shell: pwsh
+        run: |
           $hash = (Get-FileHash release/t3wow.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  t3wow.exe" | Out-File -Encoding ascii -NoNewline release/t3wow.exe.sha256
           Compress-Archive -Path addon/T3WoW -DestinationPath "release/T3WoW-${{ github.ref_name }}.zip"
