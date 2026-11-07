@@ -139,7 +139,7 @@ npm run build:exe   # dist/t3wow.exe, Windows only
 
 - `addon/T3WoW`: the addon (Lua). `tests/` runs it in a Lua VM: the link and the window against a simulated game, and the contract with the companion. It also checks the release signing scripts against the signed release the companion's tests verify.
 - `companion/`: the companion (Rust): screen capture (`capture.rs`), the T3 client and sign-in (`t3.rs`), settings and saved sign-ins (`config.rs`), the bridge (`bridge.rs`), the addon files (`slots.rs`, with the addon embedded), updates (`updater.rs`), the tray (`tray.rs`, with its notifications and status from `app.rs`) and the tray's address box (`dialog.rs`, a plain Win32 dialog). `companion/tests/fixtures` holds the frames, inbox files and a signed release both sides are tested against.
-- `scripts/`: the exe build and the release key scripts.
+- `scripts/`: the exe build, the release key scripts and the release signing wizard.
 - `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400).
 
 Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against another repository; release builds ignore it.
@@ -150,7 +150,7 @@ Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against ano
 - `T3WOW_SIGN_PFX` (and `T3WOW_SIGN_PASSWORD`): a `.pfx` file.
 - `T3WOW_SIGN_DLIB` and `T3WOW_SIGN_METADATA`: Azure Trusted Signing's dlib and its `metadata.json`.
 
-Without one it builds unsigned, and Windows SmartScreen warns on first run. This code signing is separate from the release key below, which the updater checks.
+Without one it builds unsigned, and Windows SmartScreen warns on first run. This code signing is separate from the release key below, which the updater checks; [docs/release-signing.md](docs/release-signing.md) compares the two and the certificate options.
 
 **CI** (`.github/workflows/ci.yml`) runs the tests, clippy and a release build on Windows for every pull request and every push to `main`, and attaches the built `t3wow.exe` to the run. Every action in the workflows is pinned to a commit SHA, and Dependabot keeps the pins current.
 
@@ -161,19 +161,11 @@ Without one it builds unsigned, and Windows SmartScreen warns on first run. This
 - `RELEASES_TOKEN`: a fine-grained token with Contents read and write on `t3wow-releases` only.
 - `T3WOW_SIGNING_KEY`: the release key's private half (until it's set up, see below, releases go out unsigned).
 
+Authenticode signing of `t3wow.exe` is optional: the workflow signs it with SSL.com eSigner only once the `ESIGNER_USERNAME`, `ESIGNER_PASSWORD`, `ESIGNER_CREDENTIAL_ID` and `ESIGNER_TOTP_SECRET` secrets are set, and warns otherwise (see [Set up Authenticode](docs/release-signing.md#set-up-authenticode)).
+
 The same zip is uploaded to the [CurseForge project](https://www.curseforge.com/wow/addons) (ID 1788778) with the `CURSEFORGE_TOKEN` secret, filed under the WoW Forever version whose API version is the `.toc`'s `## Interface`; without that secret, this step is skipped.
 
-**The release key**, set up once, on your own PC. Until both halves are in place, releases go out unsigned (the workflow says so in a warning) and companions check only the SHA-256. With only one half in place, the Release workflow stops at its **Release key** step, since that release would be refused or would leave its companions unable to update.
-
-1. Make the key pair, with the private half outside the repository (the folder must exist; the script refuses a path inside the repository or an existing file):
-   `node scripts/gen-signing-key.mjs C:\Users\<you>\keys\t3wow-release-key.pem`
-   It prints a line `const RELEASE_PUBLIC_KEY: [u8; 32] = [ … ];`.
-2. In `companion/src/updater.rs`, replace `const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];` with that line and update the placeholder comment above it. Keep the line in that form: `scripts/sign-release.mjs` reads the key from it. Then `cargo test -- --ignored the_release_public_key_is_set` (in `companion/`) and `npm test` must pass.
-3. Add the private half as the secret: `gh secret set T3WOW_SIGNING_KEY --repo MatiasCiccone/t3wow < C:\Users\<you>\keys\t3wow-release-key.pem`
-4. Back the `.pem` up somewhere safe and offline. If it's lost, no new release can update existing companions; everyone would have to download a new `t3wow.exe` by hand.
-5. Optionally, check it locally: `$env:T3WOW_SIGNING_KEY = Get-Content -Raw <path>; node scripts/sign-release.mjs --check`, then `Remove-Item Env:T3WOW_SIGNING_KEY`.
-
-Companions built with the placeholder key (0.4.1, and releases until the key is in) check only the SHA-256 and ignore the signature, so they still update to signed releases. Every companion built with the real key requires the signature.
+**The release key** and **Authenticode code signing** are described in [docs/release-signing.md](docs/release-signing.md): what each one protects, how to set them up (`bash scripts/release-signing-wizard.sh` walks you through the release key), and how companions move from checking the SHA-256 alone to requiring the signature. Until the key is set up, releases go out unsigned (the workflow says so in a warning) and companions check only the SHA-256. With only one half in place, the Release workflow stops at its **Release key** step. Companions built with the placeholder key (0.4.1, and releases until the key is in) check only the SHA-256 and ignore the signature, so they still update to signed releases. Every companion built with the real key requires the signature.
 
 ## License
 

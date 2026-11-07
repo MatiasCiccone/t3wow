@@ -3,3 +3,4 @@
 *.ico binary
 *.tga binary
 *.rgba binary
+*.sh text eol=lf
