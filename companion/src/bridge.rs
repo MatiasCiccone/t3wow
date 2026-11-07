@@ -169,9 +169,10 @@ pub struct Bridge {
     view: Option<View>,
     envs: Vec<Env>,
     local_env_id: Option<String>,
-    threads: Vec<(String, Vec<Value>)>,
-    projects: Vec<(String, Vec<Value>)>,
-    settled_totals: Vec<(String, u64)>,
+    /// Per machine: its sidebar threads, its projects and how many threads it has settled.
+    threads: BTreeMap<String, Vec<Value>>,
+    projects: BTreeMap<String, Vec<Value>>,
+    settled_totals: BTreeMap<String, u64>,
     view_data: Option<Value>,
     view_key: Option<String>,
     notes: Vec<Value>,
@@ -236,11 +237,9 @@ struct PendingAsk {
     questions: Vec<PendingQuestion>,
 }
 
-fn set_entry<T>(list: &mut Vec<(String, T)>, key: &str, value: T) {
-    match list.iter_mut().find(|(k, _)| k == key) {
-        Some(entry) => entry.1 = value,
-        None => list.push((key.to_string(), value)),
-    }
+/// The machine part of a "{env}:{thread}" key.
+fn env_of(key: &str) -> &str {
+    key.split_once(':').map_or(key, |(env, _)| env)
 }
 
 fn with_args(base: Value, extra: &Map<String, Value>) -> Value {
@@ -299,9 +298,9 @@ impl Bridge {
             view: None,
             envs: vec![Env { id: String::new(), name: hostname(), ok: true }],
             local_env_id: None,
-            threads: Vec::new(),
-            projects: Vec::new(),
-            settled_totals: Vec::new(),
+            threads: BTreeMap::new(),
+            projects: BTreeMap::new(),
+            settled_totals: BTreeMap::new(),
             view_data: None,
             view_key: None,
             notes: Vec::new(),
@@ -489,7 +488,11 @@ impl Bridge {
     }
 
     fn run(&mut self, client_key: &str, command: Value) {
-        let env = str_of(&command["e"]).to_string();
+        // No machine named: the server's own.
+        let env = match str_of(&command["e"]) {
+            "" => self.local_env_id.clone().unwrap_or_default(),
+            env => env.to_string(),
+        };
         let id = str_of(&command["id"]).to_string();
         let message = str_of(&command["m"]).to_string();
         let kind = str_of(&command["t"]).to_string();
@@ -617,8 +620,8 @@ impl Bridge {
                         self.track_status(&env, thread);
                     }
                     self.listed_envs.insert(env.clone());
-                    set_entry(&mut self.threads, &env, threads);
-                    set_entry(&mut self.settled_totals, &env, settled_total);
+                    self.threads.insert(env.clone(), threads);
+                    self.settled_totals.insert(env.clone(), settled_total);
                     if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
                         target.ok = true;
                     }
@@ -659,15 +662,43 @@ impl Bridge {
             envs.push(Env { id, name, ok: link["status"] == "reachable" });
         }
         self.envs = envs;
+        self.forget_unlinked();
         Ok(())
     }
+
+    /// Drops what was read from machines T3 no longer links (their threads would otherwise
+    /// stay listed forever, under another machine's name).
+    fn forget_unlinked(&mut self) {
+        let known: HashSet<String> = self.envs.iter().map(|e| e.id.clone()).collect();
+        let linked = |env: &str| known.contains(env);
+        // A thread opened before the server's own id was known.
+        if let Some(view) = self.view.as_mut().filter(|v| v.env.is_empty()) {
+            view.env = self.local_env_id.clone().unwrap_or_default();
+        }
+        self.threads.retain(|env, _| linked(env));
+        self.projects.retain(|env, _| linked(env));
+        self.settled_totals.retain(|env, _| linked(env));
+        self.listed_envs.retain(|env| linked(env));
+        self.last_status.retain(|key, _| linked(env_of(key)));
+        self.pending_counts.retain(|key, _| linked(env_of(key)));
+        self.launchers.retain(|key, _| linked(env_of(key)));
+        if self.view.as_ref().is_some_and(|v| !linked(&v.env)) {
+            self.view = None;
+            self.view_data = None;
+            self.view_key = None;
+            self.pending_ask = None;
+        }
+    }
+
 
     fn refresh_projects(&mut self) {
         let envs: Vec<String> = self.envs.iter().filter(|e| e.ok).map(|e| e.id.clone()).collect();
         for env in envs {
             let args = with_args(json!({ "limit": 100 }), &self.env_arg(&env));
             match self.client.call("t3_project_list", args) {
-                Ok(page) => set_entry(&mut self.projects, &env, page["projects"].as_array().cloned().unwrap_or_default()),
+                Ok(page) => {
+                    self.projects.insert(env.clone(), page["projects"].as_array().cloned().unwrap_or_default());
+                }
                 Err(error) => self.log(&format!("projects ({}): {error}", if env.is_empty() { "local" } else { &env })),
             }
         }
@@ -768,7 +799,7 @@ impl Bridge {
             self.view_data = None;
             return Ok(());
         };
-        let listed = self.threads.iter().find(|(k, _)| *k == env).and_then(|(_, list)| list.iter().find(|t| t["threadId"] == id.as_str())).cloned();
+        let listed = self.threads.get(&env).and_then(|list| list.iter().find(|t| t["threadId"] == id.as_str())).cloned();
         let key = format!(
             "{env}:{id}:{depth}:{}:{}",
             listed.as_ref().map(|t| str_of(&t["updatedAt"])).unwrap_or(""),
@@ -917,7 +948,8 @@ impl Bridge {
     // ---- writing into the game ----
 
     pub fn snapshot(&self) -> Value {
-        let env_index = |id: &str| self.envs.iter().position(|e| e.id == id).map(|i| i + 1).unwrap_or(1);
+        // 1-based, as the game indexes inbox.envs; 0 (left out) for a machine no longer linked.
+        let env_index = |id: &str| self.envs.iter().position(|e| e.id == id).map_or(0, |i| i + 1);
         let mut project_title: HashMap<String, String> = HashMap::new();
         for (env, list) in &self.projects {
             for p in list {
@@ -925,7 +957,7 @@ impl Bridge {
             }
         }
         let mut threads: Vec<Value> = Vec::new();
-        for (env, list) in &self.threads {
+        for (env, list) in self.threads.iter().filter(|(env, _)| env_index(env) > 0) {
             for t in list {
                 let mut entry = json!({
                     "e": env_index(env),
@@ -948,7 +980,7 @@ impl Bridge {
         }
         threads.sort_by_key(|t| std::cmp::Reverse(t["at"].as_i64().unwrap_or(0)));
         let mut projects = Vec::new();
-        for (env, list) in &self.projects {
+        for (env, list) in self.projects.iter().filter(|(env, _)| env_index(env) > 0) {
             for p in list.iter().filter(|p| !p["archivedAt"].is_string() && !p["deletedAt"].is_string()) {
                 projects.push(json!({ "e": env_index(env), "id": str_of(&p["id"]), "t": plain(str_of(&p["title"]), 40) }));
             }
@@ -967,7 +999,7 @@ impl Bridge {
         out.insert("ack".into(), json!(client_key.as_ref().and_then(|k| self.link.acked.get(k)).copied().unwrap_or(0)));
         out.insert("envs".into(), json!(self.envs.iter().map(|e| json!({ "id": e.id, "name": plain(&e.name, 40), "ok": e.ok })).collect::<Vec<_>>()));
         out.insert("threads".into(), json!(threads));
-        out.insert("settledTotal".into(), json!(self.settled_totals.iter().map(|(_, n)| n).sum::<u64>()));
+        out.insert("settledTotal".into(), json!(self.settled_totals.values().sum::<u64>()));
         out.insert("projects".into(), json!(projects));
         out.insert("view".into(), view.unwrap_or(Value::Null));
         out.insert("notes".into(), json!(self.notes));

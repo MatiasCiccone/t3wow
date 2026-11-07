@@ -14,7 +14,9 @@ local STATUS = {
 }
 
 local inbox
-local selected -- { e = envIndex, id = threadId } or { new = true, e = envIndex, p = projectIndex }
+-- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil }.
+-- Machines and projects are kept by id: their places in the lists change between updates.
+local selected
 local collapsed = { settled = true, snoozed = true }
 local echo -- { id, text } shown until the thread view catches up
 local notice
@@ -34,6 +36,32 @@ local function age(at)
 end
 
 local function env(index) return inbox and inbox.envs and inbox.envs[index] end
+
+local function envIndexById(id)
+    for index, e in ipairs(inbox and inbox.envs or {}) do
+        if e.id == id then return index end
+    end
+end
+
+local function envById(id) return env(envIndexById(id)) end
+
+-- The machine id behind a list entry's machine index.
+local function envIdOf(index)
+    local e = env(index)
+    return e and e.id
+end
+
+-- The listed thread that is selected, if it is listed.
+local function selectedThread()
+    if not selected or selected.new then return nil end
+    for _, t in ipairs(inbox and inbox.threads or {}) do
+        if t.id == selected.id and envIdOf(t.e) == selected.env then return t end
+    end
+end
+
+local function isSelectedView(view)
+    return view ~= nil and selected ~= nil and not selected.new and view.id == selected.id and envIdOf(view.e) == selected.env
+end
 
 -- ---------------------------------------------------------------- frame
 
@@ -217,7 +245,7 @@ local function renderList()
                 r.sub:SetText(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
                 r.status:SetText(statusText(t.s))
                 r.age:SetText(age(t.at))
-                local isSelected = selected and not selected.new and selected.id == t.id
+                local isSelected = selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e)
                 r.highlight:SetColorTexture(1, 0.82, 0, isSelected and 0.25 or (indent > 0 and 0.02 or 0.04))
                 r:SetPoint("TOPLEFT", indent, -y)
                 r:SetWidth(LIST_WIDTH - 40 - indent)
@@ -275,19 +303,31 @@ newHelp:SetPoint("TOPLEFT", 4, -8)
 newHelp:SetPoint("RIGHT", -4, 0)
 newHelp:SetJustifyH("LEFT")
 local envButton = button(newPanel, "Machine", 260, function()
-    local count = inbox and #inbox.envs or 0
-    if count == 0 then return end
-    selected.e = selected.e % count + 1
-    selected.p = 0
+    local list = inbox and inbox.envs or {}
+    if #list == 0 then return end
+    selected.env = list[(envIndexById(selected.env) or 0) % #list + 1].id
+    selected.project = nil
     UI.Refresh()
 end)
 envButton:SetPoint("TOPLEFT", newHelp, "BOTTOMLEFT", 0, -12)
 local projectButton = button(newPanel, "Project", 260, function()
-    local list = UI.ProjectsFor(selected.e)
-    selected.p = (selected.p + 1) % (#list + 1)
+    local list = UI.ProjectsFor(envIndexById(selected.env))
+    local at = 0
+    for index, p in ipairs(list) do
+        if p.id == selected.project then at = index end
+    end
+    local nextProject = list[(at + 1) % (#list + 1)]
+    selected.project = nextProject and nextProject.id or nil
     UI.Refresh()
 end)
 projectButton:SetPoint("TOPLEFT", envButton, "BOTTOMLEFT", 0, -6)
+
+-- The New Thread composer's project, if it is still listed.
+local function selectedProject()
+    for _, p in ipairs(UI.ProjectsFor(envIndexById(selected.env))) do
+        if p.id == selected.project then return p end
+    end
+end
 
 function UI.ProjectsFor(envIndex)
     local list = {}
@@ -323,7 +363,7 @@ local renderView -- defined below; the option buttons redraw through it
 
 local function pendingAsk()
     local view = inbox and inbox.view
-    if view and view.ask and selected and not selected.new and view.id == selected.id then return view.ask end
+    if isSelectedView(view) and view.ask then return view.ask end
 end
 
 -- Sends the picks, and typed text for the first question without a pick. The companion
@@ -351,8 +391,7 @@ local function sendAnswer(text)
         UI.Notice("Pick an answer, or type one below.")
         return true
     end
-    local e = env(selected.e)
-    ns.Link.Send({ t = "answer", e = e and e.id or "", id = selected.id, k = ask.k, a = answers })
+    ns.Link.Send({ t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers })
     askState.sent = ask.k
     UI.Notice("Sending your answer…")
     return true
@@ -365,8 +404,7 @@ local function openInT3(threadId, envId)
 end
 
 local approvalOpen = button(messageChild, "Open in T3", 120, function()
-    local e = selected and env(selected.e)
-    if selected then openInT3(selected.id, e and e.id) end
+    if selected then openInT3(selected.id, selected.env) end
 end)
 approvalOpen:Hide()
 
@@ -499,14 +537,14 @@ function renderView()
     if selected and selected.new then
         messageScroll:Hide()
         newPanel:Show()
-        local e = env(selected.e)
-        local projects = UI.ProjectsFor(selected.e)
-        local project = projects[selected.p]
+        local e = envById(selected.env)
+        local project = selectedProject()
         viewTitle:SetText("New thread")
         viewMeta:SetText("Type the task below and press Send.")
         newHelp:SetText("The thread uses the project's default model and mode.")
-        envButton:SetText("Machine: " .. (e and e.name or "?"))
-        projectButton:SetText("Project: " .. (project and project.t or "No project (scratch)"))
+        envButton:SetText("Machine: " .. (e and e.name or "|cffff4040no longer linked: pick another|r"))
+        projectButton:SetText("Project: " .. (project and project.t
+            or (selected.project and "|cffff4040gone: pick another|r" or "No project (scratch)")))
         return
     end
     newPanel:Hide()
@@ -517,15 +555,13 @@ function renderView()
         return
     end
     local view = inbox and inbox.view
-    local listed
-    for _, t in ipairs(inbox and inbox.threads or {}) do
-        if t.id == selected.id then listed = t end
-    end
-    viewTitle:SetText((view and view.id == selected.id and view.t) or (listed and listed.t) or "")
+    if not isSelectedView(view) then view = nil end
+    local listed = selectedThread()
+    viewTitle:SetText((view and view.t) or (listed and listed.t) or "")
     local status = (listed and listed.s) or (view and view.s)
-    local e = env(selected.e)
+    local e = envById(selected.env)
     viewMeta:SetText(format("%s · %s · %s", statusText(status), e and e.name or "?", age(listed and listed.at)))
-    if not view or view.id ~= selected.id then
+    if not view then
         local fs = messageString(1)
         fs:SetText("|cffa0a0a0Loading…|r")
         fs:SetPoint("TOPLEFT", 4, 0)
@@ -637,14 +673,22 @@ local function sendCurrent()
         return
     end
     if text == "" or not selected then return end
+    -- What was picked may have gone since (a machine unlinked, a project removed): then
+    -- nothing is sent and the text stays.
+    if not envById(selected.env) then
+        UI.Notice(selected.new and "That machine isn't linked any more: pick another with Machine."
+            or "That thread's machine isn't linked any more.")
+        return
+    end
     if selected.new then
-        local e = env(selected.e)
-        local project = UI.ProjectsFor(selected.e)[selected.p]
-        ns.Link.Send({ t = "new", e = e and e.id or "", p = project and project.id or nil, m = text })
+        if selected.project and not selectedProject() then
+            UI.Notice("That project is gone: pick another with Project.")
+            return
+        end
+        ns.Link.Send({ t = "new", e = selected.env, p = selected.project, m = text })
         UI.Notice("Starting a new thread…")
     else
-        local e = env(selected.e)
-        ns.Link.Send({ t = "send", e = e and e.id or "", id = selected.id, m = text })
+        ns.Link.Send({ t = "send", e = selected.env, id = selected.id, m = text })
         echo = { id = selected.id, text = text }
     end
     input:SetText("")
@@ -661,7 +705,8 @@ end)
 local refresh = button(frame, "Refresh", 90, function() ns.Link.Send({ t = "refresh" }) end)
 refresh:SetPoint("BOTTOMLEFT", 18, 16)
 local newThread = button(frame, "New Thread", 110, function()
-    selected = { new = true, e = 1, p = 0 }
+    local first = inbox and inbox.envs and inbox.envs[1]
+    selected = { new = true, env = first and first.id or "" }
     ns.Link.Send({ t = "open" })
     UI.Refresh()
     input:SetFocus()
@@ -674,16 +719,13 @@ local send = button(frame, "Send", 90, sendCurrent)
 send:SetPoint("BOTTOMRIGHT", -18, 16)
 local settle = button(frame, "Settle", 90, function()
     if not selected or selected.new then return end
-    local listed
-    for _, t in ipairs(inbox and inbox.threads or {}) do if t.id == selected.id then listed = t end end
-    local e = env(selected.e)
-    ns.Link.Send({ t = (listed and listed.set) and "unsettle" or "settle", e = e and e.id or "", id = selected.id })
+    local listed = selectedThread()
+    ns.Link.Send({ t = (listed and listed.set) and "unsettle" or "settle", e = selected.env, id = selected.id })
 end)
 settle:SetPoint("RIGHT", send, "LEFT", -6, 0)
 local stop = button(frame, "Stop", 80, function()
     if not selected or selected.new then return end
-    local e = env(selected.e)
-    ns.Link.Send({ t = "stop", e = e and e.id or "", id = selected.id })
+    ns.Link.Send({ t = "stop", e = selected.env, id = selected.id })
 end)
 stop:SetPoint("RIGHT", settle, "LEFT", -6, 0)
 
@@ -721,10 +763,7 @@ local function renderStatus()
     end
     if link.queue > 0 then line = "Sending…" end
     statusLine:SetText(line or "")
-    local listed
-    if selected and not selected.new then
-        for _, t in ipairs(inbox and inbox.threads or {}) do if t.id == selected.id then listed = t end end
-    end
+    local listed = selectedThread()
     settle:SetText(listed and listed.set and "Unsettle" or "Settle")
     settle:SetEnabled(listed ~= nil)
     stop:SetEnabled(listed ~= nil and WORKING[listed.s] == true)
@@ -758,15 +797,11 @@ local function hexColor(hex)
     return tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255, tonumber(hex:sub(5, 6), 16) / 255
 end
 
-local function envIndexById(id)
-    for index, e in ipairs(inbox and inbox.envs or {}) do
-        if e.id == id then return index end
-    end
-end
+local selectThread -- defined with the API below
 
 function UI.OpenThread(threadId, envId)
     frame:Show()
-    UI.Select({ e = envIndexById(envId) or 1, id = threadId })
+    selectThread(envId or "", threadId)
 end
 
 -- ---------------------------------------------------------------- notifications
@@ -945,7 +980,9 @@ end
 function UI.Alert(event)
     local s = settings()
     -- Nothing to announce about the thread you're reading.
-    if frame:IsShown() and selected and selected.id == event.id then return "not shown: you were reading that thread" end
+    if frame:IsShown() and selected and selected.id == event.id and selected.env == event.e then
+        return "not shown: you were reading that thread"
+    end
     if not s[EVENT_SETTING[event.s] or "onCompleted"] then return "not shown: turned off in Settings" end
     local status = STATUS[event.s] or { event.s, "ffffff" }
     if s.chat then
@@ -1192,13 +1229,16 @@ end
 
 function UI.IsShown() return frame:IsShown() end
 
-function UI.Select(thread)
-    selected = { e = thread.e, id = thread.id }
+function selectThread(envId, threadId)
+    selected = { env = envId, id = threadId }
     scrollToEnd = true
-    local e = env(thread.e)
-    ns.Link.Send({ t = "open", e = e and e.id or "", id = thread.id })
+    ns.Link.Send({ t = "open", e = envId, id = threadId })
     UI.Refresh()
 end
+
+-- A thread from the list (its machine is an index into inbox.envs).
+function UI.Select(thread) selectThread(envIdOf(thread.e) or "", thread.id) end
+
 
 -- ---------------------------------------------------------------- resizing
 
