@@ -843,6 +843,40 @@ fn a_working_thread_that_drops_off_the_list_still_notifies_when_it_ends() {
     assert!(!rig.bridge.last_status.contains_key("local:t1"), "forgotten once it ended");
 }
 
+#[test]
+fn a_working_thread_off_the_list_survives_failed_reads_and_still_notifies() {
+    let mut rig = Rig::new(22_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    let t1 = rig.t3.threads.lock().unwrap()[0].clone();
+    rig.t3.threads.lock().unwrap()[0]["threadId"] = json!("t2");
+    rig.t3.unlisted.lock().unwrap().push(t1);
+    // T3 can't read threads for a while: t1 is still watched, not forgotten.
+    rig.t3.failing.lock().unwrap().insert("t3_thread_read".into(), "busy".into());
+    for _ in 0..2 {
+        rig.advance(15_000);
+        rig.bridge.tick();
+    }
+    assert_eq!(rig.bridge.last_status.get("local:t1").map(String::as_str), Some("running"), "kept through failed reads");
+
+    rig.t3.failing.lock().unwrap().clear();
+    rig.t3.unlisted.lock().unwrap()[0]["status"] = json!("completed");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "{latest}");
+
+    // A thread that stays unreadable (deleted) is dropped after a few polls.
+    rig.t3.unlisted.lock().unwrap()[0]["status"] = json!("running");
+    rig.bridge.last_status.insert("local:t1".into(), "running".into());
+    rig.t3.failing.lock().unwrap().insert("t3_thread_read".into(), "not found".into());
+    for _ in 0..UNLISTED_MISSES {
+        rig.advance(15_000);
+        rig.bridge.tick();
+    }
+    assert!(!rig.bridge.last_status.contains_key("local:t1"), "dropped after {UNLISTED_MISSES} failed reads");
+}
+
 /// A thread's messages, as T3 numbers them (every other position, as tool calls sit between).
 fn conversation(texts: &[&str]) -> Vec<Value> {
     texts

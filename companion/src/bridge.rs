@@ -33,6 +33,9 @@ const UNLISTED_VIEW_TTL_MS: i64 = 20_000;
 /// Why the game was told to stop watching signals.
 const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart WoW for updates within a second";
 
+/// Failed reads in a row before an active thread off the lists stops being watched.
+const UNLISTED_MISSES: u32 = 5;
+
 /// How long a working thread's pending-question count is trusted without a re-read.
 const PENDING_RECHECK_MS: i64 = 20_000;
 
@@ -207,6 +210,8 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
+    /// Active threads off the lists whose last reads failed, and how many times in a row.
+    unlisted_misses: HashMap<String, u32>,
     /// What working threads wait on, keyed by thread: T3's list says "running" while an
     /// agent waits on a question or an approval, and only a thread read has the count.
     pending_counts: HashMap<String, Pending>,
@@ -375,6 +380,7 @@ impl Bridge {
             events: Vec::new(),
             event_seq: 0,
             last_status: HashMap::new(),
+            unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
             listed_envs: HashSet::new(),
             launchers: HashMap::new(),
@@ -432,6 +438,7 @@ impl Bridge {
         self.projects.clear();
         self.settled_totals.clear();
         self.last_status.clear();
+        self.unlisted_misses.clear();
         self.pending_counts.clear();
         self.launchers.clear();
         self.listed_envs.clear();
@@ -887,6 +894,7 @@ impl Bridge {
         self.settled_totals.retain(|env, _| linked(env));
         self.listed_envs.retain(|env| linked(env));
         self.last_status.retain(|key, _| linked(env_of(key)));
+        self.unlisted_misses.retain(|key, _| linked(env_of(key)));
         self.pending_counts.retain(|key, _| linked(env_of(key)));
         self.launchers.retain(|key, _| linked(env_of(key)));
         self.list_errors.retain(|env, _| linked(env));
@@ -1017,32 +1025,45 @@ impl Bridge {
 
     /// Threads that were working or waiting on you and dropped off this machine's lists
     /// (settled past the list's limits, say) are read once more each poll until they end,
-    /// so their end still notifies. Every other thread no longer listed is forgotten.
+    /// so their end still notifies. Every other thread no longer listed is forgotten. A poll
+    /// out of time skips the read and keeps watching; a failed read keeps watching too, until
+    /// UNLISTED_MISSES in a row (a deleted thread).
     fn track_unlisted(&mut self, env: &str, threads: &[Value]) -> Result<(), T3Error> {
         let prefix = format!("{env}:");
         let listed: HashSet<String> = threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
+        self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !listed.contains(k));
         let gone: Vec<(String, String)> =
             self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !listed.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
         for (key, status) in gone {
-            let mut still_active = false;
-            if (working(&status) || needs_you(&status)) && !self.out_of_time() {
+            let keep = if !(working(&status) || needs_you(&status)) {
+                false
+            } else if self.out_of_time() {
+                true
+            } else {
                 let args = with_args(json!({ "threadId": &key[prefix.len()..], "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(env));
                 match self.client.call("t3_thread_read", args) {
                     Ok(read) if read["thread"].is_object() => {
+                        self.unlisted_misses.remove(&key);
                         let mut thread = read["thread"].clone();
                         if working(str_of(&thread["status"])) && thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
                             thread["status"] = json!(if needs_you(&status) { status.as_str() } else { "waiting" });
                         }
                         self.track_status(env, &thread);
-                        still_active = working(str_of(&thread["status"])) || needs_you(str_of(&thread["status"]));
+                        working(str_of(&thread["status"])) || needs_you(str_of(&thread["status"]))
                     }
                     Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-                    // Gone (deleted) or unreadable: nothing more to say about it.
-                    _ => {}
+                    // Unreadable now (T3 busy, or the thread deleted): try again next poll, a
+                    // few times.
+                    _ => {
+                        let misses = self.unlisted_misses.entry(key.clone()).or_insert(0);
+                        *misses += 1;
+                        *misses < UNLISTED_MISSES
+                    }
                 }
-            }
-            if !still_active {
+            };
+            if !keep {
                 self.last_status.remove(&key);
+                self.unlisted_misses.remove(&key);
             }
         }
         Ok(())
