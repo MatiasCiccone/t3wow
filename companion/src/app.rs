@@ -129,7 +129,7 @@ impl App {
         std::thread::spawn(move || {
             match t3::target() {
                 None => log::line("Can't sign in: T3 Code is not running on this PC."),
-                Some(target) => match t3::login(&target.origin, &|m| log::line(m)) {
+                Some(target) => match t3::login(&target.origin, &target.key, &|m| log::line(m)) {
                     // Saved for the server that issued it, even if `login --origin` moved the
                     // companion elsewhere meanwhile: the worker pairs tokens with servers.
                     Ok(signed) => {

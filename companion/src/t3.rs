@@ -146,10 +146,12 @@ fn status_and_json(response: Result<ureq::http::Response<ureq::Body>, ureq::Erro
     Ok((status, response.body_mut().read_json().unwrap_or(Value::Null)))
 }
 
-/// T3's MCP sign-in: register a public client, send the user to the approval page, receive
-/// the code on a loopback port, exchange it with PKCE. The approval page is where the user
-/// picks the access (Full access lets it write to full-access threads).
-pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
+/// T3's MCP sign-in: register a public client (once per server: the client id is saved under
+/// `key`), send the user to the approval page, receive the code on a loopback port, exchange
+/// it with PKCE. The approval page is where the user picks the access (Full access lets it
+/// write to full-access threads).
+pub fn login(origin: &str, key: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
+    use crate::config::Config;
     let state = random_url_safe(16);
     let verifier = random_url_safe(32);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -157,32 +159,54 @@ pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("No local port for the sign-in: {e}"))?;
     let redirect_uri = format!("http://127.0.0.1:{}/callback", listener.local_addr().map_err(|e| e.to_string())?.port());
     let http = agent();
+    let authorize_url = |client_id: &str| {
+        let params = [
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", &redirect_uri),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("state", &state),
+            ("resource", &resource),
+            ("scope", "orchestration:read orchestration:operate"),
+        ];
+        let query: Vec<String> = params.iter().map(|(k, v)| format!("{k}={}", percent_encode(v))).collect();
+        format!("{origin}/oauth/mcp/authorize?{}", query.join("&"))
+    };
 
-    let (status, registration) = status_and_json(http.post(&format!("{origin}/oauth/mcp/register")).send_json(json!({
-        "client_name": "T3 WoW",
-        "redirect_uris": [redirect_uri],
-        "grant_types": ["authorization_code"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-    })))
-    .map_err(|e| format!("Registration failed: {e}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("Registration failed: {status} {registration}"));
+    // A saved client is still good while T3's authorize step redirects for it (to the approval
+    // page); an unknown client gets an error page (400) instead. Loopback redirects match
+    // whatever the port, so the saved registration fits this sign-in's port too.
+    let mut client_id = Config::load().client_id(key);
+    if let Some(id) = &client_id {
+        let response = http.get(&authorize_url(id)).config().max_redirects(0).build().call();
+        let status = response.map_err(|e| format!("T3 unreachable at {origin}: {e}"))?.status().as_u16();
+        if (400..500).contains(&status) {
+            log("T3 no longer knows this app's registration: registering again.");
+            client_id = None;
+        }
     }
-    let client_id = registration["client_id"].as_str().ok_or("Registration returned no client id")?.to_string();
+    let client_id = match client_id {
+        Some(id) => id,
+        None => {
+            let (status, registration) = status_and_json(http.post(&format!("{origin}/oauth/mcp/register")).send_json(json!({
+                "client_name": "T3 WoW",
+                "redirect_uris": [redirect_uri],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            })))
+            .map_err(|e| format!("Registration failed: {e}"))?;
+            if !(200..300).contains(&status) {
+                return Err(format!("Registration failed: {status} {registration}"));
+            }
+            let id = registration["client_id"].as_str().ok_or("Registration returned no client id")?.to_string();
+            Config::update(|c| c.set_client_id(key, Some(id.clone())));
+            id
+        }
+    };
 
-    let params = [
-        ("response_type", "code"),
-        ("client_id", &client_id),
-        ("redirect_uri", &redirect_uri),
-        ("code_challenge", &challenge),
-        ("code_challenge_method", "S256"),
-        ("state", &state),
-        ("resource", &resource),
-        ("scope", "orchestration:read orchestration:operate"),
-    ];
-    let query: Vec<String> = params.iter().map(|(k, v)| format!("{k}={}", percent_encode(v))).collect();
-    let authorize = format!("{origin}/oauth/mcp/authorize?{}", query.join("&"));
+    let authorize = authorize_url(&client_id);
     log("Opening the T3 sign-in page. Choose Full access so you can message your full-access threads.");
     log("If it asks for a pairing code, create one in T3: Settings > Sharing & access.");
     log(&format!("If no browser opened, visit: {authorize}"));
@@ -208,6 +232,10 @@ pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
     )
     .map_err(|e| format!("Token exchange failed: {e}"))?;
     let token = body["access_token"].as_str().ok_or_else(|| {
+        // The registration is gone (T3 reset its keys): the next sign-in registers again.
+        if body["error"] == "invalid_client" {
+            Config::update(|c| c.set_client_id(key, None));
+        }
         format!("Token exchange failed: {}", body["error_description"].as_str().or(body["error"].as_str()).unwrap_or("no token"))
     })?;
     Ok(SignIn {

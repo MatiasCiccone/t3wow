@@ -61,6 +61,9 @@ pub struct ServerAuth {
     /// Epoch milliseconds; none means the token doesn't expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token_expires_at: Option<f64>,
+    /// The OAuth client registered with this server, reused by the next sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -218,12 +221,20 @@ impl Config {
         server.token_expires_at = expires_at;
     }
 
-    /// Forgets the current server's sign-in.
+    /// Forgets the current server's sign-in (its client registration stays).
     pub fn sign_out(&mut self) {
         if let Some(server) = self.servers.get_mut(&self.server_key()) {
             server.token = None;
             server.token_expires_at = None;
         }
+    }
+
+    pub fn client_id(&self, key: &str) -> Option<String> {
+        self.servers.get(key)?.client_id.clone()
+    }
+
+    pub fn set_client_id(&mut self, key: &str, client_id: Option<String>) {
+        self.servers.entry(key.to_string()).or_default().client_id = client_id;
     }
 
     pub fn interface(&self) -> String {
@@ -386,6 +397,16 @@ mod tests {
         let (config, _) = Config::read(&file).unwrap();
         assert_eq!(config.saved_token("http://box:3773").as_deref(), Some("remote"));
         assert_eq!(config.saved_token(LOCAL), None);
+    }
+
+    #[test]
+    fn client_ids_are_kept_per_server_through_sign_out() {
+        let mut config = Config { origin: Some("http://a:1".into()), ..Config::default() };
+        config.set_client_id("http://a:1", Some("client-a".into()));
+        config.set_sign_in("http://a:1", "t", None);
+        config.sign_out();
+        assert_eq!(config.client_id("http://a:1").as_deref(), Some("client-a"));
+        assert_eq!(config.client_id(LOCAL), None);
     }
 
     #[test]

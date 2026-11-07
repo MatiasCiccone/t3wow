@@ -158,7 +158,7 @@ fn command(args: Args) -> Result<(), String> {
         }
         "login" => {
             let target = target(&origin).ok_or("T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.")?;
-            let signed = t3::login(&target.origin, &|m| println!("{m}"))?;
+            let signed = t3::login(&target.origin, &target.key, &|m| println!("{m}"))?;
             // The new T3 and its token are saved together: a running companion moves to both.
             Config::update(|c| {
                 if let Some(origin) = &origin {
