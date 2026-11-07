@@ -3,6 +3,7 @@
 //! that tell the game to read them.
 
 use crate::codec::decode_cells;
+use crate::config::Trust;
 use crate::lua::{plain, to_lua, wow_text};
 use crate::slots::{SlotWriter, SIGNAL_COUNT, SLOT_COUNT};
 use crate::t3::{T3Error, T3};
@@ -245,6 +246,8 @@ pub struct Bridge {
     /// The last failure writing update files, and how many publishes in a row failed.
     write_error: Option<String>,
     write_failures: u32,
+    /// The tray's "Commands from the game": what the game may make T3 do.
+    trust: Trust,
 }
 
 /// A working thread's pending requests, as last read.
@@ -395,6 +398,15 @@ impl Bridge {
             slots_out_logged: None,
             write_error: None,
             write_failures: 0,
+            trust: Trust::Full,
+        }
+    }
+
+    /// Applies the tray's "Commands from the game" from the next command on.
+    pub fn set_trust(&mut self, trust: Trust) {
+        if trust != self.trust {
+            self.log(&format!("Commands from the game: {}", trust.label()));
+            self.trust = trust;
         }
     }
 
@@ -575,6 +587,13 @@ impl Bridge {
         // The command's number plus a hash of it: the same command sent again (after a
         // /reload) is ignored by T3, while a new one that reuses a number after a crash isn't.
         let request_id = format!("t3wow:{client_key}:{}:{:08x}", command["s"], hash_of(&command) as u32);
+        // Any addon can draw commands, so the tray setting decides what the game may do.
+        if !self.trust.allows(&kind) {
+            let reason = format!("blocked by the T3 WoW tray setting \"Commands from the game\" ({})", self.trust.label());
+            self.log(&format!("{kind} from the game {reason}"));
+            self.note(&format!("{kind}: {reason}"));
+            return Some(json!({ "s": command["s"], "ok": false, "x": reason }));
+        }
         let env_arg = self.env_arg(&env);
         let mut started: Option<String> = None;
         let result: Result<(), T3Error> = (|| {
@@ -1309,6 +1328,10 @@ impl Bridge {
             out.insert("out".into(), json!(self.outcomes.iter().map(|(_, o)| o).collect::<Vec<_>>()));
         }
         out.insert("auth".into(), json!(self.auth_error));
+        // What the tray setting blocks, so the window can say so (left out when nothing is).
+        if let Some(code) = self.trust.code() {
+            out.insert("trust".into(), json!(code));
+        }
         Value::Object(out)
     }
 
@@ -1331,6 +1354,7 @@ impl Bridge {
             "notes": data["notes"],
             "out": data["out"],
             "auth": data["auth"],
+            "trust": data["trust"],
             "open": self.window_open,
             // A question appearing (or going away) in the open thread is urgent too.
             "view": if data["view"].is_null() {
