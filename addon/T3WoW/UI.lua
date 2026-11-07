@@ -416,7 +416,12 @@ local function sendAnswer(text)
         UI.Notice("Pick an answer, or type one below.")
         return true
     end
-    local s = ns.Link.Send({ t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers })
+    local command = { t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers }
+    if not ns.Link.Fits(command) then
+        UI.Notice("That answer is too long to send from the game: shorten it.")
+        return false -- what you typed stays
+    end
+    local s = ns.Link.Send(command)
     if s then awaiting[s] = { kind = "answer", text = typedUsed and text or nil, at = GetTime() } end
     askState.sent, askState.sentAt = ask.k, GetTime()
     UI.Notice("Sending your answer…")
@@ -1269,7 +1274,9 @@ end
 -- thread opens, if you are still in the New Thread composer.
 local function takeOutcomes(data)
     local said
-    for _, o in ipairs(type(data.out) == "table" and data.out or {}) do
+    -- Only this session's outcomes: an earlier session's reuse command numbers.
+    local outcomes = ns.Link.IsCurrent(data) and type(data.out) == "table" and data.out or {}
+    for _, o in ipairs(outcomes) do
         local sent = type(o) == "table" and awaiting[o.s]
         if sent then
             awaiting[o.s] = nil
@@ -1284,6 +1291,19 @@ local function takeOutcomes(data)
                 if sent.kind == "answer" then askState.sent = nil end
                 local what = sent.kind == "new" and "Couldn't start the thread" or (sent.kind == "answer" and "Answer not sent" or "Not sent")
                 said = format("|cffff4040%s: %s|r%s", what, tostring(o.x or "failed"), sent.text and " (your text is back in the box)" or "")
+            end
+        end
+    end
+    -- An older companion (no session, no outcomes) opens a thread it started without saying
+    -- so: once it has acked the Start, a thread in its view is the new one.
+    if data.u == nil and data.out == nil and ns.Link.IsMine(data) and selected and selected.new
+        and type(data.view) == "table" and data.view.id then
+        for s, sent in pairs(awaiting) do
+            if sent.kind == "new" and type(data.ack) == "number" and data.ack >= s then
+                awaiting[s] = nil
+                selected = { env = envIdOf(data.view.e) or selected.env, id = data.view.id }
+                scrollToEnd = true
+                break
             end
         end
     end

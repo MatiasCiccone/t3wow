@@ -19,7 +19,9 @@ function sent() return queue()[#queue()] end
 local MAC = { id = "mac", name = "Mac", ok = true }
 local LOCAL = { id = "local", name = "PC", ok = true }
 function inboxWith(envs, extra)
-  local data = { k = "c1", ack = 0, envs = envs, threads = {}, projects = {}, notes = {}, events = {}, now = time() }
+  local data = { k = "c1", ack = extra and extra.ack or 0, envs = envs, threads = {}, projects = {}, notes = {}, events = {}, now = time() }
+  -- This UI session's, unless the test says otherwise ("legacy": a 0.4.1 companion's, with none).
+  if not (extra and extra.legacy) then data.u = extra and extra.u or Link.Session() end
   for _, t in ipairs(extra and extra.threads or {}) do data.threads[#data.threads + 1] = t end
   for _, p in ipairs(extra and extra.projects or {}) do data.projects[#data.projects + 1] = p end
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
@@ -145,6 +147,64 @@ assert(find("Button", "Send") and not find("Button", "Start"), "still in the com
 typeText("and test it")
 click("Send")
 assert(sent().t == "send" and sent().id == "new1" and sent().e == "mac", tostring(sent().t) .. " " .. tostring(sent().id))
+return "ok"
+`);
+});
+
+test("an outcome from an earlier UI session doesn't pick a thread", () => {
+  run(`
+inboxWith(ENVS, { projects = { { e = 2, id = "pm", t = "mac app" } } })
+click("New Thread")
+typeText("Build it")
+click("Start")
+local s = sent().s
+-- A slot written for the session before a crash, whose command s was another Start.
+inboxWith(ENVS, { u = "previous-session", view = { e = 1, id = "old-thread", t = "Old", s = "running", items = {} },
+  out = { { s = s, ok = true, env = "local", id = "old-thread" } } })
+assert(find("Button", "Start"), "left the composer for an earlier session's thread")
+-- This session's outcome still opens the new thread.
+local started = { e = 1, id = "new1", t = "Build it", s = "running", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { started }, view = { e = 1, id = "new1", t = "Build it", s = "running", items = {} },
+  out = { { s = s, ok = true, env = "local", id = "new1" } } })
+assert(find("Button", "Send") and not find("Button", "Start"), "still in the composer")
+return "ok"
+`);
+});
+
+test("with a 0.4.1 companion, a started thread still opens once the Start is acked", () => {
+  run(`
+inboxWith(ENVS, { legacy = true })
+click("New Thread")
+typeText("Build it")
+click("Start")
+local s = sent().s
+-- Before the companion took the Start: an older view means nothing.
+inboxWith(ENVS, { legacy = true, ack = s - 1, view = { e = 1, id = "old-thread", t = "Old", s = "running", items = {} } })
+assert(find("Button", "Start"), "followed a view from before the Start")
+local started = { e = 1, id = "new1", t = "Build it", s = "running", set = false, at = time(), p = "" }
+inboxWith(ENVS, { legacy = true, ack = s, threads = { started }, view = { e = 1, id = "new1", t = "Build it", s = "running", items = {} } })
+assert(find("Button", "Send") and not find("Button", "Start"), "still in the composer")
+typeText("and test it")
+click("Send")
+assert(sent().t == "send" and sent().id == "new1", tostring(sent().id))
+return "ok"
+`);
+});
+
+test("an overlong typed answer stays in the box instead of being dropped", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } } } }
+local view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+local long = string.rep('"', 2400)
+typeText(long)
+local before = #queue()
+click("Send answer")
+assert(#queue() == before, "sent")
+assert(typed() == long, "box cleared")
+assert(find("Button", "Send answer"), "stuck on Sending")
 return "ok"
 `);
 });

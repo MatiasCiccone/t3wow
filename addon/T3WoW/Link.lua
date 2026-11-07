@@ -224,6 +224,13 @@ end
 
 function Link.Pending() return own and #own.queue or 0 end
 
+-- Whether an update was written for this game's client key, and (Current) for this UI
+-- session: slots written ahead survive a crash or /reload, so an earlier session's
+-- update can still load, and its command numbers mean other commands now.
+function Link.IsMine(inbox) return own ~= nil and inbox.k == own.client end
+function Link.Session() return state.uiSession end
+function Link.IsCurrent(inbox) return Link.IsMine(inbox) and inbox.u ~= nil and inbox.u == state.uiSession end
+
 -- The queue itself, for tests.
 function Link.Queue() return own and own.queue end
 
