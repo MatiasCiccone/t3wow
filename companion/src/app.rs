@@ -472,6 +472,24 @@ pub fn run(app: Arc<App>) {
         }
         Err(error) => app.notify(Notice::new(Level::Error, "Couldn't write the addon files", error.to_string())),
     }
+    // 0.5.0's Match WoW's interface version… could save a number no WoW has (1607186, from a
+    // misread Wow.exe), and the game then marked every T3 WoW addon Incompatible. Config
+    // already reads that as the shipped number; put it back in the files and the settings.
+    if let Some(bad) = Config::load().interface.filter(|saved| *saved != interface) {
+        match slots.set_interface() {
+            Ok(changed) => {
+                Config::update(|c| c.interface = Some(interface.clone()));
+                log::line(&format!("The saved interface version {bad} can't be WoW's; set back to {interface} ({changed} addon files)."));
+                if changed > 0 && restart.is_none() {
+                    restart = Some(RestartNote {
+                        line: "restart WoW to load the fixed addon files (not /reload)".into(),
+                        notice: Some(Notice::new(Level::Warning, "Restart WoW to load the fixed addon", format!("The addon's interface version was set back to {interface}. {RESTART_WOW}"))),
+                    });
+                }
+            }
+            Err(error) => log::line(&format!("Couldn't set the interface version back to {interface}: {error}")),
+        }
+    }
 
     // 3. T3 (on this PC, or the saved origin) and a sign-in for it. The browser opens by
     //    itself once per start; after that, the tray's Sign in to T3… opens it again. A

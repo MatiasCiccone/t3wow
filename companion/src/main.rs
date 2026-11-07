@@ -143,6 +143,9 @@ fn command(args: Args) -> Result<(), String> {
     if origin.is_some() && !matches!(command, "login" | "status") {
         return Err("--origin goes with login (to switch T3) or status (to check one).".into());
     }
+    if let Some(typed) = args.interface.as_deref().filter(|i| !wow::is_interface(i)) {
+        return Err(format!("--interface takes WoW's interface version, such as 16001 for 1.60.1, not {typed}. In the game, /dump select(4, GetBuildInfo()) prints it."));
+    }
     let interface = args.interface.clone().unwrap_or_else(|| config.interface());
     match command {
         "install" => {

@@ -541,8 +541,10 @@ impl Config {
         self.update_check_every = Some(checks.every);
     }
 
+    /// The saved interface version, or the shipped addon's when none is saved or the saved
+    /// one can't be real (0.5.0 could save 1607186 from a misread Wow.exe).
     pub fn interface(&self) -> String {
-        self.interface.clone().unwrap_or_else(|| DEFAULT_INTERFACE.to_string())
+        self.interface.clone().filter(|i| crate::wow::is_interface(i)).unwrap_or_else(|| DEFAULT_INTERFACE.to_string())
     }
 }
 
@@ -819,6 +821,15 @@ mod tests {
         assert_eq!(UpdateChecks::MANUAL_ONLY.toggle_manual_only(), UpdateChecks::DEFAULT);
         let daily = UpdateChecks { on_start: false, every: UpdateInterval::Day };
         assert_eq!(daily.toggle_manual_only(), UpdateChecks::MANUAL_ONLY, "any automatic check counts");
+    }
+
+    #[test]
+    fn an_impossible_saved_interface_version_falls_back_to_the_shipped_one() {
+        let with = |interface: Option<&str>| Config { interface: interface.map(String::from), ..Config::default() }.interface();
+        assert_eq!(with(None), DEFAULT_INTERFACE);
+        assert_eq!(with(Some("16002")), "16002");
+        assert_eq!(with(Some("1607186")), DEFAULT_INTERFACE);
+        assert_eq!(with(Some("")), DEFAULT_INTERFACE);
     }
 
     #[test]
