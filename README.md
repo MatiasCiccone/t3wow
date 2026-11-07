@@ -37,7 +37,7 @@ Every start checks the addon files: anything an addon manager or a cleanup remov
 - **Settings** turns the notification, chat line and sound on or off, sets how long notifications stay (or until clicked), moves them (**Move notifications**, then drag), picks which outcomes notify (stopped threads are off by default), and shows or hides the minimap button.
 - `/t3 status` prints the link state; `/t3 probe` tests which file checks work on your client.
 
-Questions and permission prompts from an agent still need answering in T3 itself.
+When an agent asks you a question, it shows at the end of the thread's conversation: pick an option (several, where it allows that) and press **Send answer**, or type your own answer in the box and press Enter. Permission prompts (approving a command or an edit) can't be answered through T3's tools by design, so the window says to approve or deny them in T3 itself.
 
 ## How it connects
 

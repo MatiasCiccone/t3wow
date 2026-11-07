@@ -289,11 +289,172 @@ local function scrollToBottom()
     end)
 end
 
-local function renderView()
+-- ---------------------------------------------------------------- questions from the agent
+-- A question the agent is waiting on shows at the end of the conversation: one button per
+-- option (they toggle when several may be picked) and Send answer. Text typed in the box
+-- answers it too, in your own words. Approvals can't be answered from here: T3's tools
+-- don't allow it, so the window says to answer them in T3.
+local askStrings, askButtons = {}, {}
+local askState = { k = nil, picks = {} }
+local setPlaceholder -- set with the composer below
+local renderView -- defined below; the option buttons redraw through it
+
+local function pendingAsk()
+    local view = inbox and inbox.view
+    if view and view.ask and selected and not selected.new and view.id == selected.id then return view.ask end
+end
+
+-- Sends the picks, and typed text for the first question without a pick. The companion
+-- turns the indexes back into T3's ids and labels. Returns true when it used the input.
+local function sendAnswer(text)
+    local ask = pendingAsk()
+    if not ask then return false end
+    local answers, any, typedUsed = {}, false, false
+    for qi, q in ipairs(ask.qs or {}) do
+        local list = {}
+        for oi = 1, #(q.o or {}) do
+            if askState.picks[qi] and askState.picks[qi][oi] then list[#list + 1] = oi end
+        end
+        if #list > 0 then
+            answers[qi] = q.m and list or list[1]
+            any = true
+        elseif text and text ~= "" and not typedUsed then
+            answers[qi] = text
+            typedUsed, any = true, true
+        else
+            answers[qi] = false -- keeps the list in step with the questions
+        end
+    end
+    if not any then
+        UI.Notice("Pick an answer, or type one below.")
+        return true
+    end
+    local e = env(selected.e)
+    ns.Link.Send({ t = "answer", e = e and e.id or "", id = selected.id, k = ask.k, a = answers })
+    askState.sent = ask.k
+    UI.Notice("Sending your answer…")
+    return true
+end
+
+local askSend = button(messageChild, "Send answer", 120, function()
+    sendAnswer(nil)
+    UI.Refresh()
+end)
+askSend:Hide()
+
+local function askString(index)
+    local fs = askStrings[index]
+    if not fs then
+        fs = messageChild:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(true)
+        fs:SetSpacing(2)
+        askStrings[index] = fs
+    end
+    return fs
+end
+
+local function askButton(index)
+    local b = askButtons[index]
+    if not b then
+        b = CreateFrame("Button", nil, messageChild, "UIPanelButtonTemplate")
+        b:SetHeight(22)
+        b:SetScript("OnClick", function(self)
+            local picks = askState.picks[self.qi] or {}
+            if self.multi then
+                picks[self.oi] = not picks[self.oi]
+            else
+                picks = { [self.oi] = true }
+            end
+            askState.picks[self.qi] = picks
+            renderView()
+        end)
+        b:SetScript("OnEnter", function(self)
+            if self.desc and self.desc ~= "" and self.desc ~= self.label then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText(self.desc, 1, 1, 1, 1, true)
+                GameTooltip:Show()
+            end
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        askButtons[index] = b
+    end
+    return b
+end
+
+local function hideAsk()
+    for _, fs in ipairs(askStrings) do fs:Hide() end
+    for _, b in ipairs(askButtons) do b:Hide() end
+    askSend:Hide()
+end
+
+-- Draws the question (or the approval note) from y down; returns the new y.
+local function renderAsk(view, y)
+    hideAsk()
+    local ask = view.ask
+    if setPlaceholder then setPlaceholder(ask ~= nil) end
+    if not ask then
+        if view.approval then
+            local fs = askString(1)
+            fs:SetWidth(messageWidth() - 8)
+            fs:SetText("|cffff8000Waiting for your approval.|r Approve or deny it in T3 itself: approvals can't be answered from the game.")
+            fs:SetPoint("TOPLEFT", 4, -y)
+            fs:Show()
+            y = y + fs:GetStringHeight() + 14
+        end
+        return y
+    end
+    if askState.k ~= ask.k then askState = { k = ask.k, picks = {} } end
+    local width = messageWidth() - 16
+    local si, bi = 0, 0
+    for qi, q in ipairs(ask.qs or {}) do
+        si = si + 1
+        local fs = askString(si)
+        fs:SetWidth(width)
+        fs:SetText(format("|cffff8000%s|r%s\n%s", (q.h and q.h ~= "") and q.h or "Question",
+            q.m and " |cffa0a0a0(pick any)|r" or "", q.q or ""))
+        fs:ClearAllPoints()
+        fs:SetPoint("TOPLEFT", 4, -y)
+        fs:Show()
+        y = y + fs:GetStringHeight() + 6
+        for oi, o in ipairs(q.o or {}) do
+            bi = bi + 1
+            local b = askButton(bi)
+            b.qi, b.oi, b.multi, b.desc, b.label = qi, oi, q.m, o.d, o.l
+            local picked = askState.picks[qi] and askState.picks[qi][oi]
+            local mark = q.m and (picked and "[x] " or "[  ] ") or ""
+            b:SetText(picked and ("|cff40ff40" .. mark .. o.l .. "|r") or (mark .. o.l))
+            b:SetWidth(math.min(width, math.max(140, b:GetFontString():GetStringWidth() + 32)))
+            if picked then b:LockHighlight() else b:UnlockHighlight() end
+            b:ClearAllPoints()
+            b:SetPoint("TOPLEFT", 12, -y)
+            b:Show()
+            y = y + 25
+        end
+        y = y + 8
+    end
+    local sending = askState.sent == ask.k
+    askSend:ClearAllPoints()
+    askSend:SetPoint("TOPLEFT", 12, -y)
+    askSend:SetText(sending and "Sending…" or "Send answer")
+    askSend:SetEnabled(not sending)
+    askSend:Show()
+    si = si + 1
+    local hint = askString(si)
+    hint:SetWidth(math.max(80, width - 150))
+    hint:SetText("|cffa0a0a0or type your own answer below and press Enter|r")
+    hint:ClearAllPoints()
+    hint:SetPoint("LEFT", askSend, "RIGHT", 10, 0)
+    hint:Show()
+    return y + 34
+end
+
+function renderView()
     -- Stay at the end while new messages come in, unless you scrolled up to read.
     local stickToBottom = scrollToEnd
         or messageScroll:GetVerticalScroll() >= messageScroll:GetVerticalScrollRange() - 8
     for _, fs in ipairs(messageStrings) do fs:Hide() end
+    hideAsk()
     earlier:Hide()
     if selected and selected.new then
         messageScroll:Hide()
@@ -368,6 +529,7 @@ local function renderView()
             y = y + fs:GetStringHeight() + 14
         end
     end
+    y = renderAsk(view, y)
     if WORKING[status] then
         local fs = messageString(count + 2)
         fs:SetText("|cffffd100Working…|r")
@@ -415,6 +577,10 @@ placeholder:SetText("Message the agent (Shift+Enter for a new line)")
 input:SetScript("OnTextChanged", function(self)
     placeholder:SetShown(self:GetText() == "")
 end)
+setPlaceholder = function(asking)
+    placeholder:SetText(asking and "Type your own answer, or pick one above"
+        or "Message the agent (Shift+Enter for a new line)")
+end
 input:SetScript("OnCursorChanged", function(_, _, y, _, height)
     local offset = inputScroll:GetVerticalScroll()
     if -y < offset then inputScroll:SetVerticalScroll(-y)
@@ -423,6 +589,13 @@ end)
 
 local function sendCurrent()
     local text = input:GetText():gsub("^%s+", ""):gsub("%s+$", "")
+    -- While the agent waits on a question, Send (and Enter) answers it.
+    if pendingAsk() then
+        if sendAnswer(text) and text ~= "" then input:SetText("") end
+        input:ClearFocus()
+        UI.Refresh()
+        return
+    end
     if text == "" or not selected then return end
     if selected.new then
         local e = env(selected.e)
@@ -512,7 +685,7 @@ local function renderStatus()
     settle:SetText(listed and listed.set and "Unsettle" or "Settle")
     settle:SetEnabled(listed ~= nil)
     stop:SetEnabled(listed ~= nil and WORKING[listed.s] == true)
-    send:SetText(selected and selected.new and "Start" or "Send")
+    send:SetText((selected and selected.new and "Start") or (pendingAsk() and "Answer") or "Send")
     send:SetEnabled(selected ~= nil)
 end
 
@@ -776,12 +949,13 @@ end
 local refreshToastControls -- set below, once the controls exist
 
 sectionLabel("Notifications")
+checkbox("Line in chat", "chat")
+checkbox("Sound", "sound")
+-- Last, right above the options it switches on and off.
 checkbox("On-screen notification", "toasts", nil, function(value)
     settings().toasts = value
     refreshToastControls()
 end)
-checkbox("Line in chat", "chat")
-checkbox("Sound", "sound")
 
 -- How long notifications stay: a dropdown.
 local durationLabel = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")

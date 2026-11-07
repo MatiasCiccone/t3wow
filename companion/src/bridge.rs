@@ -164,6 +164,24 @@ pub struct Bridge {
     auth_error: Option<String>,
     poll_error: Option<String>,
     polled_ok: bool,
+    /// The question shown in the game for the open thread, with the ids T3 needs back.
+    pending_ask: Option<PendingAsk>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingQuestion {
+    key: String,
+    labels: Vec<String>,
+    multi: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAsk {
+    env: String,
+    thread: String,
+    token: String,
+    request_id: String,
+    questions: Vec<PendingQuestion>,
 }
 
 fn set_entry<T>(list: &mut Vec<(String, T)>, key: &str, value: T) {
@@ -246,6 +264,7 @@ impl Bridge {
             auth_error: None,
             poll_error: None,
             polled_ok: false,
+            pending_ask: None,
         }
     }
 
@@ -435,6 +454,22 @@ impl Bridge {
                     let changed = self.slots.flip_probe(true);
                     self.log(&if changed.is_empty() { "probe: no probe files; reinstall the addon".into() } else { format!("probe: made {} files real", changed.join(", ")) });
                 }
+                "answer" if !id.is_empty() => {
+                    let ask = self
+                        .pending_ask
+                        .clone()
+                        .filter(|a| a.thread == id && a.env == env && a.token == str_of(&command["k"]))
+                        .ok_or_else(|| T3Error::Other("that question was already answered or has changed".into()))?;
+                    let answers = Self::answers_for(&ask, &command["a"]);
+                    if answers.is_empty() {
+                        return Err(T3Error::Other("pick an answer first".into()));
+                    }
+                    let args = json!({ "action": "respond", "threadId": id, "requestId": ask.request_id, "answers": answers });
+                    self.client.call("t3_pending_request", with_args(args, &env_arg))?;
+                    self.note("Answered.");
+                    self.pending_ask = None;
+                    self.view_key = None;
+                }
                 "refresh" => self.view_key = None,
                 _ => return Ok(()),
             }
@@ -596,7 +631,7 @@ impl Bridge {
             items.insert(0, json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text }));
         }
         let more = messages.len() > items.len() || item_count > window;
-        self.view_data = Some(json!({
+        let mut view = json!({
             "e": env,
             "id": id,
             "t": plain(str_of(&thread["title"]), 120),
@@ -605,9 +640,82 @@ impl Bridge {
             "at": iso_seconds(str_of(&thread["updatedAt"])),
             "more": more,
             "items": items,
-        }));
+        });
+        // A question the agent is waiting on goes to the game with the conversation.
+        // Approvals can't be answered through T3's tools: the window points to T3 instead.
+        self.pending_ask = None;
+        if thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
+            match self.read_pending(&env, &id, &env_arg) {
+                Ok(Some((ask, value))) => {
+                    view["ask"] = value;
+                    self.pending_ask = Some(ask);
+                }
+                Ok(None) => {}
+                Err(error) => self.log(&format!("pending question: {error}")),
+            }
+        }
+        if self.pending_ask.is_none() && str_of(&thread["status"]) == "waiting" {
+            view["approval"] = json!(true);
+        }
+        self.view_data = Some(view);
         self.view_key = Some(key);
         Ok(())
+    }
+
+    /// The first question the agent is waiting on in a thread, for the game: a short token,
+    /// and each question with its options. The full ids stay here; the game answers by index.
+    fn read_pending(&self, env: &str, thread: &str, env_arg: &Map<String, Value>) -> Result<Option<(PendingAsk, Value)>, T3Error> {
+        let list = self.client.call("t3_pending_request", with_args(json!({ "action": "list", "threadId": thread }), env_arg))?;
+        let Some(request_id) = list["requestIds"].as_array().and_then(|ids| ids.first()).and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let request = self
+            .client
+            .call("t3_pending_request", with_args(json!({ "action": "read", "threadId": thread, "requestId": request_id }), env_arg))?;
+        let mut questions = Vec::new();
+        let mut shown = Vec::new();
+        for q in request["questions"].as_array().into_iter().flatten() {
+            let text = str_of(&q["question"]);
+            let key = q["id"].as_str().unwrap_or(text).to_string();
+            let options: Vec<&Value> = q["options"].as_array().map(|o| o.iter().collect()).unwrap_or_default();
+            let multi = q["multiSelect"] == true;
+            questions.push(PendingQuestion { key, labels: options.iter().map(|o| str_of(&o["label"]).to_string()).collect(), multi });
+            shown.push(json!({
+                "h": plain(str_of(&q["header"]), 40),
+                "q": wow_text(text, 1000),
+                "m": multi,
+                "o": options.iter().map(|o| json!({ "l": plain(str_of(&o["label"]), 60), "d": plain(str_of(&o["description"]), 160) })).collect::<Vec<_>>(),
+            }));
+        }
+        if questions.is_empty() {
+            return Ok(None);
+        }
+        let token = format!("{:08x}", hash_of(&json!(request_id)) as u32);
+        let ask = PendingAsk { env: env.to_string(), thread: thread.to_string(), token: token.clone(), request_id: request_id.to_string(), questions };
+        Ok(Some((ask, json!({ "k": token, "qs": shown }))))
+    }
+
+    /// Turns the game's answer (per question: a 1-based option index, a list of them, or
+    /// typed text) into T3's answers, keyed by question id with option labels.
+    fn answers_for(ask: &PendingAsk, given: &Value) -> Map<String, Value> {
+        let mut answers = Map::new();
+        for (i, q) in ask.questions.iter().enumerate() {
+            let pick = |v: &Value| v.as_u64().and_then(|n| q.labels.get((n as usize).wrapping_sub(1))).cloned();
+            let value = match &given[i] {
+                Value::String(text) if !text.trim().is_empty() => Some(json!(text.trim())),
+                Value::Number(_) if q.multi => pick(&given[i]).map(|l| json!([l])),
+                Value::Number(_) => pick(&given[i]).map(Value::String),
+                Value::Array(list) => {
+                    let labels: Vec<String> = list.iter().filter_map(pick).collect();
+                    (!labels.is_empty()).then(|| if q.multi { json!(labels) } else { json!(labels[0]) })
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                answers.insert(q.key.clone(), value);
+            }
+        }
+        answers
     }
 
     // ---- writing into the game ----
@@ -686,7 +794,12 @@ impl Bridge {
             "notes": data["notes"],
             "auth": data["auth"],
             "open": self.window_open,
-            "view": if data["view"].is_null() { Value::Null } else { json!([data["view"]["id"], data["view"]["more"]]) },
+            // A question appearing (or going away) in the open thread is urgent too.
+            "view": if data["view"].is_null() {
+                Value::Null
+            } else {
+                json!([data["view"]["id"], data["view"]["more"], data["view"]["ask"]["k"], data["view"]["approval"]])
+            },
         });
         let hash = hash_of(if self.window_open { &data } else { &urgent });
         if Some(hash) == self.last_published_hash {

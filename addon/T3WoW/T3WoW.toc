@@ -2,7 +2,7 @@
 ## Title: T3 WoW
 ## IconTexture: Interface\AddOns\T3WoW\Media\logo
 ## Notes: Use T3 Code from inside the game. Needs the t3wow companion running on this PC.
-## Version: 0.3.0
+## Version: 0.3.1
 ## SavedVariables: T3WoWDB
 Codec.lua
 UI.lua

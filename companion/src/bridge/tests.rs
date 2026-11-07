@@ -46,6 +46,20 @@ impl T3 for FakeT3 {
                 "items": if args["view"].is_string() { json!([{ "type": "user_message", "text": "hi" }, { "type": "assistant_message", "text": "**done**" }]) } else { json!([]) },
                 "hasMore": false,
             }),
+            // One pending question, in the shape T3 returns (see the probe in the commit log).
+            "t3_pending_request" => match args["action"].as_str() {
+                Some("list") => json!({ "requestIds": ["runtime-request:a-very-long-id"] }),
+                Some("read") => json!({
+                    "requestId": "runtime-request:a-very-long-id",
+                    "questions": [
+                        { "id": "Which color?", "header": "Color", "question": "Which color?", "multiSelect": false,
+                          "options": [{ "label": "Red", "description": "Warm" }, { "label": "Blue", "description": "Cool" }] },
+                        { "id": "Which extras?", "header": "Extras", "question": "Which extras?", "multiSelect": true,
+                          "options": [{ "label": "Sound", "description": "" }, { "label": "Chat line", "description": "" }] },
+                    ],
+                }),
+                _ => json!({ "sequence": 1 }),
+            },
             _ => json!({}),
         })
     }
@@ -282,4 +296,52 @@ fn iso_dates_become_epoch_seconds() {
     assert_eq!(iso_seconds("2026-11-06T21:22:41-03:00"), 1_794_010_961);
     assert_eq!(iso_seconds(""), 0);
     assert_eq!(iso_seconds("nonsense"), 0);
+}
+
+#[test]
+fn a_pending_question_reaches_the_game_and_its_answer_goes_back_by_label() {
+    let mut rig = Rig::new(5_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["status"] = json!("waiting");
+        threads[0]["pendingRequestCount"] = json!(1);
+    }
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let inbox = rig.slot(1);
+    assert!(inbox.contains("ask={k=\""), "{inbox}");
+    assert!(inbox.contains("{h=\"Color\",q=\"Which color?\",m=false,o={{l=\"Red\",d=\"Warm\"},{l=\"Blue\",d=\"Cool\"}}}"), "{inbox}");
+    assert!(!inbox.contains("a-very-long-id"), "the long request id stays in the companion");
+    let token = {
+        let at = inbox.find("ask={k=\"").unwrap() + 8;
+        inbox[at..at + 8].to_string()
+    };
+
+    // The game answers by index: Blue, and both extras.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [2, [1, 2]] }] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    let responds: Vec<Value> = rig.t3.calls_to("t3_pending_request").into_iter().filter(|a| a["action"] == "respond").collect();
+    assert_eq!(responds.len(), 1);
+    assert_eq!(responds[0]["requestId"], "runtime-request:a-very-long-id");
+    assert_eq!(responds[0]["answers"], json!({ "Which color?": "Blue", "Which extras?": ["Sound", "Chat line"] }));
+
+    // A stale token (the question changed) is refused, not sent.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "answer", "id": "t1", "k": "00000000", "a": [1, [1]] }] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_pending_request").into_iter().filter(|a| a["action"] == "respond").count(), 1);
+}
+
+#[test]
+fn typed_text_answers_a_question_in_your_own_words() {
+    let ask = PendingAsk {
+        env: String::new(),
+        thread: "t1".into(),
+        token: "x".into(),
+        request_id: "r".into(),
+        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], multi: false }],
+    };
+    assert_eq!(Bridge::answers_for(&ask, &json!(["  my own words "])), json!({ "Name?": "my own words" }).as_object().unwrap().clone());
+    assert!(Bridge::answers_for(&ask, &json!([9])).is_empty(), "an index past the options is ignored");
 }

@@ -43,3 +43,9 @@ return table.concat({ t.k, t.ack, t.envs[1].name, tostring(t.envs[2].ok), t.thre
       inbox.settledTotal, inbox.end, inbox["with space"], inbox.ns, inbox.nt].join("|"),
   );
 });
+
+test("an answer from the window encodes the way the companion reads it", () => {
+  // Codec.Json sorts keys; unanswered questions are false so the list stays in step.
+  const json = runLua(`return Codec.Json({ t = "answer", id = "t1", k = "abcd1234", a = { 2, { 1, 2 }, false, "my own words" } })`);
+  assert.deepEqual(JSON.parse(json), { a: [2, [1, 2], false, "my own words"], id: "t1", k: "abcd1234", t: "answer" });
+});
