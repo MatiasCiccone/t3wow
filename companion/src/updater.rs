@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::time::Duration;
 
-const REPO: &str = "MatiasCiccone/t3wow";
+// Releases live in their own public repository while the source stays private.
+const REPO: &str = "MatiasCiccone/t3wow-releases";
 const MAX_EXE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]

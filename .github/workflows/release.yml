@@ -1,6 +1,9 @@
 # Publishes a release when a version tag is pushed (git tag v0.3.1 && git push origin v0.3.1).
-# The release carries what the companion's updater downloads (t3wow.exe and its SHA-256)
-# and the addon on its own, zipped for CurseForge or a manual install.
+# The source repository is private, so the release goes to the public
+# MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
+# t3wow.exe, its SHA-256, and the addon on its own (zipped, for CurseForge or a manual
+# install). Publishing there needs the RELEASES_TOKEN secret: a fine-grained token with
+# Contents read and write on t3wow-releases only.
 name: Release
 
 on:
@@ -8,13 +11,18 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  RELEASES_REPO: MatiasCiccone/t3wow-releases
 
 jobs:
   release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -42,7 +50,27 @@ jobs:
           "$hash  t3wow.exe" | Out-File -Encoding ascii -NoNewline release/t3wow.exe.sha256
           Compress-Archive -Path addon/T3WoW -DestinationPath "release/T3WoW-${{ github.ref_name }}.zip"
 
+      - name: Release notes (commit subjects since the previous tag)
+        shell: bash
+        run: |
+          previous=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          range=${previous:+$previous..}$GITHUB_REF_NAME
+          {
+            echo "## Changes"
+            echo
+            git log --no-merges --format='- %s' "$range"
+            echo
+            echo "Download \`t3wow.exe\` and run it; it installs the addon and updates itself from here."
+          } > release/NOTES.md
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: release/*
-          generate_release_notes: true
+          repository: ${{ env.RELEASES_REPO }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: T3 WoW ${{ github.ref_name }}
+          body_path: release/NOTES.md
+          files: |
+            release/t3wow.exe
+            release/t3wow.exe.sha256
+            release/T3WoW-${{ github.ref_name }}.zip
