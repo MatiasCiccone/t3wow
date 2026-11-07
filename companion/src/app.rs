@@ -4,7 +4,7 @@
 //! notice for every action's start, success or failure (`take_notices`).
 
 use crate::bridge::{Bridge, CaptureMessage};
-use crate::config::{config_dir, now_ms, server_label, unencrypted_over_network, Config, Trust};
+use crate::config::{config_dir, now_ms, server_label, unencrypted_over_network, update_check_due, Config, Trust, UpdateChecks};
 use crate::log;
 use crate::slots::{Slots, SLOT_COUNT};
 
@@ -187,6 +187,8 @@ impl App {
             }
             *update = Update::Checking;
         }
+        // Timed checks count from here, across restarts too.
+        Config::update(|c| c.last_update_check = Some(now_ms()));
         if asked {
             self.set_activity(Task::Update, Some("Checking for updates…".into()));
         }
@@ -223,6 +225,13 @@ impl App {
                 app.set_activity(Task::Update, None);
             }
         });
+    }
+
+    /// Saves the tray's Update checks; the timed checks follow it within a minute.
+    pub fn set_update_checks(&self, checks: UpdateChecks) {
+        Config::update(|c| c.set_update_checks(checks));
+        let title = if checks.manual_only() { "Automatic update checks: off".to_string() } else { checks.summary() };
+        self.notify(Notice::new(Level::Info, title, checks.description()));
     }
 
     /// Downloads and swaps in the release, showing how far it has got; `then` runs on success
@@ -312,6 +321,26 @@ impl App {
                 }
             }
         });
+    }
+}
+
+/// The automatic update checks, as the tray's Update checks set them: one when the companion
+/// starts, then one whenever the interval has passed since the last check (a check from the
+/// menu counts too). Reads the setting every half minute, so a change applies without a
+/// restart. Never returns.
+pub fn watch_for_updates(app: Arc<App>) {
+    let started = now_ms();
+    if Config::load().update_checks().on_start {
+        app.check_updates(false);
+    }
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let config = Config::load();
+        // Never checked: the interval counts from this start.
+        let last = config.last_update_check.unwrap_or(started);
+        if update_check_due(config.update_checks().every, last, now_ms()) {
+            app.check_updates(false);
+        }
     }
 }
 

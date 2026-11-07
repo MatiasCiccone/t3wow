@@ -4,7 +4,7 @@
 //! while it runs, or a message box where an answer is needed.
 
 use crate::app::{self, App, Control, Level, Notice, Status, Update};
-use crate::config::{canonical_origin, server_label, Config, Trust};
+use crate::config::{canonical_origin, server_label, Config, Trust, UpdateChecks, UpdateInterval};
 use crate::log;
 use crate::slots::Slots;
 use std::collections::VecDeque;
@@ -196,6 +196,18 @@ pub fn run(app: Arc<App>) -> ! {
     let open_log = MenuItem::new("Open log", true, None);
     let autostart = CheckMenuItem::new("Start with Windows", true, autostart_enabled(), None);
     let updates = MenuItem::new("Check for updates", true, None);
+    // When the companion looks for updates by itself, or only when asked.
+    let checks_now = Config::load().update_checks();
+    let checks_menu = Submenu::new(checks_now.summary(), true);
+    let check_on_start = CheckMenuItem::new("When T3 WoW starts", true, checks_now.on_start, None);
+    let interval_items: Vec<(UpdateInterval, CheckMenuItem)> =
+        UpdateInterval::ALL.iter().map(|&every| (every, CheckMenuItem::new(every.label(), true, every == checks_now.every, None))).collect();
+    let manual_only = CheckMenuItem::new("Only when I check (no automatic checks)", true, checks_now.manual_only(), None);
+    let _ = checks_menu.append_items(&[&check_on_start, &PredefinedMenuItem::separator()]);
+    for (_, item) in &interval_items {
+        let _ = checks_menu.append(item);
+    }
+    let _ = checks_menu.append_items(&[&PredefinedMenuItem::separator(), &manual_only]);
     let quit = MenuItem::new("Quit T3 WoW", true, None);
     let menu = Menu::new();
     let _ = menu.append_items(&[
@@ -211,18 +223,18 @@ pub fn run(app: Arc<App>) -> ! {
         &open_log,
         &autostart,
         &updates,
+        &checks_menu,
         &PredefinedMenuItem::separator(),
         &quit,
     ]);
-    // Look for updates now and every few hours.
+    // Look for updates as Update checks says: at start, on a timer, or not at all.
     {
         let app = app.clone();
-        std::thread::spawn(move || loop {
-            app.check_updates(false);
-            std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
-        });
+        std::thread::Builder::new().name("update checks".into()).spawn(move || app::watch_for_updates(app)).expect("update checks thread");
     }
     let mut shown_update: Option<Update> = None;
+    let mut shown_checks = Some(checks_now);
+    let mut checks_read = Instant::now();
     let tray = TrayIconBuilder::new()
         .with_icon(icon())
         .with_tooltip("T3 WoW")
@@ -285,6 +297,21 @@ pub fn run(app: Arc<App>) -> ! {
                         Update::Checking | Update::Installing(_) => {}
                         _ => app.check_updates(true),
                     }
+                } else if id == *check_on_start.id() || id == *manual_only.id() || interval_items.iter().any(|(_, item)| *item.id() == id) {
+                    let current = Config::load().update_checks();
+                    let wanted = if id == *check_on_start.id() {
+                        UpdateChecks { on_start: !current.on_start, ..current }
+                    } else if id == *manual_only.id() {
+                        current.toggle_manual_only()
+                    } else {
+                        let every = interval_items.iter().find(|(_, item)| *item.id() == id).map(|(every, _)| *every).unwrap_or(current.every);
+                        UpdateChecks { every, ..current }
+                    };
+                    if wanted != current {
+                        app.set_update_checks(wanted);
+                    }
+                    // A check item ticks itself when chosen: show what the config says.
+                    shown_checks = None;
                 } else if id == *open_log.id() {
                     open_path(&log::path());
                 } else if id == *reinstall.id() {
@@ -336,6 +363,20 @@ pub fn run(app: Arc<App>) -> ! {
                 });
                 updates.set_enabled(!matches!(update, Update::Checking | Update::Installing(_)));
                 shown_update = Some(update);
+            }
+            // Update checks, from the config (a hand edit counts too).
+            if shown_checks.is_none() || checks_read.elapsed() > Duration::from_secs(2) {
+                let now = Config::load().update_checks();
+                if shown_checks != Some(now) {
+                    checks_menu.set_text(now.summary());
+                    check_on_start.set_checked(now.on_start);
+                    for (every, item) in &interval_items {
+                        item.set_checked(*every == now.every);
+                    }
+                    manual_only.set_checked(now.manual_only());
+                    shown_checks = Some(now);
+                }
+                checks_read = Instant::now();
             }
             // The T3 in use, from the config: a terminal `login --origin` changes it too.
             if servers.is_none() || servers_read.elapsed() > Duration::from_secs(2) {
