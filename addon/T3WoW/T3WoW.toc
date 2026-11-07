@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: T3 Code
+## Notes: Use T3 Code from inside the game. Needs the t3wow companion running on this PC.
+## Version: 0.1.0
+## SavedVariables: T3WoWDB
+Codec.lua
+UI.lua
+Link.lua
+T3WoW.lua
