@@ -25,6 +25,9 @@ pub const SIGNAL_PERIOD: i64 = 25;
 const VIEW_MESSAGES: usize = 24;
 const VIEW_CHARS: usize = 40_000;
 
+/// How long a working thread's pending-question count is trusted without a re-read.
+const PENDING_RECHECK_MS: i64 = 20_000;
+
 fn working(status: &str) -> bool {
     WORKING.contains(&status)
 }
@@ -155,6 +158,10 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
+    /// Pending-question counts of working threads, keyed by thread, with the
+    /// `updatedAt` and the time they were read at: T3's list says "running" while an agent
+    /// waits on a question, and only a thread read has the count.
+    pending_counts: HashMap<String, (String, i64, u64)>,
     commands: VecDeque<(String, Value)>,
     last_publish_at: i64,
     last_published_hash: Option<u64>,
@@ -255,6 +262,7 @@ impl Bridge {
             events: Vec::new(),
             event_seq: 0,
             last_status: HashMap::new(),
+            pending_counts: HashMap::new(),
             commands: VecDeque::new(),
             last_publish_at: 0,
             last_published_hash: None,
@@ -466,6 +474,7 @@ impl Bridge {
                     }
                     let args = json!({ "action": "respond", "threadId": id, "requestId": ask.request_id, "answers": answers });
                     self.client.call("t3_pending_request", with_args(args, &env_arg))?;
+                    self.pending_counts.remove(&format!("{env}:{id}"));
                     self.note("Answered.");
                     self.pending_ask = None;
                     self.view_key = None;
@@ -506,7 +515,8 @@ impl Bridge {
         });
         for (env, result) in results {
             match result {
-                Ok((threads, settled_total)) => {
+                Ok((mut threads, settled_total)) => {
+                    self.mark_questions(&env, &mut threads)?;
                     for thread in &threads {
                         self.track_status(&env, thread);
                     }
@@ -553,6 +563,43 @@ impl Bridge {
                 Err(error) => self.log(&format!("projects ({}): {error}", if env.is_empty() { "local" } else { &env })),
             }
         }
+    }
+
+    /// A working thread whose agent waits on a question shows as "waiting" (Needs you),
+    /// as in T3's sidebar, so it notifies and leaves the Working group.
+    fn mark_questions(&mut self, env: &str, threads: &mut [Value]) -> Result<(), T3Error> {
+        let env_arg = self.env_arg(env);
+        let mut seen = Vec::new();
+        for thread in threads.iter_mut().filter(|t| working(str_of(&t["status"]))) {
+            let key = format!("{env}:{}", str_of(&thread["threadId"]));
+            let updated = str_of(&thread["updatedAt"]).to_string();
+            let now = self.now_ms();
+            let count = match self.pending_counts.get(&key) {
+                Some((at, read_at, count)) if *at == updated && now - read_at < PENDING_RECHECK_MS => *count,
+                _ => {
+                    let args = with_args(json!({ "threadId": str_of(&thread["threadId"]), "limit": 1, "maxCharsPerItem": 1 }), &env_arg);
+                    match self.client.call("t3_thread_read", args) {
+                        Ok(read) => {
+                            let count = read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0);
+                            self.pending_counts.insert(key.clone(), (updated.clone(), now, count));
+                            count
+                        }
+                        Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                        Err(T3Error::Other(message)) => {
+                            self.log(&format!("pending check ({key}): {message}"));
+                            continue;
+                        }
+                    }
+                }
+            };
+            seen.push(key);
+            if count > 0 {
+                thread["status"] = json!("waiting");
+            }
+        }
+        let prefix = format!("{env}:");
+        self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || seen.contains(k));
+        Ok(())
     }
 
     fn track_status(&mut self, env: &str, thread: &Value) {
@@ -631,11 +678,13 @@ impl Bridge {
             items.insert(0, json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text }));
         }
         let more = messages.len() > items.len() || item_count > window;
+        let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
+        let status = if pending && working(str_of(&thread["status"])) { "waiting" } else { str_of(&thread["status"]) };
         let mut view = json!({
             "e": env,
             "id": id,
             "t": plain(str_of(&thread["title"]), 120),
-            "s": str_of(&thread["status"]),
+            "s": status,
             "set": thread["settled"] == true,
             "at": iso_seconds(str_of(&thread["updatedAt"])),
             "more": more,
@@ -644,7 +693,7 @@ impl Bridge {
         // A question the agent is waiting on goes to the game with the conversation.
         // Approvals can't be answered through T3's tools: the window points to T3 instead.
         self.pending_ask = None;
-        if thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
+        if pending {
             match self.read_pending(&env, &id, &env_arg) {
                 Ok(Some((ask, value))) => {
                     view["ask"] = value;

@@ -38,7 +38,12 @@ impl T3 for FakeT3 {
                 if args["settled"] == true {
                     json!({ "threads": [] })
                 } else {
-                    json!({ "threads": self.threads.lock().unwrap().clone() })
+                    // Like T3, the list has no pending-question count: only a thread read does.
+                    let mut threads = self.threads.lock().unwrap().clone();
+                    for t in &mut threads {
+                        t.as_object_mut().unwrap().remove("pendingRequestCount");
+                    }
+                    json!({ "threads": threads })
                 }
             }
             "t3_thread_read" => json!({
@@ -331,6 +336,37 @@ fn a_pending_question_reaches_the_game_and_its_answer_goes_back_by_label() {
     rig.advance(2_000);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_pending_request").into_iter().filter(|a| a["action"] == "respond").count(), 1);
+}
+
+#[test]
+fn a_running_thread_with_a_question_needs_you_and_notifies() {
+    let mut rig = Rig::new(6_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("s=\"running\""), "{}", rig.slot(1));
+
+    // T3 keeps saying "running" while the agent waits on a question.
+    rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(1);
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("id=\"t1\",t=\"Fix tests\",s=\"waiting\""), "{inbox}");
+    assert!(inbox.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "an alert: {inbox}");
+
+    // Nothing changed: the next poll reuses the count instead of reading every thread again.
+    let reads = rig.t3.calls_to("t3_thread_read").len();
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_read").len(), reads);
+
+    // Answered in T3: the agent runs again.
+    rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(0);
+    rig.t3.set("running", "2026-11-06T10:02:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("id=\"t1\",t=\"Fix tests\",s=\"running\""), "{latest}");
 }
 
 #[test]
