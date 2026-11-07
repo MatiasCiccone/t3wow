@@ -31,7 +31,7 @@ function sigPath(n) return string.format("%ssig\\\\%04d.ttf", ROOT, n) end
 -- Like the game (as traces showed): a font string whose font load failed never loads a
 -- font afterwards, whatever it is asked for.
 local function fontString()
-  local fs = { font = STANDARD_TEXT_FONT, pending = false, poisoned = false }
+  local fs = { font = STANDARD_TEXT_FONT, pending = false, poisoned = false, hidden = false, text = "" }
   function fs:SetFont(path)
     if self.pending and not self.pending.real then self.poisoned = true end
     if path == STANDARD_TEXT_FONT then self.font, self.pending = path, false; return true end
@@ -47,7 +47,20 @@ local function fontString()
   end
   function fs:SetText(text) self.text = text end
   function fs:GetText() return self.text or "" end
-  return setmetatable(fs, { __index = function() return function() end end })
+  function fs:Show() self.hidden = false end
+  function fs:Hide() self.hidden = true end
+  function fs:IsShown() return not self.hidden end
+  fontStrings[#fontStrings + 1] = fs
+  return setmetatable(fs, { __index = function() return function() return 0 end end })
+end
+
+-- Whether any shown text matches the Lua pattern.
+fontStrings = {}
+function showing(pattern)
+  for _, fs in ipairs(fontStrings) do
+    if not fs.hidden and type(fs.text) == "string" and fs.text:find(pattern) then return true end
+  end
+  return false
 end
 
 -- Widgets: text, shown state and scripts are kept; other setters do nothing, and other

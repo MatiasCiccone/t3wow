@@ -199,6 +199,17 @@ function Link.Send(command)
     -- On the timer, the answer comes with the next load: bring it forward.
     if not signalling() and not Link.Stalled() then state.pollAt = math.min(state.pollAt, GetTime() + QUEUE_BACKOFF[1]) end
     Link.Render()
+    return command.s
+end
+
+-- Whether a command fits in a frame on its own. One that doesn't can never be sent, so
+-- the window checks before it clears what you typed.
+function Link.Fits(command)
+    local alone = {}
+    for key, value in pairs(command) do alone[key] = value end
+    alone.s = (db and db.seq or 0) + 1
+    local header = { k = db and db.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1, q = { alone } }
+    return #Codec.Json(header) <= Codec.MAX_PAYLOAD
 end
 
 function Link.Pending() return db and #db.queue or 0 end

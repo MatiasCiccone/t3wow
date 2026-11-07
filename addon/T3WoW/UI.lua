@@ -18,8 +18,12 @@ local inbox
 -- Machines and projects are kept by id: their places in the lists change between updates.
 local selected
 local collapsed = { settled = true, snoozed = true }
-local echo -- { id, text } shown until the thread view catches up
+local echo -- { id, text, s } shown until the thread view catches up
 local notice
+-- Commands whose outcome matters, by number, until the companion reports it (inbox.out):
+-- { kind = "send" | "new" | "answer", text, at }. A failure puts the text back.
+local awaiting = {}
+local ANSWER_TIMEOUT = 45 -- an answer with no word back stops showing "Sending…"
 
 local function statusText(status)
     local s = STATUS[status] or { status or "?", "a0a0a0" }
@@ -391,8 +395,9 @@ local function sendAnswer(text)
         UI.Notice("Pick an answer, or type one below.")
         return true
     end
-    ns.Link.Send({ t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers })
-    askState.sent = ask.k
+    local s = ns.Link.Send({ t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers })
+    if s then awaiting[s] = { kind = "answer", text = typedUsed and text or nil, at = GetTime() } end
+    askState.sent, askState.sentAt = ask.k, GetTime()
     UI.Notice("Sending your answer…")
     return true
 end
@@ -511,7 +516,7 @@ local function renderAsk(view, y)
         end
         y = y + 8
     end
-    local sending = askState.sent == ask.k
+    local sending = askState.sent == ask.k and GetTime() - (askState.sentAt or 0) < ANSWER_TIMEOUT
     askSend:ClearAllPoints()
     askSend:SetPoint("TOPLEFT", 12, -y)
     askSend:SetText(sending and "Sending…" or "Send answer")
@@ -680,16 +685,22 @@ local function sendCurrent()
             or "That thread's machine isn't linked any more.")
         return
     end
+    if selected.new and selected.project and not selectedProject() then
+        UI.Notice("That project is gone: pick another with Project.")
+        return
+    end
+    local command = selected.new and { t = "new", e = selected.env, p = selected.project, m = text }
+        or { t = "send", e = selected.env, id = selected.id, m = text }
+    if not ns.Link.Fits(command) then
+        UI.Notice("That message is too long to send from the game: shorten it.")
+        return
+    end
+    local s = ns.Link.Send(command)
+    if s then awaiting[s] = { kind = command.t, text = text, at = GetTime() } end
     if selected.new then
-        if selected.project and not selectedProject() then
-            UI.Notice("That project is gone: pick another with Project.")
-            return
-        end
-        ns.Link.Send({ t = "new", e = selected.env, p = selected.project, m = text })
         UI.Notice("Starting a new thread…")
     else
-        ns.Link.Send({ t = "send", e = selected.env, id = selected.id, m = text })
-        echo = { id = selected.id, text = text }
+        echo = { id = selected.id, text = text, s = s }
     end
     input:SetText("")
     input:ClearFocus()
@@ -1215,10 +1226,40 @@ local function announce(data)
     print(tag .. " connected to T3." .. (waiting > 0 and format(" |cffff8000%d %s you.|r", waiting, waiting == 1 and "thread needs" or "threads need") or ""))
 end
 
+-- What the companion says about commands sent from here: a failed one gives its text
+-- back (and drops its "(sending)" echo, or the "Sending…" on Send answer); a started
+-- thread opens, if you are still in the New Thread composer.
+local function takeOutcomes(data)
+    local said
+    for _, o in ipairs(type(data.out) == "table" and data.out or {}) do
+        local sent = type(o) == "table" and awaiting[o.s]
+        if sent then
+            awaiting[o.s] = nil
+            if o.ok then
+                if sent.kind == "new" and o.id and selected and selected.new then
+                    selected = { env = o.env or selected.env, id = o.id }
+                    scrollToEnd = true
+                end
+            else
+                if sent.text and input:GetText() == "" then input:SetText(sent.text) end
+                if echo and echo.s == o.s then echo = nil end
+                if sent.kind == "answer" then askState.sent = nil end
+                local what = sent.kind == "new" and "Couldn't start the thread" or (sent.kind == "answer" and "Answer not sent" or "Not sent")
+                said = format("|cffff4040%s: %s|r%s", what, tostring(o.x or "failed"), sent.text and " (your text is back in the box)" or "")
+            end
+        end
+    end
+    -- An older companion never reports: don't keep them forever.
+    for s, sent in pairs(awaiting) do
+        if GetTime() - sent.at > 300 then awaiting[s] = nil end
+    end
+    return said
+end
+
 function UI.OnInbox(data)
     announce(data)
     inbox = data
-    notice = nil
+    notice = takeOutcomes(data)
     UI.Refresh()
 end
 
@@ -1238,7 +1279,6 @@ end
 
 -- A thread from the list (its machine is an index into inbox.envs).
 function UI.Select(thread) selectThread(envIdOf(thread.e) or "", thread.id) end
-
 
 -- ---------------------------------------------------------------- resizing
 
@@ -1297,7 +1337,13 @@ frame:SetScript("OnUpdate", function(_, delta)
     ticker = ticker + delta
     if ticker < 1 then return end
     ticker = 0
+    -- No word on an answer for a while: let it be sent again.
+    if askState.sent and GetTime() - (askState.sentAt or 0) >= ANSWER_TIMEOUT then
+        askState.sent = nil
+        renderView()
+    end
     renderStatus()
+
 end)
 
 function UI.Toggle() frame:SetShown(not frame:IsShown()) end

@@ -236,6 +236,8 @@ pub struct Bridge {
     polled_ok: bool,
     /// The question shown in the game for the open thread, with the ids T3 needs back.
     pending_ask: Option<PendingAsk>,
+    /// Outcomes of this UI session's recent commands, with when they ran.
+    outcomes: Vec<(i64, Value)>,
     /// Why signals stopped (this game process used every signal file), until WoW restarts.
     signals_out: Option<String>,
     /// The UI session whose running out of slots was logged.
@@ -292,6 +294,9 @@ type ThreadLists = Result<(Vec<Value>, u64), T3Error>;
 
 /// A whole poll gets this long; past it, optional reads wait for the next one.
 const POLL_DEADLINE_MS: i64 = 20_000;
+/// Command outcomes stay in the updates this long (the game takes each once), at most this many.
+const OUTCOME_KEEP_MS: i64 = 60_000;
+const OUTCOMES_KEPT: usize = 8;
 /// How long one tick runs poll steps before it returns.
 const TICK_BUDGET_MS: i64 = 300;
 /// Mid-poll, publish only once the poll has run this long.
@@ -313,7 +318,6 @@ enum Step {
     /// The open thread.
     View,
 }
-
 
 /// The three thread lists T3's sidebar is made of, for one machine.
 fn fetch_threads(client: &dyn T3, env_arg: &Map<String, Value>) -> ThreadLists {
@@ -387,6 +391,7 @@ impl Bridge {
             poll_error: None,
             polled_ok: false,
             pending_ask: None,
+            outcomes: Vec::new(),
             signals_out: None,
             slots_out_logged: None,
             write_error: None,
@@ -519,6 +524,7 @@ impl Bridge {
                 self.link.acked.insert(k.to_string(), lowest.saturating_sub(1));
             }
             self.queued.remove(k);
+            self.outcomes.clear();
             self.log(&format!("Game UI connected (session {u}, next slot {})", self.link.slot));
         } else if l > 0 {
             // The game draws a frame with its current slot count, so it is the authority on
@@ -556,7 +562,9 @@ impl Bridge {
         map
     }
 
-    fn run(&mut self, client_key: &str, command: Value) {
+    /// Runs one command from the game. Returns its outcome for the game, if it has one to
+    /// know: a failure (so the window can put the text back), or the thread a "new" started.
+    fn run(&mut self, client_key: &str, command: Value) -> Option<Value> {
         // No machine named: the server's own.
         let env = match str_of(&command["e"]) {
             "" => self.local_env_id.clone().unwrap_or_default(),
@@ -569,6 +577,7 @@ impl Bridge {
         // /reload) is ignored by T3, while a new one that reuses a number after a crash isn't.
         let request_id = format!("t3wow:{client_key}:{}:{:08x}", command["s"], hash_of(&command) as u32);
         let env_arg = self.env_arg(&env);
+        let mut started: Option<String> = None;
         let result: Result<(), T3Error> = (|| {
             match kind.as_str() {
                 "hello" | "ui" => self.window_open = command["o"] == true,
@@ -601,7 +610,8 @@ impl Bridge {
                     let new_id = launched["threadId"].as_str().or(launched["thread"]["threadId"].as_str()).map(str::to_string);
                     self.note(&format!("Started \"{title}\"."));
                     if let Some(new_id) = new_id {
-                        self.view = Some(View { env: env.clone(), id: new_id, depth: 1 });
+                        self.view = Some(View { env: env.clone(), id: new_id.clone(), depth: 1 });
+                        started = Some(new_id);
                     }
                     self.view_key = None;
                 }
@@ -651,13 +661,17 @@ impl Bridge {
             }
             Ok(())
         })();
-        if let Err(error) = result {
-            self.log(&format!("{kind} failed: {error}"));
-            self.note(&format!("{kind} failed: {error}"));
-        }
         // Look at T3 again now (or as soon as the poll under way ends).
         self.poll_at = 0;
         self.repoll = self.poll_run.is_some();
+        match result {
+            Err(error) => {
+                self.log(&format!("{kind} failed: {error}"));
+                self.note(&format!("{kind} failed: {error}"));
+                Some(json!({ "s": command["s"], "ok": false, "x": plain(&error.to_string(), 200) }))
+            }
+            Ok(()) => started.map(|id| json!({ "s": command["s"], "ok": true, "env": env, "id": id })),
+        }
     }
 
     // ---- reading T3 ----
@@ -864,7 +878,6 @@ impl Bridge {
             self.pending_ask = None;
         }
     }
-
 
     fn refresh_projects(&mut self, env: &str) {
         if self.out_of_time() {
@@ -1292,6 +1305,9 @@ impl Bridge {
         out.insert("view".into(), view.unwrap_or(Value::Null));
         out.insert("notes".into(), json!(self.notes));
         out.insert("events".into(), json!(self.events));
+        if !self.outcomes.is_empty() {
+            out.insert("out".into(), json!(self.outcomes.iter().map(|(_, o)| o).collect::<Vec<_>>()));
+        }
         out.insert("auth".into(), json!(self.auth_error));
         Value::Object(out)
     }
@@ -1313,6 +1329,7 @@ impl Bridge {
             "ack": data["ack"],
             "events": data["events"],
             "notes": data["notes"],
+            "out": data["out"],
             "auth": data["auth"],
             "open": self.window_open,
             // A question appearing (or going away) in the open thread is urgent too.
@@ -1417,11 +1434,15 @@ impl Bridge {
     fn run_commands(&mut self) {
         while let Some((client_key, session, command)) = self.commands.pop_front() {
             let s = command["s"].as_u64().unwrap_or(0);
-            self.run(&client_key, command);
+            let outcome = self.run(&client_key, command);
             if Some(session.as_str()) == self.link.ui_session.as_deref() && Some(client_key.as_str()) == self.link.client_key.as_deref() {
                 let entry = self.link.acked.entry(client_key).or_insert(0);
                 *entry = (*entry).max(s);
                 self.save_state();
+                if let Some(outcome) = outcome {
+                    let at = self.now_ms();
+                    self.outcomes.push((at, outcome));
+                }
             }
         }
     }
@@ -1431,6 +1452,10 @@ impl Bridge {
     /// the game's next commands, the tray's controls) a turn.
     pub fn tick(&mut self) {
         self.run_commands();
+        let now = self.now_ms();
+        self.outcomes.retain(|(at, _)| now - at < OUTCOME_KEEP_MS);
+        let excess = self.outcomes.len().saturating_sub(OUTCOMES_KEPT);
+        self.outcomes.drain(..excess);
         let started = self.now_ms();
         loop {
             if self.poll_run.is_none() {
