@@ -1,0 +1,23 @@
+# Weekly dependency update pull requests (security fixes come as soon as an advisory lands).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /companion
+    schedule:
+      interval: weekly
+    groups:
+      companion:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
