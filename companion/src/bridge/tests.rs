@@ -185,11 +185,12 @@ fn commands_from_a_frame_run_once_reach_the_linked_machine_and_are_acked() {
 
     let sends = rig.t3.calls_to("t3_thread_send");
     assert_eq!(sends.len(), 1);
-    assert_eq!(sends[0], json!({ "threadId": "t1", "message": "go", "mode": "auto", "clientRequestId": "t3wow:c1:2", "environmentId": "mac" }));
+    assert_eq!(sends[0], json!({ "threadId": "t1", "message": "go", "mode": "auto", "clientRequestId": sends[0]["clientRequestId"], "environmentId": "mac" }));
+    assert!(sends[0]["clientRequestId"].as_str().unwrap().starts_with("t3wow:c1:2:"));
     // The game watches file 3 (past anything raised before this UI session): raise it and its later neighbour.
     assert_eq!(rig.raised(), vec![3, 4]);
     let inbox = rig.slot(1);
-    assert!(inbox.starts_with("T3WoW_Inbox = {v=1,k=\"c1\",ack=2,"), "{inbox}");
+    assert!(inbox.starts_with("T3WoW_Inbox = {v=1,k=\"c1\",u=\"ui1\",ack=2,"), "{inbox}");
     assert!(inbox.contains("{id=\"mac\",name=\"Mac\",ok=true}"));
     assert!(inbox.contains("{r=\"a\",x=\"done\"}"));
     assert!(inbox.contains(",slot=1,ns=5,"));
@@ -491,4 +492,39 @@ fn pointed_at_another_server_the_old_servers_threads_and_open_thread_go() {
     assert!(snapshot["view"].is_null(), "{}", snapshot["view"]);
     assert!(other.calls_to("t3_thread_read").iter().all(|args| args["threadId"] != "t1"));
     assert!(rig.bridge.status().t3_ok);
+}
+
+#[test]
+fn after_a_game_crash_rolls_command_numbers_back_new_commands_still_run() {
+    let mut rig = Rig::new(10_000_000);
+    let sends = |n: u64| (1..=n).map(|s| json!({ "s": s, "t": "send", "id": "t1", "m": format!("message {s}") })).collect::<Vec<_>>();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": sends(5) }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 5);
+    assert_eq!(rig.bridge.link.acked["c1"], 5);
+
+    // WoW crashed before saving: the next session numbers its commands from 1 again.
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [{ "s": 1, "t": "hello", "o": false }, { "s": 2, "t": "send", "id": "t1", "m": "after the crash" }] }));
+    rig.advance(5000);
+    rig.bridge.tick();
+    let sent = rig.t3.calls_to("t3_thread_send");
+    assert_eq!(sent.len(), 6);
+    assert_eq!(sent[5]["message"], "after the crash");
+    // Same number as an earlier message, but another request id: T3 doesn't drop it as a repeat.
+    assert_ne!(sent[5]["clientRequestId"], sent[1]["clientRequestId"]);
+    assert_eq!(rig.bridge.link.acked["c1"], 2);
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("u=\"ui2\",ack=2,"), "{inbox}");
+}
+
+#[test]
+fn a_command_counts_as_done_only_once_it_ran() {
+    let mut rig = Rig::new(11_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "send", "id": "t1", "m": "hi" }] }));
+    // Seen, not yet run: the saved ack hasn't moved, and the same frame again doesn't queue it twice.
+    assert_eq!(rig.bridge.link.acked.get("c1").copied().unwrap_or(0), 0);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "send", "id": "t1", "m": "hi" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+    assert_eq!(rig.bridge.link.acked["c1"], 1);
 }

@@ -14,7 +14,7 @@ local Link = {}
 ns.Link = Link
 
 local SLOT_COUNT, SIGNAL_COUNT = 200, 4000
-local SIGNAL_PERIOD = 25 -- keep in step with companion/src/bridge.js
+local SIGNAL_PERIOD = 25 -- keep in step with companion/src/bridge.rs
 local ROOT = "Interface\\AddOns\\T3WoW\\"
 local ACK_PATIENCE = 20
 -- Without signals the companion can't see which slot we load next unless we tell it,
@@ -200,7 +200,9 @@ end
 -- ---------------------------------------------------------------- inbox
 
 local function receive(inbox)
-    if inbox.k == db.client and type(inbox.ack) == "number" then
+    -- An update written for an earlier UI session (u) carries that session's ack, which
+    -- can be past this session's command numbers after a crash: leave the queue alone.
+    if inbox.k == db.client and type(inbox.ack) == "number" and (inbox.u == nil or inbox.u == state.uiSession) then
         local kept = {}
         for _, command in ipairs(db.queue) do
             if command.s > inbox.ack then kept[#kept + 1] = command end
