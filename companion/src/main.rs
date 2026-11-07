@@ -154,7 +154,7 @@ fn command(args: Args) -> Result<(), String> {
             let signed = t3::login(&origin, &|m| println!("{m}"))?;
             Config::update(|c| {
                 c.token = Some(signed.token.clone());
-                c.token_expires_at = Some(signed.expires_at);
+                c.token_expires_at = signed.expires_at;
             });
             println!("Signed in to {origin} ({}).", signed.scope);
         }

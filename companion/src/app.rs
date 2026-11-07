@@ -141,7 +141,7 @@ impl App {
                     Ok(signed) => {
                         Config::update(|c| {
                             c.token = Some(signed.token.clone());
-                            c.token_expires_at = Some(signed.expires_at);
+                            c.token_expires_at = signed.expires_at;
                         });
                         log::line(&format!("Signed in to {origin} ({}).", if signed.scope.is_empty() { "no scope reported" } else { &signed.scope }));
                         app.send(Control::SignedIn(signed.token));

@@ -110,8 +110,8 @@ pub fn open_browser(url: &str) {
 pub struct SignIn {
     pub token: String,
     pub scope: String,
-    /// Epoch milliseconds.
-    pub expires_at: f64,
+    /// Epoch milliseconds; none when T3 gives no lifetime.
+    pub expires_at: Option<f64>,
 }
 
 /// HTTP statuses come back as responses (not errors), so callers read error bodies too.
@@ -199,7 +199,7 @@ pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
     Ok(SignIn {
         token: token.to_string(),
         scope: body["scope"].as_str().unwrap_or("").to_string(),
-        expires_at: crate::config::now_ms() as f64 + body["expires_in"].as_f64().unwrap_or(0.0) * 1000.0,
+        expires_at: body["expires_in"].as_f64().filter(|s| *s > 0.0).map(|s| crate::config::now_ms() as f64 + s * 1000.0),
     })
 }
 
