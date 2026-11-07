@@ -56,7 +56,8 @@ mod win {
     use std::ffi::c_void;
     use std::mem::{size_of, zeroed};
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
     use windows_sys::Win32::System::Threading::*;

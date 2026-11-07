@@ -5,7 +5,7 @@
 use crate::slots::compare_versions;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::io::Read;
+
 use std::time::Duration;
 
 // Releases live in their own public repository while the source stays private.
@@ -24,11 +24,18 @@ fn repo() -> String {
 }
 
 fn http() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout(Duration::from_secs(120))
-        .user_agent(&format!("t3wow-companion/{}", env!("CARGO_PKG_VERSION")))
-        .build()
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(120)))
+            .user_agent(format!("t3wow-companion/{}", env!("CARGO_PKG_VERSION")))
+            .http_status_as_error(false)
+            .build(),
+    )
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn current_version() -> &'static str {
@@ -39,12 +46,13 @@ pub fn current_version() -> &'static str {
 /// release can be seen (a private repository looks the same as one without releases).
 pub fn check() -> Result<Option<Release>, String> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", repo());
-    let release: Value = match http().get(&url).set("accept", "application/vnd.github+json").call() {
-        Ok(response) => response.into_json().map_err(|e| e.to_string())?,
-        Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(ureq::Error::Status(code, _)) => return Err(format!("GitHub answered {code}")),
-        Err(error) => return Err(error.to_string()),
-    };
+    let mut response = http().get(&url).header("accept", "application/vnd.github+json").call().map_err(|e| e.to_string())?;
+    match response.status().as_u16() {
+        200 => {}
+        404 => return Ok(None),
+        code => return Err(format!("GitHub answered {code}")),
+    }
+    let release: Value = response.body_mut().read_json().map_err(|e| e.to_string())?;
     Ok(newer_release(&release, current_version()))
 }
 
@@ -59,10 +67,12 @@ fn newer_release(release: &Value, current: &str) -> Option<Release> {
 }
 
 fn download(url: &str) -> Result<Vec<u8>, String> {
-    let response = http().get(url).call().map_err(|e| format!("download failed: {e}"))?;
-    let mut bytes = Vec::new();
-    response.into_reader().take(MAX_EXE_BYTES).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    Ok(bytes)
+    let mut response = http().get(url).call().map_err(|e| format!("download failed: {e}"))?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("download failed: {status}"));
+    }
+    response.body_mut().with_config().limit(MAX_EXE_BYTES).read_to_vec().map_err(|e| format!("download failed: {e}"))
 }
 
 /// Checks a downloaded exe: a Windows program, and the release's SHA-256 when it has one.
@@ -72,7 +82,7 @@ fn verify(exe: &[u8], sha_file: Option<&str>) -> Result<(), String> {
     }
     if let Some(sha_file) = sha_file {
         let expected = sha_file.split_whitespace().next().unwrap_or("").to_lowercase();
-        let actual = format!("{:x}", Sha256::digest(exe));
+        let actual = hex(&Sha256::digest(exe));
         if expected != actual {
             return Err("the download doesn't match the release's checksum".into());
         }
@@ -146,7 +156,7 @@ mod tests {
     fn downloads_are_checked() {
         let mut exe = b"MZ".to_vec();
         exe.resize(70_000, 0);
-        let sha = format!("{:x}  t3wow.exe\n", Sha256::digest(&exe));
+        let sha = format!("{}  t3wow.exe\n", hex(&Sha256::digest(&exe)));
         assert!(verify(&exe, Some(&sha)).is_ok());
         assert!(verify(&exe, None).is_ok());
         assert!(verify(&exe, Some("deadbeef")).is_err());

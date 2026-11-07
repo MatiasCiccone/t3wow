@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
+/// A thread read with long messages can be several MB; past this something is wrong.
+const MAX_REPLY_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum T3Error {
@@ -43,7 +45,7 @@ pub fn discover_origin() -> Option<String> {
 
 fn random_url_safe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    getrandom::getrandom(&mut buf).expect("random bytes");
+    getrandom::fill(&mut buf).expect("random bytes");
     URL_SAFE_NO_PAD.encode(buf)
 }
 
@@ -107,15 +109,22 @@ pub struct SignIn {
     pub expires_at: f64,
 }
 
+/// HTTP statuses come back as responses (not errors), so callers read error bodies too.
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout(Duration::from_secs(60)).build()
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_global(Some(Duration::from_secs(60)))
+            .http_status_as_error(false)
+            .build(),
+    )
 }
 
-fn error_text(error: ureq::Error) -> String {
-    match error {
-        ureq::Error::Status(code, response) => format!("{code} {}", response.into_string().unwrap_or_default()),
-        other => other.to_string(),
-    }
+/// The status and JSON body of a response (Null when the body isn't JSON).
+fn status_and_json(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(u16, Value), String> {
+    let mut response = response.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    Ok((status, response.body_mut().read_json().unwrap_or(Value::Null)))
 }
 
 /// T3's MCP sign-in: register a public client, send the user to the approval page, receive
@@ -130,18 +139,17 @@ pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
     let redirect_uri = format!("http://127.0.0.1:{}/callback", listener.local_addr().map_err(|e| e.to_string())?.port());
     let http = agent();
 
-    let registration: Value = http
-        .post(&format!("{origin}/oauth/mcp/register"))
-        .send_json(json!({
-            "client_name": "T3 WoW",
-            "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-        }))
-        .map_err(|e| format!("Registration failed: {}", error_text(e)))?
-        .into_json()
-        .map_err(|e| format!("Registration failed: {e}"))?;
+    let (status, registration) = status_and_json(http.post(&format!("{origin}/oauth/mcp/register")).send_json(json!({
+        "client_name": "T3 WoW",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })))
+    .map_err(|e| format!("Registration failed: {e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("Registration failed: {status} {registration}"));
+    }
     let client_id = registration["client_id"].as_str().ok_or("Registration returned no client id")?.to_string();
 
     let params = [
@@ -174,15 +182,12 @@ pub fn login(origin: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
     .iter()
     .map(|(k, v)| format!("{k}={}", percent_encode(v)))
     .collect();
-    let response = http
-        .post(&format!("{origin}/oauth/mcp/token"))
-        .set("content-type", "application/x-www-form-urlencoded")
-        .send_string(&form.join("&"));
-    let body: Value = match response {
-        Ok(r) => r.into_json().unwrap_or(Value::Null),
-        Err(ureq::Error::Status(_, r)) => r.into_json().unwrap_or(Value::Null),
-        Err(e) => return Err(format!("Token exchange failed: {e}")),
-    };
+    let (_, body) = status_and_json(
+        http.post(&format!("{origin}/oauth/mcp/token"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .send(form.join("&")),
+    )
+    .map_err(|e| format!("Token exchange failed: {e}"))?;
     let token = body["access_token"].as_str().ok_or_else(|| {
         format!("Token exchange failed: {}", body["error_description"].as_str().or(body["error"].as_str()).unwrap_or("no token"))
     })?;
@@ -292,22 +297,22 @@ impl McpClient {
         let mut request = self
             .http
             .post(&self.endpoint)
-            .set("authorization", &format!("Bearer {token}"))
-            .set("content-type", "application/json")
-            .set("accept", "application/json, text/event-stream");
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
         if let Some(id) = &session {
-            request = request.set("mcp-session-id", id).set("mcp-protocol-version", PROTOCOL_VERSION);
+            request = request.header("mcp-session-id", id).header("mcp-protocol-version", PROTOCOL_VERSION);
         }
-        let (status, response) = match request.send_string(&body.to_string()) {
-            Ok(r) => (r.status(), r),
-            Err(ureq::Error::Status(code, r)) => (code, r),
-            Err(e) => return Err(PostError::Fail(T3Error::Other(format!("T3 unreachable: {e}")))),
-        };
+        let mut response = request
+            .send(body.to_string())
+            .map_err(|e| PostError::Fail(T3Error::Other(format!("T3 unreachable: {e}"))))?;
+        let status = response.status().as_u16();
+        let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         if status == 401 || status == 403 {
             return Err(PostError::Fail(T3Error::Auth(format!("T3 refused the sign-in ({status}). Sign in again from the tray menu."))));
         }
-        if let Some(id) = response.header("mcp-session-id") {
-            *self.session.lock().unwrap() = Some(id.to_string());
+        if let Some(id) = header("mcp-session-id") {
+            *self.session.lock().unwrap() = Some(id);
         }
         if !expect_reply {
             return Ok(None);
@@ -317,8 +322,13 @@ impl McpClient {
             *self.ready.lock().unwrap() = false;
             return Err(PostError::SessionExpired);
         }
-        let content_type = response.header("content-type").unwrap_or("").to_string();
-        let text = response.into_string().map_err(|e| PostError::Fail(T3Error::Other(e.to_string())))?;
+        let content_type = header("content-type").unwrap_or_default();
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_REPLY_BYTES)
+            .read_to_string()
+            .map_err(|e| PostError::Fail(T3Error::Other(e.to_string())))?;
         if !(200..300).contains(&status) {
             return Err(PostError::Fail(T3Error::Other(format!("MCP {status}: {}", text.chars().take(300).collect::<String>()))));
         }
