@@ -36,6 +36,12 @@ local NUDGE_BACKOFF, QUEUE_BACKOFF, STALLED_SECONDS = { 5, 10, 20, 60 }, { 3, 3,
 
 local floor, format = math.floor, string.format
 local db
+-- The client key, command count and queue: file-local while the game runs, so another
+-- addon can't add commands to the queue through the saved variables table (it can still
+-- draw a strip of its own: the companion's tray setting "Commands from the game" caps
+-- what any command can do). They go back into T3WoWDB at logout, which /reload also
+-- fires, so they keep across sessions.
+local own
 local state = {
     nextSlot = 1,
     signalBase = nil, -- first signal file of the current wait (inbox.ns)
@@ -162,19 +168,19 @@ end
 
 local frameSeq = 0
 function Link.Render()
-    if not db then return strip:Hide() end
-    if #db.queue == 0 then
+    if not own then return strip:Hide() end
+    if #own.queue == 0 then
         state.queueSince = nil
         if GetTime() >= state.syncUntil then return strip:Hide() end
     else
         state.queueSince = state.queueSince or GetTime()
     end
-    local header = { k = db.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
+    local header = { k = own.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
         p = (not signalling()) and 1 or nil }
     -- An empty queue still sends a header-only sync frame.
     local commands = {}
-    local payload = (#db.queue == 0) and Codec.Json(header) or nil
-    for _, command in ipairs(db.queue) do
+    local payload = (#own.queue == 0) and Codec.Json(header) or nil
+    for _, command in ipairs(own.queue) do
         commands[#commands + 1] = command
         header.q = commands
         local candidate = Codec.Json(header)
@@ -186,7 +192,7 @@ function Link.Render()
     end
     if not payload then
         -- A single command that can never fit: drop it rather than block the queue.
-        table.remove(db.queue, 1)
+        table.remove(own.queue, 1)
         ns.UI.Notice("That message is too long to send from the game.")
         return Link.Render()
     end
@@ -195,11 +201,11 @@ function Link.Render()
 end
 
 function Link.Send(command)
-    db.seq = db.seq + 1
-    command.s = db.seq
+    own.seq = own.seq + 1
+    command.s = own.seq
     trace(format("send #%d %s", command.s, tostring(command.t)))
     state.lastSentAt = GetTime()
-    db.queue[#db.queue + 1] = command
+    own.queue[#own.queue + 1] = command
     -- On the timer, the answer comes with the next load: bring it forward.
     if not signalling() and not Link.Stalled() then state.pollAt = math.min(state.pollAt, GetTime() + QUEUE_BACKOFF[1]) end
     Link.Render()
@@ -211,12 +217,15 @@ end
 function Link.Fits(command)
     local alone = {}
     for key, value in pairs(command) do alone[key] = value end
-    alone.s = (db and db.seq or 0) + 1
-    local header = { k = db and db.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1, q = { alone } }
+    alone.s = (own and own.seq or 0) + 1
+    local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1, q = { alone } }
     return #Codec.Json(header) <= Codec.MAX_PAYLOAD
 end
 
-function Link.Pending() return db and #db.queue or 0 end
+function Link.Pending() return own and #own.queue or 0 end
+
+-- The queue itself, for tests.
+function Link.Queue() return own and own.queue end
 
 function Link.Stalled()
     return state.queueSince ~= nil and GetTime() - state.queueSince > ACK_PATIENCE
@@ -227,14 +236,14 @@ end
 local function receive(inbox)
     -- An update written for an earlier UI session (u) carries that session's ack, which
     -- can be past this session's command numbers after a crash: leave the queue alone.
-    if inbox.k == db.client and type(inbox.ack) == "number" and (inbox.u == nil or inbox.u == state.uiSession) then
+    if inbox.k == own.client and type(inbox.ack) == "number" and (inbox.u == nil or inbox.u == state.uiSession) then
         local kept = {}
-        for _, command in ipairs(db.queue) do
+        for _, command in ipairs(own.queue) do
             if command.s > inbox.ack then kept[#kept + 1] = command end
         end
-        if #kept ~= #db.queue then
+        if #kept ~= #own.queue then
             trace(format("  acked to #%d, %d command(s) left", inbox.ack, #kept))
-            db.queue = kept
+            own.queue = kept
             state.queueSince = nil
             Link.Render()
         end
@@ -369,10 +378,10 @@ local elapsed = 0
 local poller = CreateFrame("Frame")
 poller:SetScript("OnUpdate", function(_, delta)
     elapsed = elapsed + delta
-    if elapsed < 0.25 or not db then return end
+    if elapsed < 0.25 or not own then return end
     elapsed = 0
     local now = GetTime()
-    if strip:IsShown() and #db.queue == 0 and now >= state.syncUntil then strip:Hide() end
+    if strip:IsShown() and #own.queue == 0 and now >= state.syncUntil then strip:Hide() end
     updateCapability(now)
     local watching = signalling()
     if watching ~= state.wasSignalling then
@@ -395,7 +404,7 @@ poller:SetScript("OnUpdate", function(_, delta)
                 -- moved past every file it raised for this one (ours and its neighbours).
                 state.signalBase, state.signalTime = index + 2, time()
                 loadNextSlot("a signal")
-                if #db.queue > 0 then Link.Render() end
+                if #own.queue > 0 then Link.Render() end
                 return
             end
         end
@@ -411,7 +420,7 @@ poller:SetScript("OnUpdate", function(_, delta)
                 state.lastWatched and format("; %d check(s) of %d", state.checksOfWatched or 0, state.lastWatched) or ""))
             state.lastWatched, state.checksOfWatched = watched, 0
         end
-        local quiet = #db.queue == 0 and now - math.max(state.inboxAt or 0, state.lastSentAt or 0) > QUIET_AFTER
+        local quiet = #own.queue == 0 and now - math.max(state.inboxAt or 0, state.lastSentAt or 0) > QUIET_AFTER
         local every = quiet and RECHECK_QUIET_SECONDS or RECHECK_SECONDS
         if state.fontStrings >= FONT_BUDGET then
             state.signals, state.signalCheck = "off", FONT_BUDGET_OUT
@@ -437,9 +446,9 @@ poller:SetScript("OnUpdate", function(_, delta)
     local interval
     if nudge then
         interval = backoff(NUDGE_BACKOFF)
-    elseif #db.queue > 0 and not Link.Stalled() then
+    elseif #own.queue > 0 and not Link.Stalled() then
         interval = backoff(QUEUE_BACKOFF)
-    elseif #db.queue > 0 then
+    elseif #own.queue > 0 then
         interval = STALLED_SECONDS
     else
         interval = ns.UI.IsShown() and 10 or 60
@@ -452,9 +461,12 @@ end)
 function Link.Init()
     T3WoWDB = T3WoWDB or {}
     db = T3WoWDB
-    db.client = db.client or randomHex(12)
-    db.seq = db.seq or 0
-    db.queue = db.queue or {}
+    own = {
+        client = type(db.client) == "string" and db.client or randomHex(12),
+        seq = type(db.seq) == "number" and db.seq or 0,
+        queue = type(db.queue) == "table" and db.queue or {},
+    }
+    db.client, db.seq, db.queue = nil, nil, nil
     -- Keep the previous UI session's record too: problems often show up just before a /reload.
     db.previousTrace = db.trace
     db.trace = state.trace
@@ -463,13 +475,22 @@ function Link.Init()
     Link.Send({ t = "hello", o = false })
 end
 
+-- Back into the saved variables, which the game writes right after this event. A crash
+-- skips it, and the file keeps what the last logout or /reload wrote (the companion
+-- copes with command numbers that went back).
+local saver = CreateFrame("Frame")
+saver:RegisterEvent("PLAYER_LOGOUT")
+saver:SetScript("OnEvent", function()
+    if own and db then db.client, db.seq, db.queue = own.client, own.seq, own.queue end
+end)
+
 function Link.Status()
     return {
         signals = state.signals,
         nextSignal = watchedSignal(),
         nextSlot = state.nextSlot,
         slotsUsed = math.min(SLOT_COUNT, state.nextSlot - 1),
-        queue = db and #db.queue or 0,
+        queue = own and #own.queue or 0,
         loadError = state.loadError,
         signalCheck = state.signalCheck,
         inboxAge = state.inboxAt and (GetTime() - state.inboxAt) or nil,

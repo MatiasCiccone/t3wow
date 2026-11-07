@@ -149,3 +149,33 @@ assert(Link.Status().signalCheck:find("font checks"), Link.Status().signalCheck)
 return "ok"
 `);
 });
+
+test("the queue, client key and command count stay off the global table and keep across logout and /reload", () => {
+  const saved = runGame(`
+Link.Init()
+assert(T3WoWDB.client == nil and T3WoWDB.seq == nil and T3WoWDB.queue == nil, "still on the global")
+assert(T3WoWDB.settings.sound == false, "other saved settings stay")
+-- Another addon adding to the global table reaches nothing.
+T3WoWDB.queue = { { s = 99, t = "new", m = "not ours" } }
+Link.Send({ t = "send", id = "t1", m = "ours" })
+assert(Link.Pending() == 3, "queued " .. Link.Pending())
+fire("PLAYER_LOGOUT")
+assert(T3WoWDB.client == "c7" and T3WoWDB.seq == 6 and #T3WoWDB.queue == 3, "not written back")
+local parts = {}
+for _, c in ipairs(T3WoWDB.queue) do parts[#parts + 1] = string.format("{ s = %d, t = %q }", c.s, c.t) end
+return string.format("{ client = %q, seq = %d, queue = { %s } }", T3WoWDB.client, T3WoWDB.seq, table.concat(parts, ", "))
+`, { db: `{ client = "c7", seq = 4, queue = { { s = 4, t = "send", id = "t1", m = "before" } }, settings = { sound = false } }` });
+  assert.match(saved, /s = 4, t = "send".*s = 5, t = "hello".*s = 6, t = "send"/);
+
+  // The next UI session picks up where that one left off.
+  runGame(`
+Link.Init()
+local q = Link.Queue()
+assert(#q == 4 and q[4].t == "hello" and q[4].s == 7, "after reload: " .. #q .. " queued, last #" .. tostring(q[#q].s))
+assert(T3WoWDB.queue == nil, "back on the global")
+inboxes.T3WoW_S001 = { k = "c7", u = Link.state.uiSession, ack = 7, now = time() }
+tick(1)
+assert(Link.Pending() == 0, "the client key didn't carry over: " .. Link.Pending())
+return "ok"
+`, { db: saved });
+});
