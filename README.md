@@ -79,4 +79,6 @@ npm run build:exe   # dist/t3wow.exe, Windows only
 
 Without one it builds unsigned, and Windows SmartScreen warns on first run.
 
+**CI** (`.github/workflows/ci.yml`) runs the tests, clippy and a release build on Windows for every pull request and every push to `main`, and attaches the built `t3wow.exe` to the run.
+
 **Releasing:** set the same version in `companion/Cargo.toml`, `addon/T3WoW/T3WoW.toc` and `package.json`, then push a tag (`git tag v0.3.1 && git push origin v0.3.1`). The Release workflow checks the versions match, runs the tests, builds on Windows, and publishes `t3wow.exe`, `t3wow.exe.sha256` (what the updater downloads) and `T3WoW-v0.3.1.zip` (the addon alone, for CurseForge).

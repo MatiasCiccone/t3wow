@@ -1,0 +1,5 @@
+# Binary assets: never convert line endings.
+*.png binary
+*.ico binary
+*.tga binary
+*.rgba binary

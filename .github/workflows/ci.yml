@@ -1,0 +1,49 @@
+# Tests and builds every pull request and every push to main, on Windows (the companion
+# is a Windows program). The built t3wow.exe is attached to the run as an artifact.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: companion
+
+      - run: npm ci
+
+      - name: Tests (addon Lua and companion)
+        run: npm test
+
+      - name: Lint
+        run: cargo clippy --manifest-path companion/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build t3wow.exe
+        run: cargo build --release --manifest-path companion/Cargo.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t3wow-exe
+          path: companion/target/release/t3wow.exe
+          if-no-files-found: error
