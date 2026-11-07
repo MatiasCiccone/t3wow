@@ -25,6 +25,8 @@ More screenshots are in [`assets/screenshots`](assets/screenshots).
 
 Every start checks the addon files: any of them an addon manager or a cleanup removed is put back, and a newer addon shipped with the companion replaces an older one. A newer addon (from CurseForge, say) is left alone and never patched with the companion's older files. If it had to create files, restart WoW once more.
 
+Keep the addon and the companion at the same version. A newer addon with an older companion (a CurseForge update before the companion's), or the reverse until WoW restarts, still reads threads, sends messages and opens a thread it started. What needs both updated: a refused message or answer coming back to the box with its reason, recovery after WoW crashes, and switching to timed updates when a long game session runs out of signal files.
+
 Sign-ins are kept per T3: switching between the T3 on this PC and one on another machine doesn't sign you out of either. They are saved in `%APPDATA%\t3wow\config.json`, encrypted for your Windows user, so copying that folder to another PC or Windows user means signing in again. A sign-in only ever goes to the T3 that issued it.
 
 **Updates.** The companion looks for a newer GitHub release when it starts and every 6 hours. When there is one, a notification pops up from the tray and the menu offers **Update to x.y.z**, which downloads the new `t3wow.exe` and installs it only if the release's SHA-256 file carries a valid signature made with the project's release key (the companion has the public half built in) and the download matches that SHA-256. A release that is unsigned, signed with another key or altered is refused. It then swaps the exe in and restarts. The addon is part of the exe, so it updates along with it (restart WoW afterwards). An addon installed from CurseForge updates there; the companion never replaces a newer addon with an older one. Releases are published to the public [t3wow-releases](https://github.com/MatiasCiccone/t3wow-releases) repository while this one stays private.
@@ -74,7 +76,7 @@ The tray menu's **Commands from the game** sets how far the companion follows co
 - **No new threads**: everything but starting threads.
 - **Read-only**: nothing that changes T3. Messages, starts, answers, **Stop**, **Settle** and **Unsettle** are refused. Reading threads, opening one, loading earlier messages, **Refresh**, `/t3 probe` and **Open in T3** still work.
 
-The setting applies at once and is saved in `config.json` (`gameCommands`). A refused command never reaches T3: the companion logs it, and the window gets it back as a failure with the reason, so even an older addon puts your text back. Approvals can't be given from the game at any level.
+The setting applies at once and is saved in `config.json` (`gameCommands`). A refused command never reaches T3: the companion logs it, and the window gets it back as a failure with the reason and puts your text back (an addon older than the companion only shows the companion's note). Approvals can't be given from the game at any level.
 
 The addon keeps its command queue and client key out of its saved variables while the game runs, so another addon can't just add commands to them; it can still draw a strip of its own, which only this setting limits. Install addons you trust, pick **No new threads** or **Read-only**, or grant T3 less access when you sign in.
 
