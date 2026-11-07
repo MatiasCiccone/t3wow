@@ -30,6 +30,7 @@ pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("Link.lua", include_bytes!("../../addon/T3WoW/Link.lua")),
     ("T3WoW.lua", include_bytes!("../../addon/T3WoW/T3WoW.lua")),
     ("Media/logo.tga", include_bytes!("../../addon/T3WoW/Media/logo.tga")),
+    ("LICENSE", include_bytes!("../../addon/T3WoW/LICENSE")),
 ];
 
 pub fn parse_version(toc: &str) -> Option<String> {
