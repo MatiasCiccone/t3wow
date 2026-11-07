@@ -124,8 +124,18 @@ impl Slots {
 
     /// Writes the shipped addon files; the toc gets this game's interface version.
     pub fn write_addon(&self) -> io::Result<()> {
+        self.write_addon_files(false).map(|_| ())
+    }
+
+    /// Writes the shipped addon files, or with `only_missing` just the ones not there.
+    /// Returns the names written.
+    fn write_addon_files(&self, only_missing: bool) -> io::Result<Vec<&'static str>> {
+        let mut written = Vec::new();
         for (name, data) in ADDON_FILES {
             let path = self.addon_dir.join(name);
+            if only_missing && path.exists() {
+                continue;
+            }
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -139,8 +149,9 @@ impl Slots {
             } else {
                 fs::write(path, data)?;
             }
+            written.push(*name);
         }
-        Ok(())
+        Ok(written)
     }
 
     /// Creates the slot addons, blank signal files and probe files. With `reset`, existing
@@ -208,24 +219,34 @@ impl Slots {
     }
 
     /// For every companion start: puts back whatever an addon manager or a cleanup removed,
-    /// and installs or updates the addon when this companion ships a newer one. Files the
-    /// game didn't have when it started only show up after a full restart of WoW.
+    /// and installs or updates the addon when this companion ships a newer one. A newer
+    /// addon (from CurseForge, say) is left as it is: never mixed with older files. Files
+    /// the game didn't have when it started only show up after a full restart of WoW.
     pub fn repair(&self) -> io::Result<Repair> {
         self.need_font()?;
         fs::create_dir_all(&self.addons_dir)?;
         let shipped = shipped_version();
+        let mut created = 0;
         let addon = match self.installed_version() {
             None => {
                 self.write_addon()?;
                 Some(format!("installed {shipped}"))
             }
-            Some(installed) if compare_versions(&shipped, &installed).is_gt() => {
-                self.write_addon()?;
-                Some(format!("updated {installed} to {shipped}"))
-            }
-            Some(_) => None,
+            Some(installed) => match compare_versions(&shipped, &installed) {
+                std::cmp::Ordering::Greater => {
+                    self.write_addon()?;
+                    Some(format!("updated {installed} to {shipped}"))
+                }
+                std::cmp::Ordering::Equal => {
+                    let restored = self.write_addon_files(true)?;
+                    created += restored.len() as u32;
+                    (!restored.is_empty()).then(|| format!("{shipped} repaired (put back {})", restored.join(", ")))
+                }
+                std::cmp::Ordering::Less => None,
+            },
         };
-        Ok(Repair { addon, created: self.write_support(false)? })
+        created += self.write_support(false)?;
+        Ok(Repair { addon, created })
     }
 
     pub fn uninstall(&self) -> io::Result<()> {
@@ -331,6 +352,35 @@ mod tests {
         fs::write(&toc, old).unwrap();
         assert!(slots.repair().unwrap().addon.unwrap().starts_with("updated 0.0.1 to "));
         assert!(fs::read_to_string(&toc).unwrap().contains("## Interface: 16001"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_puts_back_deleted_addon_files_but_leaves_a_newer_addon_alone() {
+        let dir = temp_dir("repair-files");
+        let slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+
+        // A cleanup removed some of the addon's own files; the toc survived.
+        fs::remove_file(dir.join("T3WoW/UI.lua")).unwrap();
+        fs::remove_file(dir.join("T3WoW/Media/logo.tga")).unwrap();
+        let repair = slots.repair().unwrap();
+        assert_eq!(repair.addon, Some(format!("{} repaired (put back UI.lua, Media/logo.tga)", shipped_version())));
+        assert_eq!(repair.created, 2);
+        let shipped = |name: &str| ADDON_FILES.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert_eq!(fs::read(dir.join("T3WoW/UI.lua")).unwrap(), shipped("UI.lua"));
+        assert_eq!(fs::read(dir.join("T3WoW/Media/logo.tga")).unwrap(), shipped("Media/logo.tga"));
+        assert_eq!(slots.repair().unwrap().addon, None);
+
+        // A newer addon missing a file isn't patched with this companion's older one.
+        let toc = dir.join("T3WoW/T3WoW.toc");
+        let newer = fs::read_to_string(&toc).unwrap().replace(&format!("## Version: {}", shipped_version()), "## Version: 99.0.0");
+        fs::write(&toc, &newer).unwrap();
+        fs::remove_file(dir.join("T3WoW/Link.lua")).unwrap();
+        let repair = slots.repair().unwrap();
+        assert_eq!((repair.addon, repair.created), (None, 0));
+        assert!(!dir.join("T3WoW/Link.lua").exists());
+        assert_eq!(fs::read_to_string(&toc).unwrap(), newer);
         let _ = fs::remove_dir_all(&dir);
     }
 
