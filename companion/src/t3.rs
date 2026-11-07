@@ -128,14 +128,18 @@ pub struct SignIn {
     pub expires_at: Option<f64>,
 }
 
+/// How long one request (or one MCP tool call, its session setup and retry included)
+/// gets: the bridge reads T3 on the worker thread, one request between the game's
+/// commands, the tray's controls and the screen capture, so a hung T3 mustn't hold
+/// them up for longer.
+const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// HTTP statuses come back as responses (not errors), so callers read error bodies too.
-/// A call gets 15 s: the bridge reads T3 on one thread, and a hung T3 mustn't hold up the
-/// game's commands, Stop or a sign-out for longer.
 fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_global(Some(Duration::from_secs(15)))
+            .timeout_global(Some(CALL_TIMEOUT))
             .http_status_as_error(false)
             .build(),
     )
@@ -384,12 +388,20 @@ impl McpClient {
         *self.ready.lock().unwrap() = false;
     }
 
-    fn post(&self, body: &Value, expect_reply: bool) -> Result<Option<Value>, PostError> {
+    /// One POST, cut short at `deadline`.
+    fn post(&self, body: &Value, expect_reply: bool, deadline: Instant) -> Result<Option<Value>, PostError> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(PostError::Fail(T3Error::Other("T3 unreachable: no answer in time".into())));
+        }
         let token = self.token.lock().unwrap().clone();
         let session = self.session.lock().unwrap().clone();
         let mut request = self
             .http
             .post(&self.endpoint)
+            .config()
+            .timeout_global(Some(left))
+            .build()
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream");
@@ -438,7 +450,7 @@ impl McpClient {
         Ok(Some(message["result"].clone()))
     }
 
-    fn ensure_ready(&self) -> Result<(), T3Error> {
+    fn ensure_ready(&self, deadline: Instant) -> Result<(), T3Error> {
         let mut ready = self.ready.lock().unwrap();
         if *ready {
             return Ok(());
@@ -451,7 +463,7 @@ impl McpClient {
             "params": { "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "t3wow", "version": env!("CARGO_PKG_VERSION") } },
         });
         for (body, reply) in [(init, true), (json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), false)] {
-            match self.post(&body, reply) {
+            match self.post(&body, reply, deadline) {
                 Ok(_) => {}
                 Err(PostError::Fail(e)) => return Err(e),
                 Err(PostError::SessionExpired) => return Err(T3Error::Other("MCP session refused".into())),
@@ -463,16 +475,19 @@ impl McpClient {
 }
 
 impl T3 for McpClient {
+    /// One tool call: setting up the MCP session and a retry after it expired all share
+    /// one CALL_TIMEOUT, so a call never takes longer than one request may.
     fn call(&self, name: &str, args: Value) -> Result<Value, T3Error> {
+        let deadline = Instant::now() + CALL_TIMEOUT;
         for attempt in 0..2 {
-            self.ensure_ready()?;
+            self.ensure_ready(deadline)?;
             let body = json!({
                 "jsonrpc": "2.0",
                 "id": self.next_id.fetch_add(1, Ordering::SeqCst),
                 "method": "tools/call",
                 "params": { "name": name, "arguments": args },
             });
-            match self.post(&body, true) {
+            match self.post(&body, true, deadline) {
                 Ok(result) => {
                     let result = result.unwrap_or(Value::Null);
                     let text = result["content"]
