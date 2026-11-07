@@ -29,6 +29,10 @@ local SYNC_SECONDS = 1.5
 local RECHECK_SECONDS, RECHECK_QUIET_SECONDS, QUIET_AFTER = 0.75, 2.5, 60
 -- A command waiting this long also gets a slot loaded directly, in case a signal was missed.
 local NUDGE_AFTER = 6
+-- Seconds between loads for a waiting command while nothing answers, by how many loads
+-- in a row went unanswered: as a nudge in signal mode, and on the timer. Once the
+-- companion counts as not answering (ACK_PATIENCE), nudges stop and the timer slows down.
+local NUDGE_BACKOFF, QUEUE_BACKOFF, STALLED_SECONDS = { 5, 10, 20, 60 }, { 3, 3, 10, 20, 60 }, 60
 
 local floor, format = math.floor, string.format
 local db
@@ -45,6 +49,7 @@ local state = {
     inboxAt = nil,
     loadError = nil,
     pollAt = 0,
+    unanswered = 0, -- slot loads in a row that brought no update from the companion
     queueSince = nil,
     syncUntil = 0,
     signalCheck = nil,
@@ -191,6 +196,8 @@ function Link.Send(command)
     trace(format("send #%d %s", command.s, tostring(command.t)))
     state.lastSentAt = GetTime()
     db.queue[#db.queue + 1] = command
+    -- On the timer, the answer comes with the next load: bring it forward.
+    if not signalling() and not Link.Stalled() then state.pollAt = math.min(state.pollAt, GetTime() + QUEUE_BACKOFF[1]) end
     Link.Render()
 end
 
@@ -232,6 +239,8 @@ local function receive(inbox)
     end
     state.inbox = inbox
     state.inboxAt = GetTime()
+    -- An answer from the companion: loads on the timer can go back to their quick pace.
+    if inbox.u == nil or inbox.u == state.uiSession then state.unanswered = 0 end
     for _, event in ipairs(inbox.events or {}) do
         if event.n > (db.lastEvent or 0) then
             db.lastEvent = event.n
@@ -275,6 +284,7 @@ local function loadNextSlot(via)
     state.nextSlot = state.nextSlot + 1
     trace(format("load %s via %s", name, via or "?"))
     noteBudget()
+    state.unanswered = state.unanswered + 1
     _G.T3WoW_Inbox = nil
     local loaded, reason = LoadAddOnFn(name)
     local inbox = _G.T3WoW_Inbox
@@ -384,14 +394,28 @@ poller:SetScript("OnUpdate", function(_, delta)
             state.lastCheckAt = now
             state.checksOfWatched = (state.checksOfWatched or 0) + 1
         end
-        if not (state.queueSince and now - state.queueSince > NUDGE_AFTER) then return end
+        -- A companion that isn't answering at all won't answer a nudge either.
+        if not (state.queueSince and now - state.queueSince > NUDGE_AFTER) or Link.Stalled() then return end
     end
     -- No signal yet (or none on this client, or a command waits too long): load slots on
-    -- a schedule, and tell the companion where we are after each one.
+    -- a schedule, and tell the companion where we are after each one. Loads nothing
+    -- answers come further and further apart, so a companion that isn't running doesn't
+    -- use up the session's slots.
     if now < state.pollAt then return end
-    local interval = (signalling() and 5) or (#db.queue > 0 and 3) or (ns.UI.IsShown() and 10) or 60
-    state.pollAt = now + interval
-    loadNextSlot(signalling() and "the fallback for a waiting command" or "the timer")
+    local nudge = signalling()
+    loadNextSlot(nudge and "the fallback for a waiting command" or "the timer")
+    local function backoff(steps) return steps[math.max(1, math.min(state.unanswered, #steps))] end
+    local interval
+    if nudge then
+        interval = backoff(NUDGE_BACKOFF)
+    elseif #db.queue > 0 and not Link.Stalled() then
+        interval = backoff(QUEUE_BACKOFF)
+    elseif #db.queue > 0 then
+        interval = STALLED_SECONDS
+    else
+        interval = ns.UI.IsShown() and 10 or 60
+    end
+    state.pollAt = GetTime() + interval
     state.syncUntil = GetTime() + SYNC_SECONDS
     Link.Render()
 end)
