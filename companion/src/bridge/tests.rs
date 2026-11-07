@@ -210,6 +210,7 @@ struct Rig {
     t3: Arc<FakeT3>,
     written: Arc<Mutex<Written>>,
     clock: Arc<Mutex<i64>>,
+    opened: Arc<Mutex<Vec<String>>>,
 }
 
 impl Rig {
@@ -220,8 +221,12 @@ impl Rig {
         *t3.clock.lock().unwrap() = Some(Arc::clone(&clock));
         let now = Arc::clone(&clock);
         let mut bridge = Bridge::new(t3.clone(), Box::new(FakeSlots(Arc::clone(&written))), None, Box::new(|_| {}), Box::new(move || *now.lock().unwrap()));
+        // Links are recorded, never opened: a test must not bring the real T3 to the front.
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&opened);
+        bridge.opener = Box::new(move |link| sink.lock().unwrap().push(link.to_string()));
         bridge.on_capture(CaptureMessage::Wow(Some("123@1".into())));
-        Rig { bridge, t3, written, clock }
+        Rig { bridge, t3, written, clock, opened }
     }
 
     fn advance(&self, ms: i64) {
@@ -235,6 +240,11 @@ impl Rig {
     fn frame(&mut self, value: Value) {
         let cells = crate::codec::encode_frame(1, &value.to_string());
         self.bridge.on_capture(CaptureMessage::Strip(cells));
+    }
+
+    /// The links the bridge would have opened, in order.
+    fn opened(&self) -> Vec<String> {
+        self.opened.lock().unwrap().clone()
     }
 
     fn raised(&self) -> Vec<u32> {
@@ -519,9 +529,6 @@ fn a_new_thread_that_already_asks_notifies_but_old_ones_dont_at_start() {
 #[test]
 fn an_approval_shows_as_approve_in_t3_and_the_game_can_open_t3_on_it() {
     let mut rig = Rig::new(8_000_000);
-    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
-    let sink = Arc::clone(&opened);
-    rig.bridge.opener = Box::new(move |link| sink.lock().unwrap().push(link.to_string()));
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
     rig.bridge.tick();
 
@@ -541,7 +548,7 @@ fn an_approval_shows_as_approve_in_t3_and_the_game_can_open_t3_on_it() {
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "t3", "e": "local", "id": "mcp:t1" }] }));
     rig.advance(2_000);
     rig.bridge.tick();
-    assert_eq!(*opened.lock().unwrap(), vec!["t3code://threads/local/mcp%3At1".to_string()]);
+    assert_eq!(rig.opened(), vec!["t3code://threads/local/mcp%3At1".to_string()]);
 }
 
 #[test]
@@ -1196,6 +1203,7 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     assert!(blocked(&rig, &sent).is_empty());
     assert_eq!(count(&rig), 5, "send, new, settle, unsettle and stop");
     assert_eq!(answers(&rig), 1);
+    assert_eq!(rig.opened(), vec!["t3code://threads/local/t1"], "t3 brings T3 to the front");
     assert!(rig.bridge.snapshot()["trust"].is_null(), "Full isn't named");
 
     // No new threads: only the start is refused; it comes back as a failure, and is acked.
@@ -1205,6 +1213,7 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     assert_eq!(blocked(&rig, &sent), vec!["new"]);
     assert!(rig.t3.calls_to("t3_thread_launch").is_empty());
     assert_eq!(count(&rig), 4);
+    assert_eq!(rig.opened(), vec!["t3code://threads/local/t1"], "t3 brings T3 to the front");
     assert_eq!(answers(&rig), 1);
     assert_eq!(rig.bridge.snapshot()["ack"], 14);
     assert_eq!(rig.bridge.snapshot()["trust"], "nonew");
@@ -1213,14 +1222,11 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     // Read-only: nothing that changes T3 gets through; looking still works.
     let mut rig = Rig::new(29_000_000);
     rig.bridge.set_trust(Trust::ReadOnly);
-    let opened = std::sync::Arc::new(Mutex::new(Vec::new()));
-    let log = std::sync::Arc::clone(&opened);
-    rig.bridge.opener = Box::new(move |link| log.lock().unwrap().push(link.to_string()));
     let sent = every_kind(&mut rig, "ui1");
     assert_eq!(blocked(&rig, &sent), vec!["send", "new", "settle", "unsettle", "stop", "answer"]);
     assert_eq!(count(&rig), 0);
     assert_eq!(answers(&rig), 0);
-    assert_eq!(opened.lock().unwrap().len(), 1, "t3 still brings T3 to the front");
+    assert_eq!(rig.opened(), vec!["t3code://threads/local/t1"], "t3 still brings T3 to the front");
     assert_eq!(rig.bridge.snapshot()["view"]["id"], "t1", "open still opens");
     assert!(rig.bridge.window_open, "ui still says the window is open");
     assert_eq!(rig.bridge.snapshot()["ack"], 14);

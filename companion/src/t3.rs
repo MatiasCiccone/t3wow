@@ -108,6 +108,14 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     })
 }
 
+/// Opens a link or page with Windows. Test builds never launch anything: a test that reaches
+/// this (instead of a stub) fails, rather than bringing a real T3 or browser to the front.
+#[cfg(test)]
+pub fn open_browser(url: &str) {
+    panic!("a test tried to open {url} for real; stub the opener instead");
+}
+
+#[cfg(not(test))]
 pub fn open_browser(url: &str) {
     #[cfg(windows)]
     {
