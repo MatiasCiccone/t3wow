@@ -12,8 +12,10 @@ use base64::Engine;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-use std::time::Duration;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Releases live in their own public repository while the source stays private.
 const REPO: &str = "MatiasCiccone/t3wow-releases";
@@ -155,23 +157,76 @@ pub fn install(release: &Release) -> Result<(), String> {
     let exe_bytes = download(&release.exe_url, MAX_EXE_BYTES)?;
     check_exe(&exe_bytes, &expected)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let new = exe.with_extension("exe.new");
-    let old = exe.with_extension("exe.old");
-    std::fs::write(&new, &exe_bytes).map_err(|e| format!("can't write the update next to the exe: {e}"))?;
-    let _ = std::fs::remove_file(&old);
-    std::fs::rename(&exe, &old).map_err(|e| format!("can't move the running exe aside: {e}"))?;
-    if let Err(error) = std::fs::rename(&new, &exe) {
-        let _ = std::fs::rename(&old, &exe);
-        return Err(format!("can't put the update in place: {error}"));
+    swap_in(&exe, &exe_bytes, |from, to| fs::rename(from, to))
+}
+
+/// `<exe name>.<suffix>`, next to the exe.
+fn sibling(exe: &Path, suffix: &str) -> PathBuf {
+    let name = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    exe.with_file_name(format!("{name}.{suffix}"))
+}
+
+/// The update lock: held by whoever is swapping exes (the tray, or `t3wow.exe update`).
+fn try_lock(exe: &Path) -> Result<File, String> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(sibling(exe, "update-lock"))
+        .map_err(|e| format!("can't create the update lock next to the exe: {e}"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err("another update is already running".into()),
+        Err(TryLockError::Error(e)) => Err(format!("can't take the update lock: {e}")),
+    }
+}
+
+/// Puts `bytes` in place of `exe`, one update at a time. The new exe is staged under a name
+/// of its own, and the previous exe is kept until the new one is in place, so a failed swap
+/// puts it back. After a swap, the previous exe stays (a running exe can't be deleted) until
+/// `clean_up` on the next start. `rename` is fs::rename, or one that fails, in tests.
+fn swap_in(exe: &Path, bytes: &[u8], rename: impl Fn(&Path, &Path) -> io::Result<()>) -> Result<(), String> {
+    let _lock = try_lock(exe)?;
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tag = format!("{}-{nanos}", std::process::id());
+    let new = sibling(exe, &format!("new-{tag}"));
+    let old = sibling(exe, &format!("old-{tag}"));
+    if let Err(error) = fs::write(&new, bytes) {
+        let _ = fs::remove_file(&new);
+        return Err(format!("can't write the update next to the exe: {error}"));
+    }
+    if let Err(error) = rename(exe, &old) {
+        let _ = fs::remove_file(&new);
+        return Err(format!("can't move the running exe aside: {error}"));
+    }
+    if let Err(error) = rename(&new, exe) {
+        let restored = rename(&old, exe);
+        let _ = fs::remove_file(&new);
+        return Err(match restored {
+            Ok(()) => format!("can't put the update in place: {error}"),
+            Err(again) => format!("can't put the update in place ({error}) nor the old exe back ({again}); it is at {}", old.display()),
+        });
     }
     Ok(())
 }
 
-/// Removes the previous exe an update left behind.
+/// Removes the previous exes and unfinished downloads earlier updates left behind.
 pub fn clean_up() {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(exe.with_extension("exe.old"));
-        let _ = std::fs::remove_file(exe.with_extension("exe.new"));
+        clean_up_at(&exe);
+    }
+}
+
+/// Skipped while an update runs: its files aren't leftovers yet.
+fn clean_up_at(exe: &Path) {
+    let (Ok(_lock), Some(dir), Some(name)) = (try_lock(exe), exe.parent(), exe.file_name()) else { return };
+    let name = name.to_string_lossy();
+    let (old, new) = (format!("{name}.old"), format!("{name}.new"));
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if file.starts_with(&old) || file.starts_with(&new) {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -283,6 +338,70 @@ mod tests {
         let sig = fixture["signature"].as_str().unwrap().as_bytes();
         let expected = signed_checksum(sha, sig, &public).unwrap();
         assert!(check_exe(&exe(), &expected).is_ok());
+    }
+
+    fn exe_dir(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("t3wow-swap-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("t3wow.exe");
+        fs::write(&exe, b"old exe").unwrap();
+        (dir, exe)
+    }
+
+    /// The files next to the exe, other than the exe and the lock.
+    fn leftovers(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.retain(|n| n != "t3wow.exe" && n != "t3wow.exe.update-lock");
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_swap_puts_the_new_exe_in_place_and_keeps_the_old_one_until_the_next_start() {
+        let (dir, exe) = exe_dir("ok");
+        swap_in(&exe, b"new exe", |from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"new exe");
+        let left = leftovers(&dir);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].starts_with("t3wow.exe.old-"));
+        assert_eq!(fs::read(dir.join(&left[0])).unwrap(), b"old exe");
+        fs::write(dir.join("t3wow.exe.new"), b"from 0.4.1").unwrap();
+        clean_up_at(&exe);
+        assert!(leftovers(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_swap_puts_the_old_exe_back() {
+        let (dir, exe) = exe_dir("rollback");
+        let error = swap_in(&exe, b"new exe", |from, to| {
+            if to == exe && from.to_string_lossy().contains(".new-") {
+                return Err(io::Error::other("in use"));
+            }
+            fs::rename(from, to)
+        })
+        .unwrap_err();
+        assert_eq!(error, "can't put the update in place: in use");
+        assert_eq!(fs::read(&exe).unwrap(), b"old exe");
+        assert!(leftovers(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_update_at_a_time() {
+        let (dir, exe) = exe_dir("lock");
+        let held = try_lock(&exe).unwrap();
+        assert_eq!(swap_in(&exe, b"new exe", |from, to| fs::rename(from, to)), Err("another update is already running".into()));
+        assert_eq!(fs::read(&exe).unwrap(), b"old exe");
+        // Clean-up leaves a running update's files alone.
+        fs::write(dir.join("t3wow.exe.new-1-2"), b"downloading").unwrap();
+        clean_up_at(&exe);
+        assert_eq!(leftovers(&dir), ["t3wow.exe.new-1-2"]);
+        drop(held);
+        swap_in(&exe, b"new exe", |from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"new exe");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Fails while RELEASE_PUBLIC_KEY is the placeholder. Ignored so everyday tests pass
