@@ -196,15 +196,16 @@ impl Config {
             let key = self.server_key();
             if self.servers.get(&key).is_none_or(|s| s.token.is_none()) {
                 let server = self.servers.entry(key).or_default();
-                server.token = Some(protect(&token));
+                // Already on disk in plain text: if it can't be encrypted now, it stays as it
+                // was rather than being lost (the loop below tries again on every load).
+                server.token = Some(protect(&token).unwrap_or(token));
                 server.token_expires_at = expires_at;
             }
             changed = true;
         }
         for server in self.servers.values_mut() {
             if let Some(stored) = server.token.as_deref().filter(|s| !s.starts_with(PROTECTED)) {
-                let protected = protect(stored);
-                if protected != stored {
+                if let Some(protected) = protect(stored).filter(|p| p != stored) {
                     server.token = Some(protected);
                     changed = true;
                 }
@@ -273,10 +274,14 @@ impl Config {
         server.token.as_deref().filter(|_| !expired).and_then(unprotect)
     }
 
-    pub fn set_sign_in(&mut self, key: &str, token: &str, expires_at: Option<f64>) {
+    /// Saves a new sign-in for the server `key`. Refuses (and saves nothing) when the token
+    /// can't be encrypted for this Windows user, rather than writing it in plain text.
+    pub fn set_sign_in(&mut self, key: &str, token: &str, expires_at: Option<f64>) -> Result<(), String> {
+        let stored = protect(token).ok_or("Signed in, but Windows couldn't encrypt the sign-in for this user, so it wasn't saved. Try again.")?;
         let server = self.servers.entry(key.to_string()).or_default();
-        server.token = Some(protect(token));
+        server.token = Some(stored);
         server.token_expires_at = expires_at;
+        Ok(())
     }
 
     /// Forgets the current server's sign-in (its client registration stays).
@@ -312,14 +317,13 @@ fn warn(message: &str) {
 
 const PROTECTED: &str = "dpapi:";
 
-/// A token as stored. On Windows, encrypted for this Windows user (DPAPI); if that fails,
-/// or elsewhere, as it is.
-fn protect(token: &str) -> String {
+/// A token as stored: on Windows, encrypted for this Windows user (DPAPI), or None when
+/// that fails, so a token is never written there in plain text; elsewhere, as it is.
+fn protect(token: &str) -> Option<String> {
     #[cfg(windows)]
-    if let Some(blob) = dpapi::protect(token.as_bytes()) {
-        return format!("{PROTECTED}{}", STANDARD.encode(blob));
-    }
-    token.to_string()
+    return dpapi::protect(token.as_bytes()).map(|blob| format!("{PROTECTED}{}", STANDARD.encode(blob)));
+    #[cfg(not(windows))]
+    Some(token.to_string())
 }
 
 /// A stored token back as text; none if it can't be decrypted (another user or PC).
@@ -392,7 +396,7 @@ mod tests {
 
     fn signed_in(key: &str, token: &str, expires_at: Option<f64>) -> Config {
         let mut config = Config::default();
-        config.set_sign_in(key, token, expires_at);
+        config.set_sign_in(key, token, expires_at).unwrap();
         config
     }
 
@@ -420,7 +424,7 @@ mod tests {
         config.origin = Some("HTTP://B:2/".into());
         assert_eq!(config.server_key(), "http://b:2");
         assert_eq!(config.saved_token(&config.server_key()), None);
-        config.set_sign_in("http://b:2", "token-b", None);
+        config.set_sign_in("http://b:2", "token-b", None).unwrap();
         config.origin = None;
         assert_eq!(config.server_key(), LOCAL);
         assert_eq!(config.saved_token(LOCAL), None);
@@ -465,7 +469,7 @@ mod tests {
     fn client_ids_are_kept_per_server_through_sign_out() {
         let mut config = Config { origin: Some("http://a:1".into()), ..Config::default() };
         config.set_client_id("http://a:1", Some("client-a".into()));
-        config.set_sign_in("http://a:1", "t", None);
+        config.set_sign_in("http://a:1", "t", None).unwrap();
         config.sign_out();
         assert_eq!(config.client_id("http://a:1").as_deref(), Some("client-a"));
         assert_eq!(config.client_id(LOCAL), None);
@@ -496,7 +500,7 @@ mod tests {
 
     #[test]
     fn stored_tokens_read_back() {
-        let stored = protect("secret");
+        let stored = protect("secret").unwrap();
         #[cfg(windows)]
         assert!(stored.starts_with(PROTECTED));
         assert_eq!(unprotect(&stored).as_deref(), Some("secret"));

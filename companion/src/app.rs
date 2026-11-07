@@ -137,10 +137,16 @@ impl App {
                     // Saved for the server that issued it, even if `login --origin` moved the
                     // companion elsewhere meanwhile: the worker pairs tokens with servers.
                     Ok(signed) => {
-                        Config::update(|c| c.set_sign_in(&target.key, &signed.token, signed.expires_at));
-                        let scope = if signed.scope.is_empty() { "no scope reported" } else { &signed.scope };
-                        log::line(&format!("Signed in to {} ({scope}).", target.origin));
-                        app.send(Control::SignedIn);
+                        let mut saved = Ok(());
+                        Config::update(|c| saved = c.set_sign_in(&target.key, &signed.token, signed.expires_at));
+                        match saved {
+                            Ok(()) => {
+                                let scope = if signed.scope.is_empty() { "no scope reported" } else { &signed.scope };
+                                log::line(&format!("Signed in to {} ({scope}).", target.origin));
+                                app.send(Control::SignedIn);
+                            }
+                            Err(error) => log::line(&error),
+                        }
                     }
                     Err(_) if cancelled() => log::line("Started the sign-in over."),
                     Err(error) => log::line(&error),
