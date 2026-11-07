@@ -576,7 +576,7 @@ return table.concat({
   lines(rows, "lrc", 80),
   lines(rows, "lrc", 20),
   lines({ { "café", "b" }, { "x", "y" } }, nil, 80),
-  lines({ { "abcdef", "ghijkl" } }, nil, 4),
+  lines({ { "abcdef", "ghijkl", "mnop" }, { "a", "b", "c" } }, nil, 10),
 }, "\\n~\\n")
 `);
   const [wide, narrow, accents, floor] = out.split("\n~\n");
@@ -596,8 +596,9 @@ return table.concat({
   for (const line of narrow.split("\n")) assert.ok([...line].length <= 20, line);
   // Characters are counted, not bytes.
   assert.deepEqual(accents.split("\n"), ["café │ b", "─────┼──", "x    │ y"]);
-  // A column keeps 3 characters, even when the table then overflows.
-  assert.deepEqual(floor.split("\n"), ["ab… │ gh…", "────┼────"]);
+  // Columns keep 3 characters; past that, the last ones give way to a "…" column.
+  assert.deepEqual(floor.split("\n"), ["ab… │ …", "────┼──", "a   │ …"]);
+  for (const line of floor.split("\n")) assert.ok([...line].length <= 10, line);
 });
 
 test("code, inline code and tables are drawn in the monospace font, and copying still takes the text", () => {

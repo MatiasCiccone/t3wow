@@ -20,6 +20,10 @@
     "output": "|cffffd100Title|r\n\n|cffc8c8a0|| table |||r\ntrailing"
   },
   {
+    "input": "`__init__` and __under__ `**x**`",
+    "output": "|cffc8c8a0__init__|r and under |cffc8c8a0**x**|r"
+  },
+  {
     "input": "aaaaaaaaaa|bbbbb",
     "output": "aaaaaaaaaa||bbbbb"
   }

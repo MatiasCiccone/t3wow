@@ -87,6 +87,7 @@ struct Patterns {
     gaps: Regex,
     delimiter: Regex,
     br: Regex,
+    span: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -103,6 +104,7 @@ fn patterns() -> &'static Patterns {
         gaps: Regex::new(r"\n{3,}").unwrap(),
         delimiter: Regex::new(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$").unwrap(),
         br: Regex::new(r"(?i)<br\s*/?>").unwrap(),
+        span: Regex::new(r"\x03(\d+)\x03").unwrap(),
     })
 }
 
@@ -110,16 +112,32 @@ fn patterns() -> &'static Patterns {
 /// simplified, a heading in gold. Inline code goes through `code` ("$1" is the code).
 fn prose_line(line: &str, code: &str) -> String {
     let p = patterns();
-    let l = p.image.replace_all(line, "[$1]");
-    let l = p.link.replace_all(&l, "$1");
-    let l = p.bold.replace_all(&l, "$1");
-    let l = p.under.replace_all(&l, "$1");
-    let l = p.code.replace_all(&l, code);
+    let l = inline(line, code);
     let l = p.bullet.replacen(&l, 1, "$1• ").into_owned();
     match p.heading.captures(&l) {
         Some(heading) => color_runs(&heading[1], HEAD),
         None => l,
     }
+}
+
+/// Links and emphasis simplified, inline code through `code` ("$1" is the code). Code is
+/// set aside first (as \u{3}n\u{3}), so `__init__` or a link in it stays as written.
+fn inline(line: &str, code: &str) -> String {
+    let p = patterns();
+    let mut spans: Vec<String> = Vec::new();
+    let l = p.code.replace_all(line, |c: &regex::Captures| {
+        spans.push(c[1].to_string());
+        format!("\u{3}{}\u{3}", spans.len() - 1)
+    });
+    let l = p.image.replace_all(&l, "[$1]");
+    let l = p.link.replace_all(&l, "$1");
+    let l = p.bold.replace_all(&l, "$1");
+    let l = p.under.replace_all(&l, "$1");
+    let l = p.span.replace_all(&l, |c: &regex::Captures| match c[1].parse::<usize>().ok().and_then(|n| spans.get(n)) {
+        Some(span) => code.replace("$1", span),
+        None => c[0].to_string(),
+    });
+    l.into_owned()
 }
 
 /// Text in a color, each run between inline code marks colored on its own, so the addon can
@@ -194,12 +212,7 @@ fn table_cells(line: &str) -> Vec<String> {
 /// A cell as plain text, not game markup: the addon pads it, then escapes it.
 fn cell_text(cell: &str) -> String {
     let p = patterns();
-    let c = p.br.replace_all(cell, " ");
-    let c = p.image.replace_all(&c, "[$1]");
-    let c = p.link.replace_all(&c, "$1");
-    let c = p.bold.replace_all(&c, "$1");
-    let c = p.under.replace_all(&c, "$1");
-    p.code.replace_all(&c, "$1").replace('\t', " ").trim().to_string()
+    inline(&p.br.replace_all(cell, " "), "$1").replace('\t', " ").trim().to_string()
 }
 
 /// The table that starts at `lines[at]`, if one does (a header row, then a delimiter row
