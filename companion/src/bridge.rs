@@ -173,7 +173,11 @@ pub struct Bridge {
     launchers: HashMap<String, Option<String>>,
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
-    commands: VecDeque<(String, Value)>,
+    /// Commands waiting to run: client key, the UI session they came in, the command.
+    commands: VecDeque<(String, String, Value)>,
+    /// Per client key, the highest command queued to run but not yet run (not saved: a
+    /// command only counts as done once it ran).
+    queued: HashMap<String, u64>,
     last_publish_at: i64,
     last_published_hash: Option<u64>,
     last_urgent_hash: Option<u64>,
@@ -289,6 +293,7 @@ impl Bridge {
             listed_envs: HashSet::new(),
             launchers: HashMap::new(),
             commands: VecDeque::new(),
+            queued: HashMap::new(),
             last_publish_at: 0,
             last_published_hash: None,
             last_urgent_hash: None,
@@ -412,6 +417,13 @@ impl Bridge {
             self.last_published_hash = None;
             self.last_urgent_hash = None;
             self.link.polling = None;
+            // The game's command numbers live in its saved variables, which a crash rolls
+            // back: start counting from what this session sends. A command run twice this
+            // way reaches T3 with the same clientRequestId, which T3 ignores.
+            if let Some(lowest) = frame["q"].as_array().into_iter().flatten().filter_map(|c| c["s"].as_u64()).min() {
+                self.link.acked.insert(k.to_string(), lowest.saturating_sub(1));
+            }
+            self.queued.remove(k);
             self.log(&format!("Game UI connected (session {u}, next slot {})", self.link.slot));
         } else if l > 0 {
             // The game draws a frame with its current slot count, so it is the authority on
@@ -426,15 +438,15 @@ impl Bridge {
             }
             self.link.polling = Some(polling);
         }
-        let acked = self.link.acked.get(k).copied().unwrap_or(0);
+        let seen = self.link.acked.get(k).copied().unwrap_or(0).max(self.queued.get(k).copied().unwrap_or(0));
         for command in frame["q"].as_array().into_iter().flatten() {
             let s = command["s"].as_u64().unwrap_or(0);
-            if s <= acked {
+            if s <= seen {
                 continue;
             }
-            let entry = self.link.acked.entry(k.to_string()).or_insert(0);
+            let entry = self.queued.entry(k.to_string()).or_insert(0);
             *entry = (*entry).max(s);
-            self.commands.push_back((k.to_string(), command.clone()));
+            self.commands.push_back((k.to_string(), u.to_string(), command.clone()));
         }
         self.save_state();
     }
@@ -454,7 +466,9 @@ impl Bridge {
         let id = str_of(&command["id"]).to_string();
         let message = str_of(&command["m"]).to_string();
         let kind = str_of(&command["t"]).to_string();
-        let request_id = format!("t3wow:{client_key}:{}", command["s"]);
+        // The command's number plus a hash of it: the same command sent again (after a
+        // /reload) is ignored by T3, while a new one that reuses a number after a crash isn't.
+        let request_id = format!("t3wow:{client_key}:{}:{:08x}", command["s"], hash_of(&command) as u32);
         let env_arg = self.env_arg(&env);
         let result: Result<(), T3Error> = (|| {
             match kind.as_str() {
@@ -921,6 +935,8 @@ impl Bridge {
         let mut out = Map::new();
         out.insert("v".into(), json!(1));
         out.insert("k".into(), json!(client_key));
+        // The UI session this is for: an older session's acks mean nothing to a newer one.
+        out.insert("u".into(), json!(self.link.ui_session));
         out.insert("ack".into(), json!(client_key.as_ref().and_then(|k| self.link.acked.get(k)).copied().unwrap_or(0)));
         out.insert("envs".into(), json!(self.envs.iter().map(|e| json!({ "id": e.id, "name": plain(&e.name, 40), "ok": e.ok })).collect::<Vec<_>>()));
         out.insert("threads".into(), json!(threads));
@@ -1009,11 +1025,23 @@ impl Bridge {
         self.save_state();
     }
 
+    /// Runs the game's queued commands. Each counts as done (acked) once it ran, and only
+    /// for the UI session it came from: a newer session counts afresh.
+    fn run_commands(&mut self) {
+        while let Some((client_key, session, command)) = self.commands.pop_front() {
+            let s = command["s"].as_u64().unwrap_or(0);
+            self.run(&client_key, command);
+            if Some(session.as_str()) == self.link.ui_session.as_deref() && Some(client_key.as_str()) == self.link.client_key.as_deref() {
+                let entry = self.link.acked.entry(client_key).or_insert(0);
+                *entry = (*entry).max(s);
+                self.save_state();
+            }
+        }
+    }
+
     /// One step: run the game's commands, read T3 when it's time, publish what changed.
     pub fn tick(&mut self) {
-        while let Some((client_key, command)) = self.commands.pop_front() {
-            self.run(&client_key, command);
-        }
+        self.run_commands();
         let t = self.now_ms();
         if t >= self.poll_at {
             self.poll_at = t + if self.window_open { 4000 } else { 12_000 };

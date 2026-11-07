@@ -1,0 +1,137 @@
+// A small simulated game for running the real addon files in fengari: frames whose
+// OnUpdate we drive, fonts that load a while after SetFont (and only if the file was real
+// when asked), slot addons whose Inbox we hand over, and two clocks (GetTime and time())
+// moving together. Not a test file itself: the *.test.js files use it.
+import { readFileSync } from "node:fs";
+import fengari from "fengari";
+
+const { lua, lauxlib, lualib, to_luastring } = fengari;
+export const read = (name) => readFileSync(new URL(`../addon/T3WoW/${name}`, import.meta.url), "utf8");
+
+export const GAME = `
+clock = 1000
+EPOCH = 1794000000
+LOAD_DELAY = 1.5
+real = {}
+firstAsked = {}
+inboxes = {}
+loads = {}
+alerts = {}
+printed = {}
+function GetTime() return clock end
+function time() return EPOCH + math.floor(clock - 1000) end
+function GetPhysicalScreenSize() return 1920, 1080 end
+function date(_, t) return tostring(t or time()) end
+function print(text) printed[#printed + 1] = text end
+STANDARD_TEXT_FONT = "Fonts\\\\STANDARD.TTF"
+
+-- Like the game (as traces showed): a font string whose font load failed never loads a
+-- font afterwards, whatever it is asked for.
+local function fontString()
+  local fs = { font = STANDARD_TEXT_FONT, pending = false, poisoned = false }
+  function fs:SetFont(path)
+    if self.pending and not self.pending.real then self.poisoned = true end
+    if path == STANDARD_TEXT_FONT then self.font, self.pending = path, false; return true end
+    firstAsked[path] = firstAsked[path] or clock
+    self.pending = { path = path, at = clock, real = real[path] }
+  end
+  function fs:GetFont()
+    local p = self.pending
+    if p and p.real and not self.poisoned and (clock - p.at >= LOAD_DELAY or clock - firstAsked[p.path] >= LOAD_DELAY) then
+      self.font, self.pending = p.path, false
+    end
+    return self.font
+  end
+  function fs:SetText(text) self.text = text end
+  function fs:GetText() return self.text or "" end
+  return setmetatable(fs, { __index = function() return function() end end })
+end
+
+-- Widgets: text, shown state and scripts are kept; other setters do nothing, and other
+-- getters answer 0 (sizes, scroll ranges).
+frames = {}
+local function frame(kind, name)
+  local f = { scripts = {}, shown = true, text = "", enabled = true, kind = kind }
+  function f:SetScript(event, fn) self.scripts[event] = fn end
+  function f:GetScript(event) return self.scripts[event] end
+  function f:CreateFontString() return fontString() end
+  function f:CreateTexture() return frame("Texture") end
+  function f:Show() self.shown = true end
+  function f:Hide()
+    local was = self.shown
+    self.shown = false
+    if was and self.scripts.OnHide then self.scripts.OnHide(self) end
+  end
+  function f:SetShown(shown) if shown then self:Show() else self:Hide() end end
+  function f:IsShown() return self.shown end
+  function f:SetText(text) self.text = text or "" end
+  function f:GetText() return self.text end
+  function f:SetEnabled(on) self.enabled = on end
+  function f:GetFontString() return fontString() end
+  function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
+  frames[#frames + 1] = f
+  if name then _G[name] = f end
+  return setmetatable(f, { __index = function(_, key)
+    if type(key) == "string" and key:find("^Get") then return function() return 0 end end
+    if type(key) == "string" and key:find("^Is") then return function() return false end end
+    return function() return f end
+  end })
+end
+function CreateFrame(kind, name) return frame(kind, name) end
+UIParent, WorldFrame, Minimap = frame(), frame(), frame()
+UISpecialFrames = {}
+tinsert = table.insert
+unpack = unpack or table.unpack
+GameTooltip = frame()
+ChatFontNormal = {}
+C_Timer = { After = function(_, fn) fn() end }
+function IsShiftKeyDown() return false end
+function ReloadUI() end
+function PlaySound() end
+function CloseDropDownMenus() end
+function UIDropDownMenu_SetWidth() end
+function UIDropDownMenu_Initialize() end
+function UIDropDownMenu_SetText() end
+function UIDropDownMenu_CreateInfo() return {} end
+function UIDropDownMenu_AddButton() end
+function UIDropDownMenu_EnableDropDown() end
+function UIDropDownMenu_DisableDropDown() end
+C_AddOns = { LoadAddOn = function(name) loads[#loads + 1] = name; T3WoW_Inbox = inboxes[name]; return true end }
+
+function tick(seconds)
+  for _ = 1, math.floor(seconds / 0.25 + 0.5) do
+    clock = clock + 0.25
+    for _, f in ipairs(frames) do
+      if f.scripts.OnUpdate and f.shown then f.scripts.OnUpdate(f, 0.25) end
+    end
+  end
+end
+`;
+
+// The addon's UI as a stub that records what Link asks of it.
+const STUB_UI = `ns.UI = {
+  OnInbox = function() end, Refresh = function() end, Notice = function() end,
+  IsShown = function() return false end,
+  Alert = function(event) alerts[#alerts + 1] = event end,
+}`;
+
+// Runs `script` after loading Codec.lua and Link.lua (and UI.lua with { ui: true }); its
+// return value comes back as a string. T3WoWDB starts as `db` (a Lua table literal).
+export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }` } = {}) {
+  const L = lauxlib.luaL_newstate();
+  lualib.luaL_openlibs(L);
+  const load = (name) => `assert(load(${JSON.stringify(read(name))}, "${name}"))("T3WoW", ns)`;
+  const chunk = `${GAME}
+local ns = {}
+${ui ? "" : STUB_UI}
+${load("Codec.lua")}
+${ui ? load("UI.lua") : ""}
+${load("Link.lua")}
+T3WoWDB = ${db}
+Link, UI = ns.Link, ns.UI
+${script}`;
+  if (lauxlib.luaL_loadstring(L, to_luastring(chunk)) !== lua.LUA_OK || lua.lua_pcall(L, 0, 1, 0) !== lua.LUA_OK) {
+    throw new Error(lua.lua_tojsstring(L, -1));
+  }
+  return lua.lua_tojsstring(L, -1);
+}
