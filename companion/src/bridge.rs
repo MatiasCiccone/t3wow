@@ -150,6 +150,8 @@ pub struct Bridge {
     state_file: Option<PathBuf>,
     log: Box<dyn Fn(&str) + Send>,
     now: Box<dyn Fn() -> i64 + Send>,
+    /// Opens a link with Windows (T3's t3code:// links); replaced in tests.
+    pub opener: Box<dyn Fn(&str) + Send>,
     pub link: LinkState,
     window_open: bool,
     view: Option<View>,
@@ -164,10 +166,9 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
-    /// Pending-question counts of working threads, keyed by thread, with the
-    /// `updatedAt` and the time they were read at: T3's list says "running" while an agent
-    /// waits on a question, and only a thread read has the count.
-    pending_counts: HashMap<String, (String, i64, u64)>,
+    /// What working threads wait on, keyed by thread: T3's list says "running" while an
+    /// agent waits on a question or an approval, and only a thread read has the count.
+    pending_counts: HashMap<String, Pending>,
     /// The thread that launched each agent-launched thread (None: unknown), read once.
     launchers: HashMap<String, Option<String>>,
     /// Machines whose threads were listed at least once since the companion started.
@@ -183,6 +184,17 @@ pub struct Bridge {
     polled_ok: bool,
     /// The question shown in the game for the open thread, with the ids T3 needs back.
     pending_ask: Option<PendingAsk>,
+}
+
+/// A working thread's pending requests, as last read.
+#[derive(Clone, Debug)]
+struct Pending {
+    /// The thread's `updatedAt` when read, and when that was.
+    updated: String,
+    read_at: i64,
+    /// What it waits on: None, or the status the game shows ("waiting" for a question,
+    /// "approval" for a permission prompt, which T3's pending list leaves out).
+    status: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -258,6 +270,7 @@ impl Bridge {
             state_file,
             log,
             now,
+            opener: Box::new(crate::t3::open_browser),
             link,
             window_open: false,
             view: None,
@@ -470,6 +483,18 @@ impl Bridge {
                     self.client.call("t3_thread_interrupt", with_args(json!({ "threadId": id, "clientRequestId": request_id }), &env_arg))?;
                     self.note("Stopping.");
                 }
+                // Brings T3 to the front on that thread (T3's own t3code:// link), for what only
+                // T3 can do, like approving a command.
+                "t3" => {
+                    let machine = if env.is_empty() { self.local_env_id.clone().unwrap_or_default() } else { env.clone() };
+                    let link = if id.is_empty() || machine.is_empty() {
+                        "t3code://open".to_string()
+                    } else {
+                        format!("t3code://threads/{}/{}", crate::t3::percent_encode(&machine), crate::t3::percent_encode(&id))
+                    };
+                    (self.opener)(&link);
+                    self.note("Opened in T3.");
+                }
                 "probe" => {
                     let changed = self.slots.flip_probe(true);
                     self.log(&if changed.is_empty() { "probe: no probe files; reinstall the addon".into() } else { format!("probe: made {} files real", changed.join(", ")) });
@@ -588,32 +613,40 @@ impl Bridge {
             let key = format!("{env}:{}", str_of(&thread["threadId"]));
             let updated = str_of(&thread["updatedAt"]).to_string();
             let now = self.now_ms();
-            let count = match self.pending_counts.get(&key) {
-                Some((at, read_at, count)) if *at == updated && now - read_at < PENDING_RECHECK_MS => *count,
-                _ => {
-                    let args = with_args(json!({ "threadId": str_of(&thread["threadId"]), "limit": 1, "maxCharsPerItem": 1 }), &env_arg);
-                    match self.client.call("t3_thread_read", args) {
-                        Ok(read) => {
-                            let count = read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0);
-                            self.pending_counts.insert(key.clone(), (updated.clone(), now, count));
-                            count
-                        }
-                        Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-                        Err(T3Error::Other(message)) => {
-                            self.log(&format!("pending check ({key}): {message}"));
-                            continue;
-                        }
+            let status = match self.pending_counts.get(&key) {
+                Some(p) if p.updated == updated && now - p.read_at < PENDING_RECHECK_MS => p.status,
+                _ => match self.read_waiting_on(str_of(&thread["threadId"]), &env_arg) {
+                    Ok(status) => {
+                        self.pending_counts.insert(key.clone(), Pending { updated: updated.clone(), read_at: now, status });
+                        status
                     }
-                }
+                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                    Err(T3Error::Other(message)) => {
+                        self.log(&format!("pending check ({key}): {message}"));
+                        continue;
+                    }
+                },
             };
             seen.push(key);
-            if count > 0 {
-                thread["status"] = json!("waiting");
+            if let Some(status) = status {
+                thread["status"] = json!(status);
             }
         }
         let prefix = format!("{env}:");
         self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || seen.contains(k));
         Ok(())
+    }
+
+    /// What a working thread waits on: its pending-request count includes approvals,
+    /// which T3's pending list leaves out, so a count with nothing listed is an approval.
+    fn read_waiting_on(&self, thread: &str, env_arg: &Map<String, Value>) -> Result<Option<&'static str>, T3Error> {
+        let read = self.client.call("t3_thread_read", with_args(json!({ "threadId": thread, "limit": 1, "maxCharsPerItem": 1 }), env_arg))?;
+        if read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0) == 0 {
+            return Ok(None);
+        }
+        let list = self.client.call("t3_pending_request", with_args(json!({ "action": "list", "threadId": thread }), env_arg))?;
+        let questions = list["requestIds"].as_array().is_some_and(|ids| !ids.is_empty());
+        Ok(Some(if questions { "waiting" } else { "approval" }))
     }
 
     /// Notes which thread launched each agent-launched thread: the sender of its first message.
@@ -646,7 +679,7 @@ impl Bridge {
         let before = self.last_status.insert(key, status.clone());
         // A thread new since the last list that already waits on you (an agent that asked
         // straight away) notifies too; on the first list everything is old news.
-        let new_and_waiting = before.is_none() && status == "waiting" && self.listed_envs.contains(env);
+        let new_and_waiting = before.is_none() && (status == "waiting" || status == "approval") && self.listed_envs.contains(env);
         if new_and_waiting || (before.as_deref().is_some_and(working) && !working(&status)) {
             self.event_seq = (self.event_seq + 1).max(self.now_ms());
             self.events.push(json!({
@@ -744,8 +777,12 @@ impl Bridge {
                 Err(error) => self.log(&format!("pending question: {error}")),
             }
         }
-        if self.pending_ask.is_none() && str_of(&thread["status"]) == "waiting" {
+        // Waiting on something that isn't a question: an approval, which only T3 can give.
+        if self.pending_ask.is_none() && (pending || str_of(&thread["status"]) == "waiting") {
             view["approval"] = json!(true);
+            if working(str_of(&thread["status"])) {
+                view["s"] = json!("approval");
+            }
         }
         self.view_data = Some(view);
         self.view_key = Some(key);

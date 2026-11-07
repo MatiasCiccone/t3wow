@@ -9,7 +9,7 @@ local WORKING = { preparing = true, queued = true, starting = true, running = tr
 local STATUS = {
     preparing = { "Working", "ffd100" }, queued = { "Queued", "ffd100" }, starting = { "Working", "ffd100" },
     running = { "Working", "ffd100" }, completed = { "Finished", "40c040" }, failed = { "Failed", "ff4040" },
-    waiting = { "Needs you", "ff8000" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
+    waiting = { "Needs you", "ff8000" }, approval = { "Approve in T3", "ff8000" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
     idle = { "Idle", "a0a0a0" }, rolled_back = { "Rolled back", "a0a0a0" },
 }
 
@@ -357,6 +357,18 @@ local function sendAnswer(text)
     return true
 end
 
+-- Brings T3 to the front on a thread: the companion opens T3's own link for it.
+local function openInT3(threadId, envId)
+    ns.Link.Send({ t = "t3", e = envId or "", id = threadId or "" })
+    UI.Notice("Opening T3…")
+end
+
+local approvalOpen = button(messageChild, "Open in T3", 120, function()
+    local e = selected and env(selected.e)
+    if selected then openInT3(selected.id, e and e.id) end
+end)
+approvalOpen:Hide()
+
 local askSend = button(messageChild, "Send answer", 120, function()
     sendAnswer(nil)
     UI.Refresh()
@@ -407,6 +419,7 @@ local function hideAsk()
     for _, fs in ipairs(askStrings) do fs:Hide() end
     for _, b in ipairs(askButtons) do b:Hide() end
     askSend:Hide()
+    approvalOpen:Hide()
 end
 
 -- Draws the question (or the approval note) from y down; returns the new y.
@@ -418,10 +431,15 @@ local function renderAsk(view, y)
         if view.approval then
             local fs = askString(1)
             fs:SetWidth(messageWidth() - 8)
-            fs:SetText("|cffff8000Waiting for your approval.|r Approve or deny it in T3 itself: approvals can't be answered from the game.")
+            fs:SetText("|cffff8000Waiting for your approval.|r Approve or deny it in T3: by design, T3 doesn't take approvals from anywhere else. Open in T3 brings it up on this thread; Stop cancels the run from here.")
+            fs:ClearAllPoints()
             fs:SetPoint("TOPLEFT", 4, -y)
             fs:Show()
-            y = y + fs:GetStringHeight() + 14
+            y = y + fs:GetStringHeight() + 8
+            approvalOpen:ClearAllPoints()
+            approvalOpen:SetPoint("TOPLEFT", 4, -y)
+            approvalOpen:Show()
+            y = y + 32
         end
         return y
     end
@@ -713,12 +731,12 @@ end
 -- ---------------------------------------------------------------- settings
 
 local DEFAULTS = {
-    toasts = true, chat = true, sound = true, duration = 8,
+    toasts = true, chat = true, sound = true, duration = 8, maxToasts = 4,
     onCompleted = true, onWaiting = true, onFailed = true, onStopped = false,
 }
 local EVENT_SETTING = {
     completed = "onCompleted", idle = "onCompleted", rolled_back = "onCompleted",
-    waiting = "onWaiting", failed = "onFailed", interrupted = "onStopped", cancelled = "onStopped",
+    waiting = "onWaiting", approval = "onWaiting", failed = "onFailed", interrupted = "onStopped", cancelled = "onStopped",
 }
 local DURATIONS = { 5, 8, 15, 30, 0 } -- 0: until clicked
 
@@ -749,10 +767,11 @@ end
 
 -- ---------------------------------------------------------------- notifications
 
-local TOAST_WIDTH, TOAST_HEIGHT, TOAST_GAP, TOAST_MAX = 320, 60, 6, 4
+local TOAST_WIDTH, TOAST_HEIGHT, TOAST_GAP, TOAST_LIMIT = 320, 60, 6, 10
 local STATUS_ICON = {
     completed = "Interface\\RaidFrame\\ReadyCheck-Ready",
     waiting = "Interface\\RaidFrame\\ReadyCheck-Waiting",
+    approval = "Interface\\RaidFrame\\ReadyCheck-Waiting",
     failed = "Interface\\RaidFrame\\ReadyCheck-NotReady",
     interrupted = "Interface\\RaidFrame\\ReadyCheck-NotReady",
     cancelled = "Interface\\RaidFrame\\ReadyCheck-NotReady",
@@ -821,6 +840,11 @@ local function removeToast(toast)
     layoutToasts()
 end
 
+local function trimToasts()
+    local limit = math.max(1, math.min(TOAST_LIMIT, tonumber(settings().maxToasts) or 4))
+    while #toasts > limit do removeToast(toasts[#toasts]) end
+end
+
 local function newToast()
     local toast = table.remove(toastPool)
     if toast then return toast end
@@ -853,10 +877,13 @@ local function newToast()
     toast:EnableMouse(true)
     toast:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     toast:SetScript("OnClick", function(self, mouse)
-        -- Left-click opens the thread in the T3 WoW window; right-click only dismisses.
-        local threadId, envId = self.threadId, self.envId
+        -- Left-click opens the thread in the T3 WoW window (an approval: in T3, the only
+        -- place it can be given); right-click only dismisses.
+        local threadId, envId, inT3 = self.threadId, self.envId, self.inT3
         removeToast(self)
-        if mouse == "LeftButton" and threadId then UI.OpenThread(threadId, envId) end
+        if mouse == "LeftButton" and threadId then
+            if inT3 then openInT3(threadId, envId) else UI.OpenThread(threadId, envId) end
+        end
     end)
     toast:SetScript("OnEnter", function(self) self.hovered = true end)
     toast:SetScript("OnLeave", function(self) self.hovered = false end)
@@ -885,17 +912,25 @@ local function showToast(event)
     local toast = newToast()
     local machineIndex = envIndexById(event.e)
     local machine = machineIndex and env(machineIndex)
-    toast.threadId, toast.envId = event.id, event.e
+    -- One notification per thread: a newer one replaces it.
+    for _, other in ipairs(toasts) do
+        if event.id and other.threadId == event.id and other.envId == event.e then
+            removeToast(other)
+            break
+        end
+    end
+    toast.threadId, toast.envId, toast.inT3 = event.id, event.e, event.s == "approval"
     toast.icon:SetTexture(STATUS_ICON[event.s] or STATUS_ICON.completed)
     toast.head:SetText(format("T3 WoW · |cff%s%s|r", s[2], s[1]))
     toast.title:SetText(event.t ~= "" and event.t or "Thread")
-    toast.sub:SetText((machine and machine.name or "") .. (event.id and "  ·  click to open" or ""))
+    toast.sub:SetText((machine and machine.name or "") .. (event.id and (toast.inT3 and "  ·  click to open in T3" or "  ·  click to open") or ""))
     toast:SetBackdropBorderColor(hexColor(s[2]))
     toast.duration = settings().duration
     toast.shownAt = GetTime()
     toast.hovered = false
     table.insert(toasts, 1, toast)
-    while #toasts > TOAST_MAX do removeToast(toasts[#toasts]) end
+    -- At most the number set in Settings: the oldest goes first.
+    trimToasts()
     layoutToasts()
     toast:SetAlpha(0)
     toast:SetScript("OnUpdate", toastUpdate)
@@ -920,7 +955,7 @@ end
 -- ---------------------------------------------------------------- settings panel
 
 local settingsPanel = CreateFrame("Frame", "T3WoWSettings", frame, "BackdropTemplate")
-settingsPanel:SetSize(270, 420)
+settingsPanel:SetSize(270, 448)
 settingsPanel:SetPoint("TOPLEFT", frame, "TOPRIGHT", -4, 0)
 settingsPanel:SetBackdrop({
     bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -1002,6 +1037,40 @@ UIDropDownMenu_Initialize(durationMenu, function(_, level)
     end
 end)
 layoutY = layoutY - 34
+
+-- How many stay on screen at once: a slider, 1 to 10. The oldest makes room.
+local maxLabel = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+maxLabel:SetPoint("TOPLEFT", 24, layoutY - 4)
+maxLabel:SetText("At most")
+local maxSlider = CreateFrame("Slider", "T3WoWMaxToasts", settingsPanel, "BackdropTemplate")
+maxSlider:SetOrientation("HORIZONTAL")
+maxSlider:SetSize(110, 16)
+maxSlider:SetPoint("LEFT", maxLabel, "RIGHT", 12, 0)
+maxSlider:SetBackdrop({
+    bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
+    edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
+    tile = true, tileSize = 8, edgeSize = 8,
+    insets = { left = 3, right = 3, top = 6, bottom = 6 },
+})
+maxSlider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+maxSlider:SetMinMaxValues(1, TOAST_LIMIT)
+maxSlider:SetValueStep(1)
+if maxSlider.SetObeyStepOnDrag then maxSlider:SetObeyStepOnDrag(true) end
+maxSlider:EnableMouseWheel(true)
+local maxValue = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+maxValue:SetPoint("LEFT", maxSlider, "RIGHT", 8, 0)
+local function maxName(n) return n .. " at a time" end
+maxSlider:SetScript("OnValueChanged", function(self, value)
+    local n = math.floor(value + 0.5)
+    maxValue:SetText(maxName(n))
+    if settings().maxToasts ~= n then
+        settings().maxToasts = n
+        trimToasts()
+    end
+end)
+maxSlider:SetScript("OnMouseWheel", function(self, delta) self:SetValue(self:GetValue() + delta) end)
+layoutY = layoutY - 28
+
 local moveButton = button(settingsPanel, "Move notifications", 110, nil)
 moveButton:SetPoint("TOPLEFT", 22, layoutY - 2)
 local testButton = button(settingsPanel, "Test", 110, function()
@@ -1030,6 +1099,14 @@ moveButton:SetScript("OnClick", function() setAnchorUnlocked(toastAnchor:GetAlph
 refreshToastControls = function()
     local on = settings().toasts and true or false
     UIDropDownMenu_SetText(durationMenu, durationName(settings().duration))
+    maxSlider:SetValue(settings().maxToasts)
+    maxValue:SetText(maxName(settings().maxToasts))
+    local grey = on and 1 or 0.5
+    maxSlider:EnableMouse(on)
+    maxSlider:EnableMouseWheel(on)
+    maxSlider:SetAlpha(on and 1 or 0.4)
+    maxLabel:SetTextColor(grey, grey, grey)
+    maxValue:SetTextColor(grey, grey, grey)
     if on then
         UIDropDownMenu_EnableDropDown(durationMenu)
         durationLabel:SetTextColor(1, 1, 1)

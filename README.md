@@ -36,10 +36,10 @@ Each login and reload says in chat that T3 WoW loaded, then that it connected to
 - **New Thread** asks for the machine and project, then starts a thread with your message as its task.
 - **Stop** interrupts a running thread. **Settle** / **Unsettle** moves it between Open and Settled.
 - When a thread you are not looking at finishes, needs you or fails, a notification slides in near the top of the screen; click it to open the thread, right-click to dismiss. A line in chat and a sound come with it.
-- **Settings** turns the notification, chat line and sound on or off, sets how long notifications stay (or until clicked), moves them (**Move notifications**, then drag), picks which outcomes notify (stopped threads are off by default), and shows or hides the minimap button.
+- **Settings** turns the notification, chat line and sound on or off, sets how long notifications stay (or until clicked) and how many stay on screen at once (the oldest makes room; a newer one for the same thread replaces it), moves them (**Move notifications**, then drag), picks which outcomes notify (stopped threads are off by default), and shows or hides the minimap button.
 - `/t3 status` prints the link state; `/t3 probe` tests which file checks work on your client.
 
-When an agent asks you a question, it shows at the end of the thread's conversation: pick an option (several, where it allows that) and press **Send answer**, or type your own answer in the box and press Enter. Permission prompts (approving a command or an edit) can't be answered through T3's tools by design, so the window says to approve or deny them in T3 itself.
+When an agent asks you a question, it shows at the end of the thread's conversation: pick an option (several, where it allows that) and press **Send answer**, or type your own answer in the box and press Enter. Permission prompts (approving a command or an edit) can't be answered through T3's tools by design: such a thread shows **Approve in T3**, its notification opens T3 on that thread when clicked, and the thread view has an **Open in T3** button (the companion opens T3's own `t3code://` link). **Stop** cancels the run from the game.
 
 ## How it connects
 

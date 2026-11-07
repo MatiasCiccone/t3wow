@@ -4,6 +4,8 @@ use std::sync::Mutex;
 struct FakeT3 {
     calls: Mutex<Vec<(String, Value)>>,
     threads: Mutex<Vec<Value>>,
+    /// false: what's pending is an approval, which T3's pending list leaves out.
+    questions: Mutex<bool>,
 }
 
 impl FakeT3 {
@@ -14,6 +16,7 @@ impl FakeT3 {
                 "threadId": "t1", "projectId": "p1", "title": "Fix tests", "status": "running",
                 "settled": false, "updatedAt": "2026-11-06T10:00:00Z", "itemCount": 3
             })]),
+            questions: Mutex::new(true),
         })
     }
 
@@ -63,6 +66,7 @@ impl T3 for FakeT3 {
             }),
             // One pending question, in the shape T3 returns (see the probe in the commit log).
             "t3_pending_request" => match args["action"].as_str() {
+                Some("list") if !*self.questions.lock().unwrap() => json!({ "requestIds": [] }),
                 Some("list") => json!({ "requestIds": ["runtime-request:a-very-long-id"] }),
                 Some("read") => json!({
                     "requestId": "runtime-request:a-very-long-id",
@@ -405,6 +409,34 @@ fn a_new_thread_that_already_asks_notifies_but_old_ones_dont_at_start() {
     let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
     assert!(latest.contains("e=\"local\",id=\"t2\",t=\"Quick question\",s=\"waiting\"}"), "{latest}");
     assert!(!latest.contains("id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "{latest}");
+}
+
+#[test]
+fn an_approval_shows_as_approve_in_t3_and_the_game_can_open_t3_on_it() {
+    let mut rig = Rig::new(8_000_000);
+    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&opened);
+    rig.bridge.opener = Box::new(move |link| sink.lock().unwrap().push(link.to_string()));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+
+    // T3 says "running" with one pending request that its pending list doesn't show.
+    *rig.t3.questions.lock().unwrap() = false;
+    rig.t3.threads.lock().unwrap()[0]["threadId"] = json!("mcp:t1");
+    rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(1);
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "open", "id": "mcp:t1" }] }));
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("e=\"local\",id=\"mcp:t1\",t=\"Fix tests\",s=\"approval\"}"), "an alert: {inbox}");
+    assert!(inbox.contains("approval=true"), "{inbox}");
+    assert!(!inbox.contains("ask="), "{inbox}");
+
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "t3", "e": "local", "id": "mcp:t1" }] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(*opened.lock().unwrap(), vec!["t3code://threads/local/mcp%3At1".to_string()]);
 }
 
 #[test]
