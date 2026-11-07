@@ -1,0 +1,6 @@
+{
+  "about": "A release signed with a throwaway Ed25519 key (its private half was never saved). exe is \"MZ\" followed by zero bytes, 70000 bytes in all. Checked by updater.rs and tests/release-signing.test.js.",
+  "publicKey": "354046b6818fdb1f75df3d06e6f320bf1e50bfaa97307e7ceaf7d7cb9fb71bf2",
+  "checksum": "02aebc3eb5dc2ccf20933eb608352fb8ecdf86342e308e3cec4d53c1dd9e46bc  t3wow.exe",
+  "signature": "lQU2EsMU2pamkXc+Z8ABKHN8ycurA96TU80xzpnJyrwC0ypo+/73upUM/hUTMYmfY/Xq+Xr9kEzohUcuvEQMDA==\n"
+}

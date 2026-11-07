@@ -1,9 +1,11 @@
 # Publishes a release when a version tag is pushed (git tag v0.4.0 && git push origin v0.4.0).
 # The source repository is private, so the release goes to the public
 # MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
-# t3wow.exe, its SHA-256, and the addon on its own (zipped, for CurseForge or a manual
-# install). Publishing there needs the RELEASES_TOKEN secret: a fine-grained token with
-# Contents read and write on t3wow-releases only. The addon zip is also uploaded to the
+# t3wow.exe, its SHA-256, the SHA-256's signature, and the addon on its own (zipped, for
+# CurseForge or a manual install). Publishing there needs the RELEASES_TOKEN secret: a
+# fine-grained token with Contents read and write on t3wow-releases only. Signing needs the
+# T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
+# scripts/gen-signing-key.mjs), whose public half is in companion/src/updater.rs. The addon zip is also uploaded to the
 # CurseForge project with the CURSEFORGE_TOKEN secret (a CurseForge API token).
 # Actions are pinned to commit SHAs (Dependabot keeps them current).
 name: Release
@@ -42,6 +44,12 @@ jobs:
           $npm = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($tag -ne $cargo -or $tag -ne $addon -or $tag -ne $npm) { throw "Tag ${tag}, companion ${cargo}, addon ${addon}, package.json ${npm}: bump them together." }
 
+      # Companions refuse a release without a valid signature, so check the key first.
+      - name: Release key
+        env:
+          T3WOW_SIGNING_KEY: ${{ secrets.T3WOW_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs --check
+
       - run: npm ci
       - run: npm test
 
@@ -55,6 +63,11 @@ jobs:
           $hash = (Get-FileHash release/t3wow.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  t3wow.exe" | Out-File -Encoding ascii -NoNewline release/t3wow.exe.sha256
           Compress-Archive -Path addon/T3WoW -DestinationPath "release/T3WoW-${{ github.ref_name }}.zip"
+
+      - name: Sign the checksum
+        env:
+          T3WOW_SIGNING_KEY: ${{ secrets.T3WOW_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs release/t3wow.exe.sha256
 
       # Only feat and fix subjects (without the prefix) go public: the rest (ci, chore,
       # docs, refactor...) is the private repository's business.
@@ -82,6 +95,7 @@ jobs:
           files: |
             release/t3wow.exe
             release/t3wow.exe.sha256
+            release/t3wow.exe.sha256.sig
             release/T3WoW-${{ github.ref_name }}.zip
 
       # The addon zip goes to CurseForge too, filed under the WoW Forever version whose API
