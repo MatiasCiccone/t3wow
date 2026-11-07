@@ -52,7 +52,7 @@ function fail(message) {
 
 function wowDir(config) {
   // PowerShell passes a trailing `\"` through as a literal quote.
-  const given = flags.wow?.replace(/["']/g, "").replace(/[\\/]+$/, "");
+  const given = flags.wow?.replace(/["']/g, "").trim().replace(/[\\/]+$/, "");
   const dir = given ?? config.wowDir ?? WOW_GUESSES.find((guess) => existsSync(guess));
   if (!dir) fail("Could not find WoW: Forever. Pass --wow \"C:\\...\\World of Warcraft\\_forever_\".");
   return dir;

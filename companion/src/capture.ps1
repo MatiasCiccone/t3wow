@@ -111,7 +111,7 @@ if ($ImageFile) {
   exit 0
 }
 
-$lastWow = ""
+$lastWow = "unknown"
 $lastCells = ""
 while ($true) {
   try {
