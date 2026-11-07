@@ -1,8 +1,17 @@
 // The addon's window (UI.lua) in the simulated game: what it sends, and what it does with
 // the companion's answers.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runGame } from "./game.js";
+
+// A JSON value as a Lua literal (control characters as decimal escapes).
+const luaValue = (v) =>
+  typeof v === "string"
+    ? `"${v.replace(/[\\"]/g, "\\$&").replace(/[\x00-\x1f]/g, (c) => `\\${String(c.charCodeAt(0)).padStart(3, "0")}`)}"`
+    : Array.isArray(v)
+      ? `{${v.map(luaValue).join(",")}}`
+      : `{${Object.entries(v).map(([k, x]) => `${k}=${luaValue(x)}`).join(",")}}`;
 
 // Helpers on top of the game: the composer, the buttons, and an inbox as the companion writes it.
 const UI_HELPERS = `
@@ -557,6 +566,122 @@ inboxWith(ENVS, { threads = { { e = 1, id = "t2", t = "Other", s = "running", se
 assert(not shownString("Working…").hit.shown, "Working… is clickable")
 return "ok"
 `);
+});
+
+test("a table's columns are padded to one width, and cut down to fit a narrow window", () => {
+  const out = run(`
+local rows = { { "Name", "Size", "Note" }, { "a|b", "10", "ok" }, { "longer name", "2", "" } }
+local function lines(...) return table.concat(UI.TableLines(...), "\\n") end
+return table.concat({
+  lines(rows, "lrc", 80),
+  lines(rows, "lrc", 20),
+  lines({ { "café", "b" }, { "x", "y" } }, nil, 80),
+  lines({ { "abcdef", "ghijkl" } }, nil, 4),
+}, "\\n~\\n")
+`);
+  const [wide, narrow, accents, floor] = out.split("\n~\n");
+  assert.deepEqual(wide.split("\n"), [
+    "Name        │ Size │ Note",
+    "────────────┼──────┼─────",
+    "a|b         │   10 │  ok",
+    "longer name │    2 │",
+  ]);
+  // 20 characters: the widest column gives way, its long cell cut short.
+  assert.deepEqual(narrow.split("\n"), [
+    "Name   │ Size │ Note",
+    "───────┼──────┼─────",
+    "a|b    │   10 │  ok",
+    "longe… │    2 │",
+  ]);
+  for (const line of narrow.split("\n")) assert.ok([...line].length <= 20, line);
+  // Characters are counted, not bytes.
+  assert.deepEqual(accents.split("\n"), ["café │ b", "─────┼──", "x    │ y"]);
+  // A column keeps 3 characters, even when the table then overflows.
+  assert.deepEqual(floor.split("\n"), ["ab… │ gh…", "────┼────"]);
+});
+
+test("code, inline code and tables are drawn in the monospace font, and copying still takes the text", () => {
+  run(SHOWN + `
+local mono, text = ns.Skin.fonts.mono, ns.Skin.fonts.text
+function shownExactly(wanted)
+  for _, fs in ipairs(fontStrings) do
+    if not fs.hidden and fs.text == wanted then return fs end
+  end
+end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local x = "Run |cffc8c8a0npm test|r:\\n|cffc8c8a0ok || fail|r\\n|| k || v ||"
+local g = { "Run \\1npm test\\2:", { c = "ok | fail" }, { t = { { "k", "v" }, { "a", "1" } } }, "Done." }
+local items = { { r = "u", x = "see |cffc8c8a0x|r", g = { "see \\1x\\2" } }, { r = "a", x = x, g = g } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+-- Prose with inline code: a string per run, in a frame as tall as its lines.
+local run, chip = shownExactly("Run"), shownExactly("npm test")
+assert(run and run.fontObject == text, "the prose run isn't in the text font")
+assert(chip and chip.fontObject == mono, "inline code isn't in the monospace font")
+assert(shownExactly(":") and shownExactly(":").fontObject == text, "the text after the code is missing")
+local holder = run.point[2]
+assert(chip.point[2] == holder, "the inline code isn't laid out with its line")
+-- The code block, then the table, then the closing prose, each below the one before.
+local code = shownExactly("ok || fail")
+assert(code and code.fontObject == mono, "the code block isn't in the monospace font")
+assert(below(code, holder), "the code block isn't below the prose")
+local tbl = shownString("│")
+assert(tbl and tbl.fontObject == mono, "the table isn't in the monospace font")
+assert(tbl.text:find("k |r", 1, true) and tbl.text:find("\\na |cff%x+│|r 1$"), tbl.text)
+assert(below(tbl, code), "the table isn't below the code")
+assert(below(shownExactly("Done."), tbl), "the prose after the table isn't below it")
+-- Your message's inline code too.
+assert(shownExactly("x") and shownExactly("x").fontObject == mono, "your inline code isn't monospace")
+assert(not shownString("^see |c"), "your message was drawn from its text as well as its segments")
+-- Clicking copies the message's text, as before.
+local hit
+for _, f in ipairs(frames) do
+  if f.kind == "Button" and f.copyText == x and f.shown then hit = f end
+end
+assert(hit, "the message can't be clicked")
+hit.scripts.OnClick(hit, "LeftButton")
+local copied
+for _, f in ipairs(frames) do
+  if f.kind == "EditBox" and f.text == "Run npm test:\\nok | fail\\n| k | v |" then copied = f end
+end
+assert(copied, "the copy box doesn't hold the message's text")
+-- Drawn again (a new inbox), the pieces are reused, not piled up.
+local count = #fontStrings
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(#fontStrings == count, "a redraw made new strings: " .. (#fontStrings - count))
+-- Without segments (an older companion), the message is one string again.
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = x } } } })
+assert(shownExactly(x), "the text isn't drawn without segments")
+assert(not shownExactly("ok || fail"), "the code block stayed")
+return "ok"
+`);
+});
+
+test("every segment the companion's fixtures make draws in the game", () => {
+  const cases = JSON.parse(readFileSync(new URL("../companion/tests/fixtures/segments.json", import.meta.url), "utf8"));
+  for (const { input, segments } of cases.filter((c) => c.segments.length > 0)) {
+    run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local g = ${luaValue(segments)}
+for _, mine in ipairs({ false, true }) do
+  local items = { { r = mine and "u" or "a", x = "text", g = g } }
+  inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+  UI.Select(thread)
+  for _, seg in ipairs(g) do
+    if type(seg) == "table" and seg.c then
+      local escaped, found = seg.c:gsub("|", "||"), false
+      for _, fs in ipairs(fontStrings) do
+        if not fs.hidden and fs.text == escaped and fs.fontObject == ns.Skin.fonts.mono then found = true end
+      end
+      assert(found, "code not drawn: " .. seg.c)
+    end
+  end
+  assert(not showing("^text$"), "drawn from its text instead")
+end
+return "ok"
+`);
+    assert.ok(true, input);
+  }
 });
 
 test("Settings picks the theme, which applies at once and is saved", () => {

@@ -1,0 +1,42 @@
+[
+  {
+    "input": "**Plain** text with no code\n\n- a list",
+    "segments": []
+  },
+  {
+    "input": "Run `npm test` in a | pipe `a|b`",
+    "segments": ["Run \u0001npm test\u0002 in a || pipe \u0001a||b\u0002"]
+  },
+  {
+    "input": "Before:\n```js\nconst a = b || c;\n\tindented()   \n\n```\nAfter",
+    "segments": ["Before:", { "c": "const a = b || c;\n    indented()" }, "After"]
+  },
+  {
+    "input": "| Name | Size |\n|:-----|-----:|\n| a\\|b | **10** |\n| `x` | 2 | extra |\n| [link](https://x.y)<br>two |\n\ntext after",
+    "segments": [{ "t": [["Name", "Size"], ["a|b", "10"], ["x", "2"], ["link two", ""]], "a": "lr" }, "text after"]
+  },
+  {
+    "input": "a | b\n--- | :---:\n1 | 2\nno pipe here",
+    "segments": [{ "t": [["a", "b"], ["1", "2"]], "a": "lc" }, "no pipe here"]
+  },
+  {
+    "input": "a | b\n---|---|---",
+    "segments": []
+  },
+  {
+    "input": "## Use `foo` here",
+    "segments": ["|cffffd100Use |r\u0001foo\u0002|cffffd100 here|r"]
+  },
+  {
+    "input": "- step\n  ```\n  cargo test\n    nested\n  ```",
+    "segments": ["• step", { "c": "cargo test\n  nested" }]
+  },
+  {
+    "input": "```\nunclosed\u0001 fence",
+    "segments": [{ "c": "unclosed fence" }]
+  },
+  {
+    "input": "```\n```\n\n\n\n`x`",
+    "segments": ["\u0001x\u0002"]
+  }
+]

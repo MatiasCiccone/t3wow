@@ -50,6 +50,20 @@
       {
         "r": "a",
         "x": "done"
+      },
+      {
+        "r": "a",
+        "x": "Run |cffc8c8a0npm test|r",
+        "g": [
+          "Run \u0001npm test\u0002",
+          {
+            "c": "a | b"
+          },
+          {
+            "t": [["Name", "Size"], ["a|b", "10"]],
+            "a": "lr"
+          }
+        ]
       }
     ]
   },

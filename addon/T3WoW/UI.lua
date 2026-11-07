@@ -606,17 +606,13 @@ local function messageString(index)
         fs:SetJustifyH("LEFT")
         fs:SetWordWrap(true)
         fs:SetSpacing(2)
+        -- The bubble, the button and the hover tint are placed around the message as it is
+        -- drawn (anchorMessage): its text alone, or the pieces of a message with code.
         fs.bubble = Skin.Box(messageChild, { shape = "panel", fill = "raised", ring = "border", free = true })
-        fs.bubble:SetPoint("TOPLEFT", fs, "TOPLEFT", -SIZE.bubbleX, SIZE.bubbleY)
-        fs.bubble:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", SIZE.bubbleX, -SIZE.bubbleY)
         fs.bubble:Hide()
         local hit = CreateFrame("Button", nil, messageChild)
-        hit:SetPoint("TOPLEFT", fs, "TOPLEFT", -4, 4)
-        hit:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", 4, -4)
         -- The hover tint sits behind the text, on the conversation itself.
         fs.hover = Skin.Box(messageChild, { shape = "control", fill = "hover", free = true, sub = -7 })
-        fs.hover:SetPoint("TOPLEFT", fs, "TOPLEFT", -6, 5)
-        fs.hover:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", 6, -5)
         fs.hover:Hide()
         hit:SetScript("OnClick", function(self) openCopy(self.copyText) end)
         hit:SetScript("OnEnter", function(self)
@@ -649,16 +645,365 @@ local function place(region, x, after)
     flow.last, flow.x, flow.gap = region, x, after
 end
 
+-- ---------------------------------------------------------------- code and tables
+-- A message with code or a table also comes cut into segments (the companion's
+-- wow_segments): prose (game text, inline code between \1 and \2), code blocks ({ c }) and
+-- tables ({ t = rows, the header first; a = column alignments }), code and cells as plain
+-- text. Each is a piece of its own in the flow: code and tables in the monospace font on a
+-- code box, so each theme styles them. A string has one font, so prose with inline code is
+-- laid out run by run. Pieces come from pools and are handed out again on every render.
+local Mono = { pools = {}, used = {} }
+do
+    local WHITE = "Interface\\Buttons\\WHITE8X8"
+    local PAD, CHIP = 8, 3 -- inside a code box; around inline code
+
+    local function take(kind, make)
+        local list = Mono.pools[kind]
+        if not list then
+            list = {}
+            Mono.pools[kind] = list
+        end
+        local n = (Mono.used[kind] or 0) + 1
+        Mono.used[kind] = n
+        local obj = list[n]
+        if not obj then
+            obj = make()
+            list[n] = obj
+        end
+        obj:ClearAllPoints()
+        obj:Show()
+        return obj
+    end
+
+    -- Hides every piece, before a render hands them out again.
+    function Mono.Release()
+        for _, list in pairs(Mono.pools) do
+            for _, obj in ipairs(list) do
+                obj:Hide()
+                if obj.box then obj.box:Hide() end
+                if obj.chip then obj.chip:Hide() end
+            end
+        end
+        Mono.used = {}
+    end
+
+    -- Widths are measured on a string that is never seen, with no width of its own.
+    local meter = messageChild:CreateFontString(nil, "OVERLAY")
+    meter:SetAlpha(0)
+    meter:SetWordWrap(false)
+    meter:SetPoint("TOPLEFT")
+    local function measure(font, text)
+        meter:SetFontObject(font)
+        meter:SetText(text)
+        return meter:GetStringWidth() or 0
+    end
+
+    local function fontSize(font, fallback)
+        local _, size = font:GetFont()
+        return type(size) == "number" and size > 0 and size or fallback
+    end
+
+    -- One character of the monospace font (an estimate until the font has loaded).
+    local function charWidth()
+        local w = measure(Skin.fonts.mono, "0000000000") / 10
+        return w > 0 and w or fontSize(Skin.fonts.mono, 12) * 0.6
+    end
+
+    local function widestLine(font, text)
+        local widest = 0
+        for line in (text .. "\n"):gmatch("(.-)\n") do widest = math.max(widest, measure(font, line)) end
+        return widest
+    end
+
+    local function chars(s)
+        local out = {}
+        for ch in s:gmatch("[^\128-\191][\128-\191]*") do out[#out + 1] = ch end
+        return out
+    end
+
+    -- A table as lines of plain text, its columns padded to one width, "│" between them and
+    -- a rule under the header, in at most `room` characters: when it doesn't fit, the widest
+    -- columns are cut down until it does (to 3 characters at least), and a cell cut short
+    -- ends in "…".
+    function UI.TableLines(rows, align, room)
+        local n = 0
+        for _, row in ipairs(rows) do n = math.max(n, type(row) == "table" and #row or 0) end
+        if n == 0 then return {} end
+        local cells, widths = {}, {}
+        for j = 1, n do widths[j] = 1 end
+        for i, row in ipairs(rows) do
+            if type(row) ~= "table" then row = {} end
+            cells[i] = {}
+            for j = 1, n do
+                cells[i][j] = chars(tostring(row[j] or ""))
+                widths[j] = math.max(widths[j], #cells[i][j])
+            end
+        end
+        local cap = 0
+        for j = 1, n do cap = math.max(cap, widths[j]) end
+        local function total()
+            local sum = 3 * (n - 1)
+            for j = 1, n do sum = sum + math.min(widths[j], cap) end
+            return sum
+        end
+        while cap > 3 and total() > room do cap = cap - 1 end
+        local lines = {}
+        for i, row in ipairs(cells) do
+            local out = {}
+            for j = 1, n do
+                local c, w, a = row[j], math.min(widths[j], cap), (align or ""):sub(j, j)
+                local text = #c > w and (table.concat(c, "", 1, w - 1) .. "…") or table.concat(c)
+                local pad = w - math.min(#c, w)
+                if a == "r" then
+                    text = (" "):rep(pad) .. text
+                elseif a == "c" then
+                    text = (" "):rep(floor(pad / 2)) .. text .. (" "):rep(pad - floor(pad / 2))
+                else
+                    text = text .. (" "):rep(pad)
+                end
+                out[j] = text
+            end
+            lines[#lines + 1] = (table.concat(out, " │ "):gsub(" +$", ""))
+            if i == 1 then
+                local rule = {}
+                for j = 1, n do rule[j] = ("─"):rep(math.min(widths[j], cap)) end
+                lines[#lines + 1] = table.concat(rule, "─┼─")
+            end
+        end
+        return lines
+    end
+
+    -- The table as game text: the header in the heading color, rules and bars dimmed.
+    local function tableText(seg, room)
+        local lines = UI.TableLines(type(seg.t) == "table" and seg.t or {}, seg.a, room)
+        local dim, head = "|cff" .. Skin.Hex("dim"), "|cff" .. Skin.Hex("heading")
+        for i, line in ipairs(lines) do
+            line = line:gsub("|", "||")
+            if i == 1 then
+                line = head .. line:gsub("│", "|r" .. dim .. "│|r" .. head) .. "|r"
+            elseif i == 2 then
+                line = dim .. line .. "|r"
+            else
+                line = line:gsub("│", dim .. "│|r")
+            end
+            lines[i] = line
+        end
+        return table.concat(lines, "\n")
+    end
+
+    local function prose()
+        local fs = messageChild:CreateFontString(nil, "OVERLAY")
+        fs:SetFontObject(Skin.fonts.text)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(true)
+        fs:SetSpacing(2)
+        fs.box, fs.chip = false, false -- what Release hides with a piece: none here
+        return fs
+    end
+
+    local function codeBlock()
+        local fs = messageChild:CreateFontString(nil, "OVERLAY")
+        fs:SetFontObject(Skin.fonts.mono)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(true)
+        fs:SetNonSpaceWrap(true) -- a long path or URL breaks instead of running past the box
+        fs:SetSpacing(2)
+        fs.chip = false
+        fs.box = Skin.Box(messageChild, { shape = "control", fill = "codeBg", ring = "line", free = true, sub = -4 })
+        fs.box:SetPoint("TOPLEFT", fs, "TOPLEFT", -PAD, PAD)
+        fs.box:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", PAD, -PAD)
+        return fs
+    end
+
+    local function run(font)
+        return function()
+            local fs = messageChild:CreateFontString(nil, "OVERLAY")
+            fs:SetFontObject(font)
+            fs:SetWordWrap(false)
+            fs.box, fs.chip = false, false
+            if font == Skin.fonts.mono then
+                fs.chip = messageChild:CreateTexture(nil, "BACKGROUND", nil, -2)
+                fs.chip:SetTexture(WHITE)
+                fs.chip:SetPoint("TOPLEFT", fs, "TOPLEFT", -CHIP, 1)
+                fs.chip:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", CHIP, -1)
+            end
+            return fs
+        end
+    end
+    local textRun, monoRun = run(Skin.fonts.text), run(Skin.fonts.mono)
+
+    -- Prose with inline code, `width` wide: each run of text or code is a string of its own,
+    -- set after the one before and wrapped at spaces (anywhere, when a word is wider than
+    -- the line), in a frame as tall as its lines.
+    local function inlineBlock(text, width)
+        local holder = take("holder", function()
+            local f = CreateFrame("Frame", nil, messageChild)
+            f.box, f.chip = false, false
+            return f
+        end)
+        holder:SetWidth(width)
+        local textSize, monoSize = fontSize(Skin.fonts.text, 13), fontSize(Skin.fonts.mono, 12)
+        local lineHeight = math.max(textSize, monoSize) + 5
+        local space = { [false] = math.max(1, measure(Skin.fonts.text, "a a") - measure(Skin.fonts.text, "aa")), [true] = charWidth() }
+        local x, row = 0, 0
+        -- How wide s is drawn (spaces at its ends count, which a string's width may not).
+        local function span(s, mono)
+            local lead, body, trail = s:match("^( *)(.-)( *)$")
+            local w = (#lead + #trail) * space[mono] + (body ~= "" and measure(mono and Skin.fonts.mono or Skin.fonts.text, body) or 0)
+            return w + (mono and 2 * CHIP or 0)
+        end
+        -- The end of the longest start of s that fits in room: whole words, or with `anywhere`
+        -- (at a line's start) as many characters as fit, one at least. nil when none fit.
+        local function cut(s, mono, room, anywhere)
+            local best, pos = nil, 1
+            while true do
+                local _, e = s:find("^ *[^ ]+", pos)
+                if not e or span(s:sub(1, e), mono) > room then break end
+                best, pos = e, e + 1
+            end
+            if best or not anywhere then return best end
+            local e = 0
+            repeat
+                local unit = s:sub(e + 1, e + 2) == "||" and "||" or s:match("^[^\128-\191][\128-\191]*", e + 1) or s:sub(e + 1, e + 1)
+                if e > 0 and span(s:sub(1, e + #unit), mono) > room then break end
+                e = e + #unit
+            until e >= #s
+            return e
+        end
+        local function put(s, mono, color)
+            local lead, body = s:match("^( *)(.-) *$")
+            if body ~= "" then
+                local fs = take(mono and "mono" or "text", mono and monoRun or textRun)
+                fs:SetText(color and (color .. body .. "|r") or body)
+                local size = mono and monoSize or textSize
+                fs:SetPoint("TOPLEFT", holder, "TOPLEFT", x + #lead * space[mono] + (mono and CHIP or 0),
+                    -row * lineHeight - floor((lineHeight - size) / 2))
+                if fs.chip then
+                    fs.chip:SetVertexColor(Skin.Color("codeBg"))
+                    fs.chip:Show()
+                end
+            end
+            x = x + span(s, mono)
+        end
+        local function flowRun(s, mono)
+            local color
+            if not mono then
+                local c, inner = s:match("^(|c%x%x%x%x%x%x%x%x)(.*)|r$")
+                if c then color, s = c, inner end
+            end
+            while s ~= "" do
+                local e = cut(s, mono, width - x, x == 0)
+                if e then
+                    put(s:sub(1, e), mono, color)
+                    s = s:sub(e + 1)
+                end
+                if s ~= "" then
+                    x, row = 0, row + 1
+                    s = s:gsub("^ +", "")
+                end
+            end
+        end
+        local firstLine = true
+        for line in (text .. "\n"):gmatch("(.-)\n") do
+            if not firstLine then x, row = 0, row + 1 end
+            firstLine = false
+            for plain, code in (line .. "\1\2"):gmatch("(.-)\1(.-)\2") do
+                flowRun(plain, false)
+                flowRun((code:gsub("\1", "")), true)
+            end
+        end
+        holder:SetHeight((row + 1) * lineHeight)
+        return holder
+    end
+
+    -- Lays the segments out as one message, yours in a bubble (as wide as its widest piece
+    -- needs) or the agent's at the full width. Returns where it starts and ends ({ region,
+    -- inset }) and its width, or nothing when no segment could be drawn.
+    function Mono.Place(segments, mine)
+        local full = messageWidth() - 8
+        local most = mine and floor(full * 0.75) or full
+        local cw = charWidth()
+        local width = full
+        if mine then
+            width = 40
+            for _, seg in ipairs(segments) do
+                local w = 0
+                if type(seg) == "string" then
+                    w = widestLine(Skin.fonts.text, (seg:gsub("[\1\2]", "")))
+                elseif type(seg) == "table" and seg.c then
+                    w = widestLine(Skin.fonts.mono, (tostring(seg.c):gsub("|", "||"))) + 2 * PAD
+                elseif type(seg) == "table" and seg.t then
+                    w = widestLine(Skin.fonts.mono, tableText(seg, floor((most - 2 * PAD - 2) / cw))) + 2 * PAD
+                end
+                width = math.max(width, math.ceil(w + 1))
+            end
+            width = math.min(width, most)
+        end
+        -- What runs and table columns are fitted to (some width, should the window claim none).
+        local room = width > 20 and width or 120
+        local x = mine and (full + 4 - width - SIZE.bubbleX) or 4
+        local first, last
+        for _, seg in ipairs(segments) do
+            local region, inset
+            if type(seg) == "string" and seg:find("\1", 1, true) then
+                region, inset = inlineBlock(seg, room), 0
+            elseif type(seg) == "string" then
+                region, inset = take("prose", prose), 0
+                region:SetWidth(width)
+                region:SetText(seg)
+            elseif type(seg) == "table" and (seg.c or seg.t) then
+                region, inset = take("code", codeBlock), PAD
+                region:SetWidth(width - 2 * PAD)
+                region:SetText(seg.c and (tostring(seg.c):gsub("|", "||")) or tableText(seg, floor((room - 2 * PAD - 2) / cw)))
+                region.box:Show()
+            end
+            if region then
+                if not first and mine then flow.gap = flow.gap + SIZE.bubbleY end
+                flow.gap = flow.gap + inset
+                place(region, x + inset, inset + 10)
+                first = first or { region, inset }
+                last = { region, inset }
+            end
+        end
+        if not first then return end
+        flow.gap = last[2] + 18 + (mine and SIZE.bubbleY or 0)
+        return first, last, width
+    end
+end
+
+-- The bubble, the button and the hover tint go around a message from the top left of its
+-- first piece to the bottom of its last, `width` wide (a piece inset by its padding).
+local function anchorMessage(fs, first, firstInset, last, lastInset, width)
+    local function around(region, left, top, right, bottom)
+        region:ClearAllPoints()
+        region:SetPoint("TOPLEFT", first, "TOPLEFT", -firstInset - left, firstInset + top)
+        region:SetPoint("BOTTOMRIGHT", last, "BOTTOMLEFT", width - lastInset + right, -lastInset - bottom)
+    end
+    around(fs.bubble, SIZE.bubbleX, SIZE.bubbleY, SIZE.bubbleX, SIZE.bubbleY)
+    around(fs.hit, 4, 4, 4, 4)
+    around(fs.hover, 6, 5, 6, 5)
+end
+
 -- A message: yours in a bubble against the right edge, as wide as its text needs up to
--- three quarters of the conversation; the agent's the full width.
-local function placeMessage(fs, text, mine)
+-- three quarters of the conversation; the agent's the full width. With segments (a message
+-- with code or a table), it is drawn from those, piece by piece.
+local function placeMessage(fs, text, mine, segments)
     local full = messageWidth() - 8
     fs.bubble:SetShown(mine)
+    if type(segments) == "table" and #segments > 0 then
+        local first, last, width = Mono.Place(segments, mine)
+        if first then
+            fs:Hide()
+            anchorMessage(fs, first[1], first[2], last[1], last[2], width)
+            return
+        end
+    end
+    local width = full
     if mine then
         local most = floor(full * 0.75)
         fs:SetWidth(most)
         fs:SetText(text)
-        local width = math.min(most, math.ceil((fs:GetStringWidth() or most) + 1))
+        width = math.min(most, math.ceil((fs:GetStringWidth() or most) + 1))
         if width < 40 then width = 40 end
         fs:SetWidth(width)
         flow.gap = flow.gap + SIZE.bubbleY
@@ -668,6 +1013,7 @@ local function placeMessage(fs, text, mine)
         fs:SetText(text)
         place(fs, 4, 18)
     end
+    anchorMessage(fs, fs, 0, fs, 0, width)
 end
 
 local newPanel = CreateFrame("Frame", nil, right)
@@ -992,6 +1338,7 @@ function renderView()
         fs.hit:Hide()
         fs.bubble:Hide()
     end
+    Mono.Release()
     hideAsk()
     earlier:Hide()
     if selected and selected.new then
@@ -1038,7 +1385,8 @@ function renderView()
     local count = #items
     for i, item in ipairs(items) do
         local fs = messageString(i)
-        placeMessage(fs, item.x, item.r == "u")
+        placeMessage(fs, item.x, item.r == "u", item.g)
+        -- Copying takes the message's text, not its segments: the code with its markdown.
         fs.hit.copyText = item.x
         fs.hit:Show()
     end
