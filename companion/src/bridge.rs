@@ -121,12 +121,45 @@ pub struct LinkState {
     pub acked: BTreeMap<String, u64>,
     pub client_key: Option<String>,
     pub polling: Option<bool>,
+    /// The T3 sign-in the game's updates come from (`Config::server_key`), and the stamp
+    /// they carry for it (`lid`). The stamp changes with the T3, and on a sign-out: the
+    /// game then drops everything it had from the previous one.
+    pub login_key: Option<String>,
+    pub login: Option<String>,
 }
 
 impl Default for LinkState {
     fn default() -> LinkState {
-        LinkState { wow_key: None, ui_session: None, slot: 1, signal: 1, signal_time: 0, acked: BTreeMap::new(), client_key: None, polling: None }
+        LinkState {
+            wow_key: None,
+            ui_session: None,
+            slot: 1,
+            signal: 1,
+            signal_time: 0,
+            acked: BTreeMap::new(),
+            client_key: None,
+            polling: None,
+            login_key: None,
+            login: None,
+        }
     }
+}
+
+/// Commands that mean the same whichever T3 the game thought it was talking to; any
+/// other one sent under a previous sign-in's stamp is refused, not run on this T3.
+/// Keep in step with LOGIN_FREE in addon/T3WoW/Link.lua.
+const LOGIN_FREE: [&str; 4] = ["hello", "ui", "probe", "refresh"];
+
+/// Why such a command was refused, for the game window.
+const OTHER_LOGIN: &str = "not sent: T3 WoW has switched to another T3, and this was meant for the previous one";
+
+/// A new stamp for the game's updates (8 hex digits, random).
+fn new_login_stamp() -> String {
+    let mut bytes = [0u8; 4];
+    if getrandom::fill(&mut bytes).is_err() {
+        bytes = (crate::config::now_ms() as u32).to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub enum CaptureMessage {
@@ -226,8 +259,9 @@ pub struct Bridge {
     launchers: HashMap<String, Option<String>>,
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
-    /// Commands waiting to run: client key, the UI session they came in, the command.
-    commands: VecDeque<(String, String, Value)>,
+    /// Commands waiting to run: client key, the UI session they came in, the stamp of the
+    /// sign-in the game drew them under (none from an older addon), the command.
+    commands: VecDeque<(String, String, Option<String>, Value)>,
     /// Per client key, the highest command queued to run but not yet run (not saved: a
     /// command only counts as done once it ran).
     queued: HashMap<String, u64>,
@@ -535,15 +569,65 @@ impl Bridge {
     pub fn set_client(&mut self, client: Arc<dyn T3>) {
         self.client = client;
         self.auth_error = None;
+        self.drop_poll();
+    }
+
+    /// The game's updates come from the T3 sign-in saved under `key` (`Config::server_key`):
+    /// at every start, and whenever the companion moves to another T3. When that isn't the
+    /// sign-in they came from before (state.json remembers it across restarts), everything
+    /// from the previous one goes, here and in the game (see `new_login`). The same T3 on
+    /// another port is the same sign-in: nothing goes.
+    pub fn set_login(&mut self, key: &str) {
+        if self.link.login_key.as_deref() == Some(key) && self.link.login.is_some() {
+            return;
+        }
+        let why = match self.link.login_key.as_deref() {
+            Some(_) => format!("T3 WoW moved to another T3 ({key})"),
+            None => format!("T3 WoW uses the T3 sign-in for {key}"),
+        };
+        self.link.login_key = Some(key.to_string());
+        self.drop_poll();
+        self.new_login(&why);
+    }
+
+    /// The tray's Sign out: what was read with that sign-in goes, here and in the game.
+    pub fn sign_out(&mut self) {
+        self.drop_poll();
+        self.new_login("Signed out of T3");
+    }
+
+    /// A poll under way reads the previous T3 (or sign-in): drop it and start afresh.
+    fn drop_poll(&mut self) {
         self.poll_run = None;
         self.poll_failures = 0;
         self.poll_at = 0;
         self.slow_at = 0;
     }
 
-    /// T3 answers as a different server than before (`login --origin` pointed the companion
-    /// elsewhere): drop what was read from the old one (its machines, threads, projects, the
-    /// open thread), which the new one may not have.
+    /// A new T3 sign-in: forgets what the previous one showed, gives the game's updates a
+    /// new stamp (the game drops its own copy of the previous one's threads, open thread,
+    /// notifications and waiting commands when it sees it), blanks the slot files that
+    /// still hold the previous one's threads, and sends the game the new state.
+    fn new_login(&mut self, why: &str) {
+        self.forget_server();
+        self.envs = vec![Env { id: String::new(), name: hostname(), ok: true }];
+        self.local_env_id = None;
+        self.events.clear();
+        self.notes.clear();
+        self.outcomes.clear();
+        self.list_errors.clear();
+        self.polled_ok = false;
+        self.auth_error = None;
+        self.poll_error = None;
+        self.view_gen += 1;
+        self.link.login = Some(new_login_stamp());
+        self.slots.clear_slots();
+        self.republish();
+        self.save_state();
+        self.log(&format!("{why}: the game drops the previous sign-in's threads"));
+    }
+
+    /// Drops what was read from the T3 (its machines' threads, projects, the open thread).
     fn forget_server(&mut self) {
         self.view = None;
         self.view_cache = None;
@@ -559,6 +643,7 @@ impl Bridge {
         self.pending_counts.clear();
         self.launchers.clear();
         self.listed_envs.clear();
+        self.stopping.clear();
     }
 
     fn now_ms(&self) -> i64 {
@@ -684,7 +769,7 @@ impl Bridge {
             }
             let entry = self.queued.entry(k.to_string()).or_insert(0);
             *entry = (*entry).max(s);
-            self.commands.push_back((k.to_string(), u.to_string(), command.clone()));
+            self.commands.push_back((k.to_string(), u.to_string(), frame["lid"].as_str().map(str::to_string), command.clone()));
         }
         self.save_state();
     }
@@ -701,7 +786,7 @@ impl Bridge {
 
     /// Runs one command from the game. Returns its outcome for the game, if it has one to
     /// know: a failure (so the window can put the text back), or the thread a "new" started.
-    fn run(&mut self, client_key: &str, command: Value) -> Option<Value> {
+    fn run(&mut self, client_key: &str, login: Option<&str>, command: Value) -> Option<Value> {
         // No machine named: the server's own.
         let env = match str_of(&command["e"]) {
             "" => self.local_env_id.clone().unwrap_or_default(),
@@ -713,6 +798,12 @@ impl Bridge {
         // The command's number plus a hash of it: the same command sent again (after a
         // /reload) is ignored by T3, while a new one that reuses a number after a crash isn't.
         let request_id = format!("t3wow:{client_key}:{}:{:08x}", command["s"], hash_of(&command) as u32);
+        // Drawn while the game still showed another T3 sign-in's threads: its thread and
+        // machine ids (or the task it starts) were meant for that one, not this.
+        if login.is_some_and(|l| Some(l) != self.link.login.as_deref()) && !LOGIN_FREE.contains(&kind.as_str()) {
+            self.log(&format!("{kind} from the game {OTHER_LOGIN}"));
+            return Some(json!({ "s": command["s"], "ok": false, "x": OTHER_LOGIN }));
+        }
         // Any addon can draw commands, so the tray setting decides what the game may do.
         if !self.trust.allows(&kind) {
             let reason = format!("blocked by the T3 WoW tray setting \"Commands from the game\" ({})", self.trust.label());
@@ -1232,9 +1323,10 @@ impl Bridge {
     fn read_links(&mut self) -> Result<(), T3Error> {
         let result = self.client.call("t3_environment_links", json!({}))?;
         let local_env_id = result["environmentId"].as_str().map(str::to_string);
+        // Another server behind the same sign-in (another T3 now runs on this PC): a new
+        // sign-in as far as the game goes. This poll is already the new server's: it stays.
         if self.local_env_id.is_some() && local_env_id != self.local_env_id {
-            self.log(&format!("T3 is now {}: forgetting the previous server's threads", local_env_id.as_deref().unwrap_or("another server")));
-            self.forget_server();
+            self.new_login(&format!("T3 is now {}", local_env_id.as_deref().unwrap_or("another server")));
         }
         self.local_env_id = local_env_id;
         self.push_steps(vec![Step::ServerName(result)]);
@@ -1691,6 +1783,8 @@ impl Bridge {
         out.insert("k".into(), json!(client_key));
         // The UI session this is for: an older session's acks mean nothing to a newer one.
         out.insert("u".into(), json!(self.link.ui_session));
+        // The T3 sign-in this is from: the game drops what it had from another one.
+        out.insert("lid".into(), json!(self.link.login));
         out.insert("ack".into(), json!(client_key.as_ref().and_then(|k| self.link.acked.get(k)).copied().unwrap_or(0)));
         out.insert("envs".into(), json!(self.envs.iter().map(|e| json!({ "id": e.id, "name": plain(&e.name, 40), "ok": e.ok })).collect::<Vec<_>>()));
         out.insert("threads".into(), json!(threads));
@@ -1737,6 +1831,7 @@ impl Bridge {
         // last update.
         let urgent = json!({
             "ack": data["ack"],
+            "lid": data["lid"],
             "events": data["events"],
             "notes": data["notes"],
             "out": data["out"],
@@ -1843,9 +1938,9 @@ impl Bridge {
     /// Runs the game's queued commands. Each counts as done (acked) once it ran, and only
     /// for the UI session it came from: a newer session counts afresh.
     fn run_commands(&mut self) {
-        while let Some((client_key, session, command)) = self.commands.pop_front() {
+        while let Some((client_key, session, login, command)) = self.commands.pop_front() {
             let s = command["s"].as_u64().unwrap_or(0);
-            let outcome = self.run(&client_key, command);
+            let outcome = self.run(&client_key, login.as_deref(), command);
             if Some(session.as_str()) == self.link.ui_session.as_deref() && Some(client_key.as_str()) == self.link.client_key.as_deref() {
                 let entry = self.link.acked.entry(client_key).or_insert(0);
                 *entry = (*entry).max(s);

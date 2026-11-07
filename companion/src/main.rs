@@ -157,18 +157,11 @@ fn command(args: Args) -> Result<(), String> {
             println!("Removed the T3WoW addon and its slots. Your sign-in stays in {}", Config::file().display());
         }
         "login" => {
-            let target = target(&origin).ok_or("T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.")?;
-            let signed = t3::login(&target.origin, &target.key, &|m| println!("{m}"), &|| false)?;
-            // The new T3 and its token are saved together: a running companion moves to both.
-            let mut saved = Ok(());
-            Config::update(|c| {
-                saved = c.set_sign_in(&target.key, &signed.token, signed.expires_at);
-                if let (Ok(()), Some(origin)) = (&saved, &origin) {
-                    c.origin = origin.clone();
-                }
-            });
-            saved?;
-            println!("Signed in to {} ({}).", target.origin, signed.scope);
+            // Always a new sign-in. The new T3 and its token are saved together: a running
+            // companion moves to both, and the game drops what the previous T3 showed.
+            let connected = t3::connect(origin, true, &|m| println!("{m}"), &|| false)?;
+            let scope = connected.signed.map(|s| s.scope).unwrap_or_default();
+            println!("Signed in to {} ({scope}).", connected.origin);
         }
         "status" => {
             let dir = wow_dir(&args, &config)?;

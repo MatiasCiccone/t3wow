@@ -1531,6 +1531,20 @@ function UI.OnInbox(data)
     UI.Refresh()
 end
 
+-- The companion moved to another T3 sign-in (see Link.ForgetLogin): the previous one's
+-- threads, open thread (its Stopping… and a message being copied), question,
+-- notifications and waiting outcomes go. What you typed stays in the box, and chat says
+-- "connected to T3" again once the new one's update is in.
+function UI.ForgetLogin()
+    inbox, selected, echo, notice, stopping = nil, nil, nil, nil, nil
+    copyBox:Hide()
+    awaiting = {}
+    askState.k, askState.picks, askState.sent, askState.sentAt = nil, {}, nil, nil
+    announced = false
+    while #toasts > 0 do removeToast(toasts[#toasts]) end
+    UI.Refresh()
+end
+
 function UI.Notice(text)
     notice = text
     UI.Refresh()

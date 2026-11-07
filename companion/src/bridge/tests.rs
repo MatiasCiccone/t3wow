@@ -164,6 +164,8 @@ impl T3 for FakeT3 {
 struct Written {
     slots: BTreeMap<u32, String>,
     raised: Vec<u32>,
+    /// How many times every slot was blanked.
+    cleared: u32,
     /// While set, every write fails with this error.
     failing: Option<String>,
 }
@@ -188,6 +190,11 @@ impl SlotWriter for FakeSlots {
         Ok(())
     }
     fn clear_signals(&mut self) {}
+    fn clear_slots(&mut self) {
+        let mut written = self.0.lock().unwrap();
+        written.slots.clear();
+        written.cleared += 1;
+    }
     fn flip_probe(&mut self, _real: bool) -> Vec<String> {
         Vec::new()
     }
@@ -1338,4 +1345,139 @@ fn every_stop_tells_the_game_how_it_went_and_stopping_ends_once_the_run_has() {
     rig.t3.set("completed", "2026-11-06T10:08:00Z");
     poll(&mut rig);
     assert_eq!(last_note(&rig), "stop failed: thread_not_interruptible: it runs elsewhere");
+}
+
+/// The `lid` an update in a slot carries.
+fn lid_in(lua: &str) -> String {
+    let at = lua.find(",lid=\"").unwrap_or_else(|| panic!("no lid in {lua}")) + 6;
+    lua[at..].chars().take_while(|c| *c != '"').collect()
+}
+
+#[test]
+fn moved_to_another_t3_everything_from_the_previous_one_goes_even_before_the_new_one_answers() {
+    let mut rig = Rig::new(9_500_000);
+    rig.bridge.set_login("local");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(5000);
+    rig.bridge.tick();
+    let before = rig.bridge.snapshot();
+    assert_eq!(before["threads"].as_array().unwrap().len(), 2);
+    assert!(before["view"].is_object() && !before["events"].as_array().unwrap().is_empty());
+    let old_lid = before["lid"].as_str().unwrap().to_string();
+    assert_eq!(lid_in(&rig.slot(2)), old_lid);
+
+    // `login --origin` points the companion at a T3 that doesn't answer yet.
+    let other = FakeT3::new();
+    other.failing.lock().unwrap().insert("t3_environment_links".into(), "connection refused".into());
+    other.failing.lock().unwrap().insert("t3_thread_list".into(), "connection refused".into());
+    rig.bridge.set_client(other.clone());
+    rig.bridge.set_login("http://box:3773");
+    // The slots holding the previous T3's threads were blanked, then the new state written.
+    assert_eq!(rig.written.lock().unwrap().cleared, 2, "once for the first sign-in, once for this one");
+    rig.advance(5000);
+    rig.bridge.tick();
+    let after = rig.bridge.snapshot();
+    let new_lid = after["lid"].as_str().unwrap().to_string();
+    assert_ne!(new_lid, old_lid);
+    assert_eq!(after["threads"], json!([]));
+    assert_eq!(after["projects"], json!([]));
+    assert_eq!(after["events"], json!([]));
+    assert!(after["view"].is_null());
+    assert_eq!(after["envs"].as_array().unwrap().len(), 1, "only the placeholder for the server itself: {}", after["envs"]);
+    assert_eq!(after["envs"][0]["id"], "");
+    assert!(!rig.bridge.status().t3_ok);
+    // Published with the new stamp, and nothing in the slots still has the old one.
+    let slots: Vec<String> = rig.written.lock().unwrap().slots.values().cloned().collect();
+    assert!(!slots.is_empty());
+    assert!(slots.iter().all(|lua| lid_in(lua) == new_lid && !lua.contains("Fix tests")), "{slots:?}");
+    assert!(other.calls_to("t3_thread_read").is_empty(), "the old open thread isn't read on the new T3");
+}
+
+#[test]
+fn the_same_t3_on_another_port_keeps_its_sign_in_and_what_it_showed() {
+    let mut rig = Rig::new(9_600_000);
+    rig.bridge.set_login("local");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let lid = rig.bridge.snapshot()["lid"].clone();
+    rig.bridge.set_client(rig.t3.clone());
+    rig.bridge.set_login("local");
+    assert_eq!(rig.written.lock().unwrap().cleared, 1, "blanked once, when the first sign-in was set");
+    rig.advance(5000);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["lid"], lid);
+    assert!(snapshot["view"].is_object());
+}
+
+#[test]
+fn a_restart_after_moving_to_another_t3_starts_the_game_afresh_and_one_without_keeps_the_stamp() {
+    let dir = std::env::temp_dir().join(format!("t3wow-login-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("state.json");
+    let start = |key: &str| {
+        let written = Arc::new(Mutex::new(Written::default()));
+        let mut bridge = Bridge::new(FakeT3::new(), Box::new(FakeSlots(Arc::clone(&written))), Some(state.clone()), Box::new(|_| {}), Box::new(|| 1_000_000));
+        bridge.set_login(key);
+        let cleared = written.lock().unwrap().cleared;
+        (bridge.link.login.clone().unwrap(), cleared)
+    };
+    let (first, cleared) = start("local");
+    assert_eq!(cleared, 1, "no record of which T3 the slots were written for: blank them");
+    let (again, cleared) = start("local");
+    assert_eq!((again.as_str(), cleared), (first.as_str(), 0), "the same T3 after a restart");
+    let (moved, cleared) = start("http://box:3773");
+    assert_ne!(moved, first);
+    assert_eq!(cleared, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn signing_out_drops_what_was_read_with_that_sign_in() {
+    let mut rig = Rig::new(9_700_000);
+    rig.bridge.set_login("local");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    let lid = rig.bridge.snapshot()["lid"].clone();
+    assert!(!rig.bridge.snapshot()["threads"].as_array().unwrap().is_empty());
+    rig.bridge.sign_out();
+    let snapshot = rig.bridge.snapshot();
+    assert_ne!(snapshot["lid"], lid);
+    assert_eq!(snapshot["threads"], json!([]));
+    assert_eq!(rig.bridge.link.login_key.as_deref(), Some("local"), "still the same T3");
+}
+
+#[test]
+fn a_command_drawn_under_the_previous_sign_ins_stamp_comes_back_refused() {
+    let mut rig = Rig::new(9_800_000);
+    rig.bridge.set_login("local");
+    let old = rig.bridge.link.login.clone().unwrap();
+    rig.bridge.set_login("http://box:3773");
+    let lid = rig.bridge.link.login.clone().unwrap();
+    // The game still shows the previous T3: a message to one of its threads, a start, and
+    // harmless ones.
+    let q = json!([
+        { "s": 1, "t": "hello", "o": true },
+        { "s": 2, "t": "send", "e": "mac", "id": "t1", "m": "meant for the other T3" },
+        { "s": 3, "t": "new", "m": "a task for the other T3" },
+        { "s": 4, "t": "refresh" },
+    ]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "lid": old, "q": q }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty());
+    assert!(rig.t3.calls_to("t3_thread_launch").is_empty());
+    assert_eq!(rig.bridge.link.acked["c1"], 4, "refused commands count as done");
+    let out = rig.bridge.snapshot()["out"].clone();
+    let refused: Vec<u64> = out.as_array().unwrap().iter().filter(|o| o["ok"] == false).map(|o| o["s"].as_u64().unwrap()).collect();
+    assert_eq!(refused, vec![2, 3], "{out}");
+    assert!(out[0]["x"].as_str().unwrap().contains("another T3"));
+
+    // Once the game has the new stamp, its commands run; so do an older addon's (no stamp).
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "lid": lid, "q": [{ "s": 5, "t": "send", "id": "t1", "m": "now" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 6, "t": "send", "id": "t1", "m": "old addon" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 2);
 }

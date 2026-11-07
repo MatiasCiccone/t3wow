@@ -146,6 +146,7 @@ const STUB_UI = `ns.UI = {
   OnInbox = function() end, Refresh = function() end, Notice = function() end,
   IsShown = function() return false end,
   Alert = function(event) alerts[#alerts + 1] = event end,
+  ForgetLogin = function() forgotten = (forgotten or 0) + 1 end,
 }`;
 
 // Runs `script` after loading Codec.lua and Link.lua (and UI.lua with { ui: true }); its

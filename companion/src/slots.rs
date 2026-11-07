@@ -288,6 +288,8 @@ pub trait SlotWriter: Send {
     fn write_slot(&mut self, n: u32, lua: &str) -> io::Result<()>;
     fn raise_signal(&mut self, n: u32) -> io::Result<()>;
     fn clear_signals(&mut self);
+    /// Blanks every slot's update: what they hold was written for a T3 login that is gone.
+    fn clear_slots(&mut self);
     /// Makes the probe's flip files real (or blank again); returns the types changed.
     fn flip_probe(&mut self, real: bool) -> Vec<String>;
 }
@@ -324,6 +326,15 @@ impl SlotWriter for Slots {
             let file = dir.join(signal_file(n));
             if fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) {
                 let _ = fs::write(&file, b"");
+            }
+        }
+    }
+
+    fn clear_slots(&mut self) {
+        for n in 1..=SLOT_COUNT {
+            let file = self.addons_dir.join(slot_name(n)).join("Inbox.lua");
+            if fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) {
+                let _ = write_whole(&file, b"");
             }
         }
     }
@@ -430,6 +441,23 @@ mod tests {
         assert!(slot_toc.starts_with("## Interface: 16002\n## Title:"));
         assert_eq!(fs::read_to_string(&inbox).unwrap(), "T3WoW_Inbox = { slot = 5 }");
         assert_eq!(fixture_slots(&dir, "16002").set_interface().unwrap(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_the_slots_blanks_every_update_and_nothing_else() {
+        let dir = temp_dir("clear-slots");
+        let mut slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        slots.write_slot(1, "T3WoW_Inbox = { lid = \"old\" }").unwrap();
+        slots.write_slot(SLOT_COUNT, "T3WoW_Inbox = { lid = \"old\" }").unwrap();
+        slots.raise_signal(7).unwrap();
+        slots.clear_slots();
+        for n in [1, SLOT_COUNT] {
+            assert_eq!(fs::read_to_string(dir.join(slot_name(n)).join("Inbox.lua")).unwrap(), "");
+        }
+        assert!(slots.installed());
+        assert_eq!(fs::read(dir.join("T3WoW/sig/0007.ttf")).unwrap(), FIXTURE_FONT, "signals are another matter");
         let _ = fs::remove_dir_all(&dir);
     }
 
