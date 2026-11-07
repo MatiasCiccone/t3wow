@@ -168,19 +168,22 @@ local function renderList()
     for _, r in ipairs(rows) do r:Hide() end
     for _, h in ipairs(headers) do h:Hide() end
     local groups = { working = {}, open = {}, snoozed = {}, settled = {} }
-    -- Threads an agent launched sit under the thread that launched them, as in T3's
-    -- sidebar, and don't count in the group; with their launcher not listed, they stand alone.
+    -- Threads an agent launched sit under the thread that launched them when both are in
+    -- the same group, as in T3's sidebar, and don't count in it. Away from their launcher
+    -- (settled while it's open, or it isn't listed) they show on their own only while
+    -- they're working or need you; otherwise T3's sidebar has no row for them either.
+    local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open" end
     local threads = inbox and inbox.threads or {}
-    local listed, launched = {}, {}
-    for _, t in ipairs(threads) do listed[t.e .. ":" .. t.id] = true end
+    local byId, launched = {}, {}
+    for _, t in ipairs(threads) do byId[t.e .. ":" .. t.id] = t end
     for _, t in ipairs(threads) do
-        local parent = t.par and (t.e .. ":" .. t.par)
-        if parent and listed[parent] then
-            launched[parent] = launched[parent] or {}
-            table.insert(launched[parent], t)
-        else
-            local key = (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open"
-            table.insert(groups[key], t)
+        local parent = t.par and byId[t.e .. ":" .. t.par]
+        if parent and groupOf(parent) == groupOf(t) then
+            local key = t.e .. ":" .. t.par
+            launched[key] = launched[key] or {}
+            table.insert(launched[key], t)
+        elseif not t.par or WORKING[t.s] or (t.s == "waiting" and not t.set) then
+            table.insert(groups[groupOf(t)], t)
         end
     end
     local y, rowIndex, headerIndex = 0, 0, 0
