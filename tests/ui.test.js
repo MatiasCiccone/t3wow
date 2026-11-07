@@ -577,9 +577,11 @@ return table.concat({
   lines(rows, "lrc", 20),
   lines({ { "café", "b" }, { "x", "y" } }, nil, 80),
   lines({ { "abcdef", "ghijkl", "mnop" }, { "a", "b", "c" } }, nil, 10),
+  lines({ { "abcdef", "ghijkl" }, { "a", "b" } }, nil, 6),
+  lines({ { "abcdef", "ghijkl" }, { "a", "b" } }, nil, 4),
 }, "\\n~\\n")
 `);
-  const [wide, narrow, accents, floor] = out.split("\n~\n");
+  const [wide, narrow, accents, floor, six, four] = out.split("\n~\n");
   assert.deepEqual(wide.split("\n"), [
     "Name        │ Size │ Note",
     "────────────┼──────┼─────",
@@ -599,6 +601,9 @@ return table.concat({
   // Columns keep 3 characters; past that, the last ones give way to a "…" column.
   assert.deepEqual(floor.split("\n"), ["ab… │ …", "────┼──", "a   │ …"]);
   for (const line of floor.split("\n")) assert.ok([...line].length <= 10, line);
+  // Narrower still, the one column left is cut to fit; with no room for it, "…" alone.
+  assert.deepEqual(six.split("\n"), ["a… │ …", "───┼──", "a  │ …"]);
+  assert.deepEqual(four.split("\n"), ["…", "─", "…"]);
 });
 
 test("code, inline code and tables are drawn in the monospace font, and copying still takes the text", () => {
