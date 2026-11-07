@@ -220,113 +220,130 @@ local function button(parent, text, width, onClick, variant)
 end
 
 -- A dropdown: click it to open a list, pick one. Every dropdown is built here, so a reskin
--- restyles them in one place. menu.entries() returns the list, asked again before it can
--- show: { text, value } entries can be picked (menu.pick(value), and menu.isSelected(value)
+-- restyles them in one place. menu.entries() returns the list, asked again each time it
+-- opens: { text, value } entries can be picked (menu.pick(value), and menu.isSelected(value)
 -- checks one), { text, note = true } lines can't (an empty list's note). The widget's
--- SetLabel(text) sets what it shows closed, and asks for the list again.
--- Clients with Blizzard's menu system get WowStyle1DropdownTemplate, which scrolls a long
--- list and doesn't taint; older ones get UIDropDownMenu, which lists the first
--- DROPDOWN_CAP entries.
-local DROPDOWN_ROWS, DROPDOWN_ROW_HEIGHT, DROPDOWN_CAP = 15, 20, 40
-local MODERN_DROPDOWN = MenuUtil ~= nil and C_XMLUtil ~= nil and C_XMLUtil.GetTemplateInfo ~= nil
-    and C_XMLUtil.GetTemplateInfo("WowStyle1DropdownTemplate") ~= nil
+-- SetLabel(text) sets what it shows closed.
+-- The list is the addon's own, drawn in the theme: Blizzard's menus draw their own art,
+-- shared with every other addon, and UIDropDownMenu can taint the game's menus. One list
+-- serves every dropdown and opens under the one clicked; past 15 rows it scrolls.
+local dropdown
+do
+    local ROWS, ROW_HEIGHT, PAD = 15, 20, 4
+    local list = CreateFrame("Frame", "T3WoWDropdownList", UIParent)
+    list:SetFrameStrata("FULLSCREEN_DIALOG")
+    list:SetFrameLevel(20)
+    list:SetClampedToScreen(true)
+    list:EnableMouse(true)
+    list:Hide()
+    Skin.Box(list, { shape = "control", fill = "card", ring = "border", ringLayer = "BORDER" })
+    -- Escape closes it, and only it, as with the game's menus (UIMenus); a client without
+    -- that table closes it with the window.
+    tinsert(type(UIMenus) == "table" and UIMenus or UISpecialFrames, "T3WoWDropdownList")
+    local scroll, child = makeScroll(list, 100)
+    scroll:SetPoint("TOPLEFT", PAD, -PAD)
+    -- A click anywhere else closes it, as the game's menus do.
+    local catcher = CreateFrame("Button", nil, UIParent)
+    catcher:SetFrameStrata("FULLSCREEN_DIALOG")
+    catcher:SetFrameLevel(10)
+    catcher:SetAllPoints(UIParent)
+    catcher:RegisterForClicks("AnyUp")
+    catcher:SetScript("OnClick", function() list:Hide() end)
+    catcher:Hide()
 
--- The closed dropdown in the theme: the template's art is hidden behind a themed box with a
--- chevron, and its text takes the theme's font. The open list stays the game's own.
-local function hideArt(f)
-    if type(f) ~= "table" or not f.GetRegions then return end
-    for _, region in ipairs({ f:GetRegions() }) do
-        if type(region) == "table" and region.IsObjectType and region:IsObjectType("Texture") then region:SetAlpha(0) end
-    end
-end
+    local rows, owner = {}, nil
+    list.rows = rows
+    list:SetScript("OnHide", function()
+        catcher:Hide()
+        owner = nil
+    end)
 
-local function skinDropdown(dd, name)
-    hideArt(dd)
-    local box = Skin.Box(dd, { shape = "control", fill = "input", ring = "border", free = true, layer = "BORDER" })
-    local chevron = Skin.Glyph(dd, "chevron", 14, "muted", "OVERLAY")
-    local text = dd.Text or (name and _G[name .. "Text"])
-    if MODERN_DROPDOWN then
-        box:SetAllPoints(dd)
-    else
-        -- UIDropDownMenu draws its box inside a 16-pixel margin; its arrow button opens the
-        -- list, so it is stretched over the whole box.
-        box:SetPoint("TOPLEFT", dd, "TOPLEFT", 18, -2)
-        box:SetPoint("BOTTOMRIGHT", dd, "BOTTOMRIGHT", -18, 6)
-        local arrow = dd.Button or (name and _G[name .. "Button"])
-        if type(arrow) == "table" and arrow.ClearAllPoints then
-            arrow:ClearAllPoints()
-            arrow:SetAllPoints(box.proxy)
-            for _, getter in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetDisabledTexture", "GetHighlightTexture" }) do
-                local tex = arrow[getter] and arrow[getter](arrow)
-                if type(tex) == "table" then tex:SetAlpha(0) end
-            end
-        end
-    end
-    chevron:SetPoint("RIGHT", box.proxy, "RIGHT", -8, 0)
-    if type(text) == "table" and text.SetFontObject then
-        text:SetFontObject(Skin.fonts.text)
-        text:ClearAllPoints()
-        text:SetPoint("LEFT", box.proxy, "LEFT", 9, 0)
-        text:SetPoint("RIGHT", chevron, "LEFT", -4, 0)
-        text:SetJustifyH("LEFT")
-    end
-end
-
-local function dropdown(parent, name, width, menu)
-    local dd
-    if MODERN_DROPDOWN then
-        dd = CreateFrame("DropdownButton", name, parent, "WowStyle1DropdownTemplate")
-        dd:SetWidth(width)
-        dd:SetupMenu(function(_, root)
-            local list = menu.entries()
-            if #list > DROPDOWN_ROWS then root:SetScrollMode(DROPDOWN_ROWS * DROPDOWN_ROW_HEIGHT) end
-            for _, entry in ipairs(list) do
-                if entry.note then
-                    root:CreateTitle(entry.text)
-                else
-                    root:CreateRadio(entry.text, menu.isSelected, function(value)
-                        menu.pick(value)
-                        return MenuResponse and MenuResponse.Close
-                    end, entry.value)
-                end
-            end
+    local function row(index)
+        local r = rows[index]
+        if r then return r end
+        r = CreateFrame("Button", nil, child)
+        r:SetHeight(ROW_HEIGHT)
+        local fs = r:CreateFontString(nil, "OVERLAY")
+        fs:SetFontObject(Skin.fonts.text)
+        fs:SetPoint("LEFT", 24, 0)
+        fs:SetPoint("RIGHT", -8, 0)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(false)
+        r:SetFontString(fs)
+        r:SetNormalFontObject(Skin.fonts.text)
+        r:SetHighlightFontObject(Skin.fonts.text)
+        r:SetDisabledFontObject(Skin.fonts.small)
+        r.check = Skin.Glyph(r, "check", 14, "accent", "OVERLAY")
+        r.check:SetPoint("LEFT", 6, 0)
+        r:SetScript("OnClick", function(self)
+            local menu, value = owner and owner.menu, self.entry and self.entry.value
+            list:Hide()
+            if menu then menu.pick(value) end
         end)
+        Skin.Hover(r)
+        rows[index] = r
+        return r
+    end
+
+    local function open(dd)
+        owner = dd
+        local entries = dd.menu.entries()
+        local width = dd:GetWidth() or 0
+        for index, entry in ipairs(entries) do
+            local r = row(index)
+            r.entry = entry
+            r:SetText(entry.text)
+            r.checked = not entry.note and dd.menu.isSelected(entry.value) and true or false
+            r.check:SetShown(r.checked)
+            r:SetEnabled(not entry.note)
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", child, "TOPLEFT", 0, -(index - 1) * ROW_HEIGHT)
+            r:SetPoint("TOPRIGHT", child, "TOPRIGHT", 0, -(index - 1) * ROW_HEIGHT)
+            r:Show()
+            width = math.max(width, (r:GetFontString():GetStringWidth() or 0) + 36)
+        end
+        for index = #entries + 1, #rows do rows[index]:Hide() end
+        local scrolls = #entries > ROWS
+        local shown = math.min(#entries, ROWS)
+        list.scrollHeight = scrolls and shown * ROW_HEIGHT or false
+        local bar = scroll.ScrollBar
+        if type(bar) == "table" and bar.SetShown then bar:SetShown(scrolls) end
+        child:SetSize(width, math.max(1, #entries * ROW_HEIGHT))
+        -- Room on the right for the scroll bar, which sits just outside the scroll frame.
+        scroll:SetPoint("BOTTOMRIGHT", list, "BOTTOMRIGHT", -PAD - (scrolls and 12 or 0), PAD)
+        list:SetSize(width + 2 * PAD + (scrolls and 12 or 0), math.max(1, shown) * ROW_HEIGHT + 2 * PAD)
+        scroll:SetVerticalScroll(0)
+        list:ClearAllPoints()
+        list:SetPoint("TOPLEFT", dd, "BOTTOMLEFT", 0, -2)
+        catcher:Show()
+        list:Show()
+    end
+
+    function dropdown(parent, name, width, menu)
+        local dd = CreateFrame("Button", name, parent)
+        dd:SetSize(width, 26)
+        dd.menu = menu
+        Skin.Box(dd, { shape = "control", fill = "input", ring = "border" })
+        local chevron = Skin.Glyph(dd, "chevron", 14, "muted", "OVERLAY")
+        chevron:SetPoint("RIGHT", -8, 0)
+        dd.label = dd:CreateFontString(nil, "OVERLAY")
+        dd.label:SetFontObject(Skin.fonts.text)
+        dd.label:SetPoint("LEFT", 9, 0)
+        dd.label:SetPoint("RIGHT", chevron, "LEFT", -4, 0)
+        dd.label:SetJustifyH("LEFT")
+        dd.label:SetWordWrap(false)
+        dd:SetScript("OnClick", function(self)
+            if owner == self and list:IsShown() then list:Hide() else open(self) end
+        end)
+        dd:SetScript("OnHide", function(self) if owner == self then list:Hide() end end)
+        Skin.Hover(dd)
+        -- An open list stays as it is under the cursor; it's asked for again next time.
         function dd:SetLabel(text)
-            -- An open list stays as it is under the cursor; it's asked for again next time.
-            if not self:IsMenuOpen() then self:GenerateMenu() end
-            self:OverrideText(text)
+            self.text = text
+            self.label:SetText(text)
         end
-    else
-        dd = CreateFrame("Frame", name, parent, "UIDropDownMenuTemplate")
-        UIDropDownMenu_SetWidth(dd, width)
-        -- UIDropDownMenu_Initialize also runs this once while the addon loads: entries()
-        -- must cope with nothing received yet.
-        UIDropDownMenu_Initialize(dd, function(_, level)
-            local list = menu.entries()
-            for index, entry in ipairs(list) do
-                local info = UIDropDownMenu_CreateInfo()
-                if index > DROPDOWN_CAP then
-                    info.text, info.isTitle, info.notCheckable = format("…and %d more", #list - DROPDOWN_CAP), true, true
-                    UIDropDownMenu_AddButton(info, level)
-                    break
-                end
-                info.text = entry.text
-                if entry.note then
-                    info.isTitle, info.notCheckable = true, true
-                else
-                    info.checked = menu.isSelected(entry.value)
-                    info.func = function()
-                        menu.pick(entry.value)
-                        CloseDropDownMenus()
-                    end
-                end
-                UIDropDownMenu_AddButton(info, level)
-            end
-        end)
-        function dd:SetLabel(text) UIDropDownMenu_SetText(self, text) end
+        return dd
     end
-    skinDropdown(dd, name)
-    return dd
 end
 
 -- ---------------------------------------------------------------- thread list
@@ -1605,21 +1622,14 @@ do
         return label
     end
 
-    -- Greys a dropdown out (and back), under either menu system.
+    -- Greys a dropdown out (and back).
     local function setDropdownEnabled(dd, on)
-        if MODERN_DROPDOWN then
-            dd:SetEnabled(on)
-        elseif on then
-            UIDropDownMenu_EnableDropDown(dd)
-        else
-            UIDropDownMenu_DisableDropDown(dd)
-        end
+        dd:SetEnabled(on)
         dd:SetAlpha(on and 1 or 0.5)
     end
 
-    -- Where a dropdown sits: UIDropDownMenu draws its box 18 pixels in from its left.
     local function placeDropdown(dd)
-        dd:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", SIZE.field - (MODERN_DROPDOWN and 0 or 18), layoutY - (MODERN_DROPDOWN and 2 or 0))
+        dd:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", SIZE.field, layoutY - 2)
     end
 
     local function durationName(d)
