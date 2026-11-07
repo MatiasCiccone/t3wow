@@ -74,3 +74,40 @@ assert(Link.Status().signals == "off", Link.Status().signals)
 return "ok"
 `);
 });
+
+test("with no companion running, slot loads back off instead of using up the session", () => {
+  runGame(`
+Link.Init()
+tick(600)
+assert(#loads <= 16, "loads in 10 minutes: " .. #loads)
+assert(Link.Stalled(), "not stalled")
+-- The companion starts: the next load brings its answer, and loads for a command are quick again.
+local function answer(ack)
+  for n = #loads + 1, #loads + 3 do inboxes[string.format("T3WoW_S%03d", n)] = { k = "c1", u = Link.state.uiSession, ack = ack, now = time() } end
+end
+answer(1)
+tick(61)
+assert(Link.Pending() == 0 and not Link.Stalled(), "still waiting")
+Link.Send({ t = "send", id = "t1", m = "hi" })
+local count = #loads
+tick(4)
+assert(#loads - count == 1, "after an answer: " .. (#loads - count) .. " loads in 4 s")
+return "ok"
+`);
+});
+
+test("a waiting command's nudges back off and stop once the companion counts as not answering", () => {
+  runGame(`
+real[PROBE_VALID] = true
+Link.Init()
+inboxes.T3WoW_S001 = { k = "c1", u = Link.state.uiSession, ack = 1, ns = 100, nt = time() }
+tick(6)
+assert(Link.Status().signals == "on", Link.Status().signals)
+local count = #loads
+Link.Send({ t = "send", id = "t1", m = "anyone there?" })
+tick(300)
+assert(#loads - count <= 3, "nudges in 5 minutes: " .. (#loads - count))
+assert(Link.Stalled(), "not stalled")
+return "ok"
+`);
+});
