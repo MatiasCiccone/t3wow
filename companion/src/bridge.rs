@@ -9,7 +9,7 @@ use crate::t3::{T3Error, T3};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -162,6 +162,8 @@ pub struct Bridge {
     /// `updatedAt` and the time they were read at: T3's list says "running" while an agent
     /// waits on a question, and only a thread read has the count.
     pending_counts: HashMap<String, (String, i64, u64)>,
+    /// Machines whose threads were listed at least once since the companion started.
+    listed_envs: HashSet<String>,
     commands: VecDeque<(String, Value)>,
     last_publish_at: i64,
     last_published_hash: Option<u64>,
@@ -263,6 +265,7 @@ impl Bridge {
             event_seq: 0,
             last_status: HashMap::new(),
             pending_counts: HashMap::new(),
+            listed_envs: HashSet::new(),
             commands: VecDeque::new(),
             last_publish_at: 0,
             last_published_hash: None,
@@ -520,6 +523,7 @@ impl Bridge {
                     for thread in &threads {
                         self.track_status(&env, thread);
                     }
+                    self.listed_envs.insert(env.clone());
                     set_entry(&mut self.threads, &env, threads);
                     set_entry(&mut self.settled_totals, &env, settled_total);
                     if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
@@ -606,7 +610,10 @@ impl Bridge {
         let key = format!("{env}:{}", str_of(&thread["threadId"]));
         let status = str_of(&thread["status"]).to_string();
         let before = self.last_status.insert(key, status.clone());
-        if before.as_deref().is_some_and(working) && !working(&status) {
+        // A thread new since the last list that already waits on you (an agent that asked
+        // straight away) notifies too; on the first list everything is old news.
+        let new_and_waiting = before.is_none() && status == "waiting" && self.listed_envs.contains(env);
+        if new_and_waiting || (before.as_deref().is_some_and(working) && !working(&status)) {
             self.event_seq = (self.event_seq + 1).max(self.now_ms());
             self.events.push(json!({
                 "n": self.event_seq,

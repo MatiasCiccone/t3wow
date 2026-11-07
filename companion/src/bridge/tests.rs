@@ -23,6 +23,12 @@ impl FakeT3 {
         threads[0]["updatedAt"] = json!(updated_at);
     }
 
+    /// The thread a read asks for (the first one if it names none).
+    fn thread(&self, id: &Value) -> Value {
+        let threads = self.threads.lock().unwrap();
+        threads.iter().find(|t| t["threadId"] == *id).unwrap_or(&threads[0]).clone()
+    }
+
     fn calls_to(&self, name: &str) -> Vec<Value> {
         self.calls.lock().unwrap().iter().filter(|(n, _)| n == name).map(|(_, a)| a.clone()).collect()
     }
@@ -47,7 +53,7 @@ impl T3 for FakeT3 {
                 }
             }
             "t3_thread_read" => json!({
-                "thread": self.threads.lock().unwrap()[0].clone(),
+                "thread": self.thread(&args["threadId"]),
                 "items": if args["view"].is_string() { json!([{ "type": "user_message", "text": "hi" }, { "type": "assistant_message", "text": "**done**" }]) } else { json!([]) },
                 "hasMore": false,
             }),
@@ -367,6 +373,26 @@ fn a_running_thread_with_a_question_needs_you_and_notifies() {
     rig.bridge.tick();
     let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
     assert!(latest.contains("id=\"t1\",t=\"Fix tests\",s=\"running\""), "{latest}");
+}
+
+#[test]
+fn a_new_thread_that_already_asks_notifies_but_old_ones_dont_at_start() {
+    let mut rig = Rig::new(7_000_000);
+    rig.t3.set("waiting", "2026-11-06T10:00:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("events={}"), "already waiting at start: {}", rig.slot(1));
+
+    // A thread started since then, whose agent asked before the next list.
+    rig.t3.threads.lock().unwrap().push(json!({
+        "threadId": "t2", "projectId": "p1", "title": "Quick question", "status": "running",
+        "settled": false, "updatedAt": "2026-11-06T10:03:00Z", "itemCount": 2, "pendingRequestCount": 1
+    }));
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("e=\"local\",id=\"t2\",t=\"Quick question\",s=\"waiting\"}"), "{latest}");
+    assert!(!latest.contains("id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "{latest}");
 }
 
 #[test]
