@@ -251,6 +251,9 @@ pub struct Bridge {
     pending_ask: Option<PendingAsk>,
     /// Outcomes of this UI session's recent commands, with when they ran.
     outcomes: Vec<(i64, Value)>,
+    /// Threads T3 is stopping at the game's word ("env:id"), with when it was asked: the
+    /// next list that shows one no longer working says "Stopped.".
+    stopping: HashMap<String, i64>,
     /// Why signals stopped (this game process used every signal file), until WoW restarts.
     signals_out: Option<String>,
     /// The UI session whose running out of slots was logged.
@@ -312,6 +315,8 @@ const POLL_DEADLINE_MS: i64 = 20_000;
 /// Command outcomes stay in the updates this long (the game takes each once), at most this many.
 const OUTCOME_KEEP_MS: i64 = 60_000;
 const OUTCOMES_KEPT: usize = 8;
+/// A Stop whose run hasn't ended after this long is no longer waited on.
+const STOP_PATIENCE_MS: i64 = 300_000;
 /// How long one tick runs poll steps before it returns.
 const TICK_BUDGET_MS: i64 = 300;
 /// Mid-poll, publish only once the poll has run this long.
@@ -510,6 +515,7 @@ impl Bridge {
             polled_ok: false,
             pending_ask: None,
             outcomes: Vec::new(),
+            stopping: HashMap::new(),
             signals_out: None,
             slots_out_logged: None,
             write_error: None,
@@ -716,6 +722,7 @@ impl Bridge {
         }
         let env_arg = self.env_arg(&env);
         let mut started: Option<String> = None;
+        let mut stop_state: Option<&str> = None;
         let result: Result<(), T3Error> = (|| {
             match kind.as_str() {
                 "hello" | "ui" => self.window_open = command["o"] == true,
@@ -757,9 +764,24 @@ impl Bridge {
                     self.client.call("t3_thread_organize", with_args(json!({ "action": kind, "threadId": id }), &env_arg))?;
                     self.note(if kind == "settle" { "Settled." } else { "Moved back to open." });
                 }
+                // T3 says whether it stopped a run ("interrupt_requested") or there was none
+                // ("no_active_run", or how the last one ended; a T3 that says neither counts as
+                // stopping). The game hears which, so its Stop doesn't wait on a run that already
+                // ended; a refusal is an error, like any command's.
                 "stop" if !id.is_empty() => {
-                    self.client.call("t3_thread_interrupt", with_args(json!({ "threadId": id, "clientRequestId": request_id }), &env_arg))?;
-                    self.note("Stopping.");
+                    let stopped = self.client.call("t3_thread_interrupt", with_args(json!({ "threadId": id, "clientRequestId": request_id }), &env_arg))?;
+                    let key = format!("{env}:{id}");
+                    if matches!(str_of(&stopped["status"]), "no_active_run" | "completed" | "failed" | "cancelled" | "interrupted" | "rolled_back") {
+                        self.stopping.remove(&key);
+                        self.note("Nothing to stop: the run had already ended.");
+                        stop_state = Some("idle");
+                    } else {
+                        let now = self.now_ms();
+                        self.stopping.retain(|_, at| now - *at < STOP_PATIENCE_MS);
+                        self.stopping.insert(key, now);
+                        self.note("Stopping.");
+                        stop_state = Some("stopping");
+                    }
                 }
                 // Brings T3 to the front on that thread (T3's own t3code:// link), for what only
                 // T3 can do, like approving a command.
@@ -814,7 +836,9 @@ impl Bridge {
                 self.note(&format!("{kind} failed: {error}"));
                 Some(json!({ "s": command["s"], "ok": false, "x": plain(&error.to_string(), 200) }))
             }
-            Ok(()) => started.map(|id| json!({ "s": command["s"], "ok": true, "env": env, "id": id })),
+            Ok(()) => started
+                .map(|id| json!({ "s": command["s"], "ok": true, "env": env, "id": id }))
+                .or_else(|| stop_state.map(|st| json!({ "s": command["s"], "ok": true, "st": st }))),
         }
     }
 
@@ -1281,6 +1305,9 @@ impl Bridge {
     fn track_status(&mut self, env: &str, thread: &Value) {
         let key = format!("{env}:{}", str_of(&thread["threadId"]));
         let status = str_of(&thread["status"]).to_string();
+        if !working(&status) && self.stopping.remove(&key).is_some() {
+            self.note("Stopped.");
+        }
         let before = self.last_status.insert(key, status.clone());
         let notify = match before.as_deref() {
             // A thread new since the last list that already waits on you (an agent that

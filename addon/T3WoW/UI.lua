@@ -24,6 +24,11 @@ local notice
 -- { kind = "send" | "new" | "answer", text, at }. A failure puts the text back.
 local awaiting = {}
 local ANSWER_TIMEOUT = 45 -- an answer with no word back stops showing "Sending…"
+-- The Stop under way, { env, id, s, at, taken }: its thread's Stop shows "Stopping…" until
+-- the thread stops working, the companion says there was nothing to stop or T3 refused, or
+-- STOP_TIMEOUT passes (taken: T3 accepted it, so the run is just slow to end).
+local stopping
+local STOP_TIMEOUT = 60
 
 local function statusText(status)
     local s = STATUS[status] or { status or "?", "a0a0a0" }
@@ -55,12 +60,16 @@ local function envIdOf(index)
     return e and e.id
 end
 
+local function listedThread(envId, threadId)
+    for _, t in ipairs(inbox and inbox.threads or {}) do
+        if t.id == threadId and envIdOf(t.e) == envId then return t end
+    end
+end
+
 -- The listed thread that is selected, if it is listed.
 local function selectedThread()
     if not selected or selected.new then return nil end
-    for _, t in ipairs(inbox and inbox.threads or {}) do
-        if t.id == selected.id and envIdOf(t.e) == selected.env then return t end
-    end
+    return listedThread(selected.env, selected.id)
 end
 
 local function isSelectedView(view)
@@ -890,7 +899,9 @@ settle:SetPoint("RIGHT", send, "LEFT", -6, 0)
 local stop = button(frame, "Stop", 80, function()
     if not selected or selected.new then return end
     if blockedReason("stop") then return UI.Notice(blockedReason("stop")) end
-    ns.Link.Send({ t = "stop", e = selected.env, id = selected.id })
+    local s = ns.Link.Send({ t = "stop", e = selected.env, id = selected.id })
+    stopping = { env = selected.env, id = selected.id, s = s, at = GetTime() }
+    UI.Refresh()
 end)
 stop:SetPoint("RIGHT", settle, "LEFT", -6, 0)
 
@@ -932,7 +943,9 @@ local function renderStatus()
     local listed = selectedThread()
     settle:SetText(listed and listed.set and "Unsettle" or "Settle")
     settle:SetEnabled(listed ~= nil and not blockedReason(listed.set and "unsettle" or "settle"))
-    stop:SetEnabled(listed ~= nil and WORKING[listed.s] == true and not blockedReason("stop"))
+    local isStopping = stopping ~= nil and selected ~= nil and stopping.env == selected.env and stopping.id == selected.id
+    stop:SetText(isStopping and "Stopping…" or "Stop")
+    stop:SetEnabled(not isStopping and listed ~= nil and WORKING[listed.s] == true and not blockedReason("stop"))
     send:SetText((selected and selected.new and "Start") or (pendingAsk() and "Answer") or "Send")
     send:SetEnabled(selected ~= nil and not blockedReason((selected.new and "new") or (pendingAsk() and "answer") or "send"))
     setPlaceholder()
@@ -1390,6 +1403,14 @@ local function takeOutcomes(data)
     -- Only this session's outcomes: an earlier session's reuse command numbers.
     local outcomes = ns.Link.IsCurrent(data) and type(data.out) == "table" and data.out or {}
     for _, o in ipairs(outcomes) do
+        if type(o) == "table" and stopping and o.s == stopping.s then
+            if o.ok and o.st == "stopping" then
+                stopping.taken = true
+            else
+                stopping = nil
+                said = o.ok and "Nothing to stop: the run had already ended." or format("|cffff4040Couldn't stop: %s|r", tostring(o.x or "failed"))
+            end
+        end
         local sent = type(o) == "table" and awaiting[o.s]
         if sent then
             awaiting[o.s] = nil
@@ -1431,6 +1452,9 @@ function UI.OnInbox(data)
     announce(data)
     inbox = data
     notice = takeOutcomes(data)
+    -- The run ended (or the thread dropped off the list's working states): Stop is done.
+    local t = stopping and listedThread(stopping.env, stopping.id)
+    if t and not WORKING[t.s] then stopping = nil end
     UI.Refresh()
 end
 
@@ -1512,6 +1536,11 @@ frame:SetScript("OnUpdate", function(_, delta)
     if askState.sent and GetTime() - (askState.sentAt or 0) >= ANSWER_TIMEOUT then
         askState.sent = nil
         renderView()
+    end
+    if stopping and GetTime() - stopping.at >= STOP_TIMEOUT then
+        notice = stopping.taken and "Still running after Stop: press it again, or stop it in T3."
+            or "No word back on Stop: press it again."
+        stopping = nil
     end
     renderStatus()
 end)
