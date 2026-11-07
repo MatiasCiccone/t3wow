@@ -14,6 +14,8 @@ struct FakeT3 {
     delays: Mutex<HashMap<String, i64>>,
     failing: Mutex<HashMap<String, String>>,
     clock: Mutex<Option<Arc<Mutex<i64>>>>,
+    /// Threads reads find but lists leave out.
+    unlisted: Mutex<Vec<Value>>,
 }
 
 impl FakeT3 {
@@ -30,6 +32,7 @@ impl FakeT3 {
             delays: Mutex::new(HashMap::new()),
             failing: Mutex::new(HashMap::new()),
             clock: Mutex::new(None),
+            unlisted: Mutex::new(Vec::new()),
         })
     }
 
@@ -42,7 +45,8 @@ impl FakeT3 {
     /// The thread a read asks for (the first one if it names none).
     fn thread(&self, id: &Value) -> Value {
         let threads = self.threads.lock().unwrap();
-        threads.iter().find(|t| t["threadId"] == *id).unwrap_or(&threads[0]).clone()
+        let unlisted = self.unlisted.lock().unwrap();
+        threads.iter().chain(unlisted.iter()).find(|t| t["threadId"] == *id).unwrap_or(&threads[0]).clone()
     }
 
     fn calls_to(&self, name: &str) -> Vec<Value> {
@@ -360,6 +364,9 @@ fn iso_dates_become_epoch_seconds() {
     assert_eq!(iso_seconds("1970-01-01T00:00:00Z"), 0);
     assert_eq!(iso_seconds("2026-11-07T00:22:41.923Z"), 1_794_010_961);
     assert_eq!(iso_seconds("2026-11-06T21:22:41-03:00"), 1_794_010_961);
+    assert_eq!(iso_seconds("2026-11-06T21:22:41-0300"), 1_794_010_961);
+    assert_eq!(iso_seconds("2026-11-07T05:52:41.5+05:30"), 1_794_010_961);
+    assert_eq!(iso_seconds("2026-11-07T05:52:41+0530"), 1_794_010_961);
     assert_eq!(iso_seconds(""), 0);
     assert_eq!(iso_seconds("nonsense"), 0);
 }
@@ -774,4 +781,48 @@ fn past_the_polls_deadline_question_checks_wait_for_the_next_poll() {
     let checks = rig.t3.calls_to("t3_thread_read").len();
     assert!(checks <= 4, "{checks} reads");
     assert_eq!(rig.bridge.snapshot()["threads"].as_array().unwrap().len(), 12, "the lists are all there");
+}
+
+#[test]
+fn a_thread_answered_and_finished_between_two_looks_still_notifies() {
+    let mut rig = Rig::new(21_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["pendingRequestCount"] = json!(1);
+    }
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.last_status["local:t1"], "waiting");
+
+    // Answered in T3, and the agent finished before the next poll.
+    rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(0);
+    rig.t3.set("completed", "2026-11-06T10:02:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "{latest}");
+}
+
+#[test]
+fn a_working_thread_that_drops_off_the_list_still_notifies_when_it_ends() {
+    let mut rig = Rig::new(22_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    // t1 leaves the lists (settled past their limits) but still runs; reads still find it.
+    let t1 = rig.t3.threads.lock().unwrap()[0].clone();
+    rig.t3.threads.lock().unwrap()[0]["threadId"] = json!("t2");
+    rig.t3.unlisted.lock().unwrap().push(t1);
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.last_status.get("local:t1").map(String::as_str), Some("running"), "still watched while it runs");
+
+    rig.t3.unlisted.lock().unwrap()[0]["status"] = json!("completed");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "{latest}");
+    assert!(!rig.bridge.last_status.contains_key("local:t1"), "forgotten once it ended");
 }

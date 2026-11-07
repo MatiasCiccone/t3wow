@@ -35,6 +35,11 @@ fn working(status: &str) -> bool {
     WORKING.contains(&status)
 }
 
+/// Waiting on a question or an approval.
+fn needs_you(status: &str) -> bool {
+    status == "waiting" || status == "approval"
+}
+
 /// T3's sidebar files subagent threads, and threads an agent launched, under the thread
 /// they came from. Linked machines don't always apply includeSubagents, so check here too.
 /// Subagents never show; threads an agent launched show under the thread that launched
@@ -80,7 +85,9 @@ pub fn iso_seconds(iso: &str) -> i64 {
         let rest = iso.get(19..)?;
         let zone = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
         if let Some(sign) = zone.chars().next().filter(|c| *c == '+' || *c == '-') {
-            let (oh, om) = (num(zone, 1..3)?, num(zone, 4..6).unwrap_or(0));
+            // "+03:00", "+0300" or "+03".
+            let digits: String = zone[1..].chars().filter(char::is_ascii_digit).collect();
+            let (oh, om) = (num(&digits, 0..2)?, num(&digits, 2..4).unwrap_or(0));
             let offset = oh * 3600 + om * 60;
             total -= if sign == '+' { offset } else { -offset };
         }
@@ -755,6 +762,7 @@ impl Bridge {
                 for thread in &threads {
                     self.track_status(&env, thread);
                 }
+                self.track_unlisted(&env, &threads)?;
                 self.listed_envs.insert(env.clone());
                 self.threads.insert(env.clone(), threads);
                 self.settled_totals.insert(env.clone(), settled_total);
@@ -927,10 +935,18 @@ impl Bridge {
         let key = format!("{env}:{}", str_of(&thread["threadId"]));
         let status = str_of(&thread["status"]).to_string();
         let before = self.last_status.insert(key, status.clone());
-        // A thread new since the last list that already waits on you (an agent that asked
-        // straight away) notifies too; on the first list everything is old news.
-        let new_and_waiting = before.is_none() && (status == "waiting" || status == "approval") && self.listed_envs.contains(env);
-        if new_and_waiting || (before.as_deref().is_some_and(working) && !working(&status)) {
+        let notify = match before.as_deref() {
+            // A thread new since the last list that already waits on you (an agent that
+            // asked straight away) notifies too; on the first list everything is old news.
+            None => needs_you(&status) && self.listed_envs.contains(env),
+            Some(before) if before == status => false,
+            // Stopped working: finished, failed, stopped, or now waits on you.
+            Some(before) if working(before) => !working(&status),
+            // Answered and done before the next look (it never showed as working again).
+            Some(before) if needs_you(before) => !working(&status) && !needs_you(&status),
+            Some(_) => false,
+        };
+        if notify {
             self.event_seq = (self.event_seq + 1).max(self.now_ms());
             self.events.push(json!({
                 "n": self.event_seq,
@@ -944,7 +960,41 @@ impl Bridge {
         }
     }
 
+    /// Threads that were working or waiting on you and dropped off this machine's lists
+    /// (settled past the list's limits, say) are read once more each poll until they end,
+    /// so their end still notifies. Every other thread no longer listed is forgotten.
+    fn track_unlisted(&mut self, env: &str, threads: &[Value]) -> Result<(), T3Error> {
+        let prefix = format!("{env}:");
+        let listed: HashSet<String> = threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
+        let gone: Vec<(String, String)> =
+            self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !listed.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
+        for (key, status) in gone {
+            let mut still_active = false;
+            if (working(&status) || needs_you(&status)) && !self.out_of_time() {
+                let args = with_args(json!({ "threadId": &key[prefix.len()..], "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(env));
+                match self.client.call("t3_thread_read", args) {
+                    Ok(read) if read["thread"].is_object() => {
+                        let mut thread = read["thread"].clone();
+                        if working(str_of(&thread["status"])) && thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
+                            thread["status"] = json!(if needs_you(&status) { status.as_str() } else { "waiting" });
+                        }
+                        self.track_status(env, &thread);
+                        still_active = working(str_of(&thread["status"])) || needs_you(str_of(&thread["status"]));
+                    }
+                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                    // Gone (deleted) or unreadable: nothing more to say about it.
+                    _ => {}
+                }
+            }
+            if !still_active {
+                self.last_status.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     fn refresh_view(&mut self) -> Result<(), T3Error> {
+
         let Some(View { env, id, depth }) = self.view.clone() else {
             self.view_data = None;
             return Ok(());
