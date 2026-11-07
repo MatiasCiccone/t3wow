@@ -1,4 +1,4 @@
-# Publishes a release when a version tag is pushed (git tag v0.3.1 && git push origin v0.3.1).
+# Publishes a release when a version tag is pushed (git tag v0.4.0 && git push origin v0.4.0).
 # The source repository is private, so the release goes to the public
 # MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
 # t3wow.exe, its SHA-256, and the addon on its own (zipped, for CurseForge or a manual
