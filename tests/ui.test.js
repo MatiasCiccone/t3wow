@@ -25,6 +25,7 @@ function inboxWith(envs, extra)
   for _, t in ipairs(extra and extra.threads or {}) do data.threads[#data.threads + 1] = t end
   for _, p in ipairs(extra and extra.projects or {}) do data.projects[#data.projects + 1] = p end
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
+  data.more = extra and extra.more
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -266,6 +267,42 @@ inboxWith(ENVS, {})
 assert(find("Button", "Start").enabled, "Start still off")
 click("Start")
 assert(sent().t == "new", tostring(sent().t))
+return "ok"
+`);
+});
+
+test("Show more shows only under a group with more threads, and asks the companion for them", () => {
+  run(`
+local function moreRow(group)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and f.text == "Show more" and f.group == group and f.shown then return f end
+  end
+end
+local function header(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and type(f.text.text) == "string" and f.text.text:find(label, 1, true) then return f end
+  end
+end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+-- A 0.4.1 companion sends no "more": no row.
+inboxWith(ENVS, { threads = { thread } })
+assert(not moreRow("open") and not moreRow("settled"), "a row with nothing more to list")
+inboxWith(ENVS, { threads = { thread }, more = { open = true, settled = true } })
+local open = moreRow("open")
+assert(open, "no Show more under Open")
+assert(not moreRow("snoozed"), "Show more under Snoozed")
+assert(not moreRow("settled"), "Show more under a collapsed Settled")
+open.scripts.OnClick(open, "LeftButton")
+assert(sent().t == "list" and sent().g == "open", "sent " .. tostring(sent().t) .. "/" .. tostring(sent().g))
+local settledHeader = header("Settled")
+settledHeader.scripts.OnClick(settledHeader)
+local settled = moreRow("settled")
+assert(settled, "no Show more under Settled")
+settled.scripts.OnClick(settled, "LeftButton")
+assert(sent().t == "list" and sent().g == "settled", "sent " .. tostring(sent().g))
+-- Everything listed: the rows go.
+inboxWith(ENVS, { threads = { thread } })
+assert(not moreRow("open") and not moreRow("settled"), "rows stayed")
 return "ok"
 `);
 });
