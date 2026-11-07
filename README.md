@@ -77,7 +77,7 @@ Each login and reload says in chat that T3 WoW loaded, then that it connected to
 - **Flat** is a square, pixel-bordered look with the game's Arial Narrow. When ElvUI is running, it takes ElvUI's colors, font and pixel size, so the window matches the rest of an ElvUI screen.
 - **Classic** keeps the game's own feel: gold Friz Quadrata headings and grey bevelled edges.
 
-The **Compact thread list** setting fits a thread on one line (its machine and project show when you hover it), with any theme. Dropdown lists keep the game's own look in every theme.
+The **Compact thread list** setting fits a thread on one line (its machine and project show when you hover it), with any theme. Dropdown lists are drawn in the theme too.
 
 When an agent asks you a question, it shows at the end of the thread's conversation: pick an option (several, where it allows that) and press **Send answer**, or type your own answer in the box and press Enter. If the answer doesn't go through, **Send answer** can be pressed again. Permission prompts (approving a command or an edit) can't be answered through T3's tools by design: such a thread shows **Approve in T3**, and its thread view has an **Open in T3** button (the companion opens T3's own `t3code://` link). **Stop** cancels the run from the game. Clicking an approval's notification opens the thread in the game; turn on **Clicking an approval opens T3** in Settings to go straight to T3 instead.
 

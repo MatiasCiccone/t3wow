@@ -114,16 +114,6 @@ controlDown = false
 function IsControlKeyDown() return controlDown end
 function ReloadUI() end
 function PlaySound() end
-function CloseDropDownMenus() end
--- UIDropDownMenu keeps a menu's list function and shown text; while menuItems is a table
--- (a test opening a menu), the entries it adds go there.
-function UIDropDownMenu_SetWidth() end
-function UIDropDownMenu_Initialize(menu, fn) menu.init = fn end
-function UIDropDownMenu_SetText(menu, text) menu.text = text end
-function UIDropDownMenu_CreateInfo() return {} end
-function UIDropDownMenu_AddButton(info) if menuItems then menuItems[#menuItems + 1] = info end end
-function UIDropDownMenu_EnableDropDown() end
-function UIDropDownMenu_DisableDropDown() end
 C_AddOns = { LoadAddOn = function(name) loads[#loads + 1] = name; T3WoW_Inbox = inboxes[name]; return true end }
 
 -- Sends a game event (PLAYER_LOGOUT, say) to every frame that has an OnEvent script.
