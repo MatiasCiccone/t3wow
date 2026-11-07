@@ -12,6 +12,8 @@ mod bridge;
 mod capture;
 mod codec;
 mod config;
+#[cfg(windows)]
+mod dialog;
 mod log;
 mod lua;
 mod slots;
@@ -118,8 +120,8 @@ fn wow_dir(args: &Args, config: &Config) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// The T3 a command talks to: `--origin` when given (`login` saves it once the sign-in
-/// succeeds), else the saved one. Its token is the one saved for that server, if any.
+/// The T3 `status` checks: `--origin` when given, else the saved one (`login` switches
+/// through `t3::connect`). Its token is the one saved for that server, if any.
 fn target(origin: &Option<Option<String>>) -> Option<t3::Target> {
     let mut config = Config::load();
     if let Some(origin) = origin {
@@ -157,11 +159,12 @@ fn command(args: Args) -> Result<(), String> {
             println!("Removed the T3WoW addon and its slots. Your sign-in stays in {}", Config::file().display());
         }
         "login" => {
-            // Always a new sign-in. The new T3 and its token are saved together: a running
-            // companion moves to both, and the game drops what the previous T3 showed.
-            let connected = t3::connect(origin, true, &|m| println!("{m}"), &|| false)?;
-            let scope = connected.signed.map(|s| s.scope).unwrap_or_default();
-            println!("Signed in to {} ({scope}).", connected.origin);
+            // The same path as the tray's, always through the browser: the new T3 and its
+            // token are saved together, once the sign-in succeeds, a running companion moves
+            // to both, and the game drops what the previous T3 showed.
+            let connected = t3::connect(origin, false, &|m| println!("{m}"), &|| {}, &|| false)
+                .map_err(|e| if e.starts_with("T3 Code isn't running") { "T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.".into() } else { e })?;
+            println!("Signed in to {} ({}).", connected.origin, connected.scope.unwrap_or_default());
         }
         "status" => {
             let dir = wow_dir(&args, &config)?;
@@ -185,8 +188,12 @@ fn command(args: Args) -> Result<(), String> {
             None => println!("Up to date ({}), or no release is visible yet.", updater::current_version()),
             Some(release) => {
                 println!("Updating {} to {}…", updater::current_version(), release.version);
-                updater::install(&release)?;
-                println!("Updated. Restart T3 WoW (Quit from its tray menu, then start it again).");
+                updater::install(&release, &|step| match step {
+                    updater::Step::Checking => println!("Downloaded; checking it against the release…"),
+                    updater::Step::Installing => println!("Installing…"),
+                    updater::Step::Downloading(_) => {}
+                })?;
+                println!("Updated. Restart T3 WoW (Quit from its tray menu, then start it again), then restart WoW if it is running: /reload does not load new addon files.");
             }
         },
         "help" => println!("{HELP}"),

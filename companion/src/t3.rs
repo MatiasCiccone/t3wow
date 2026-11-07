@@ -62,47 +62,6 @@ pub fn target_in(config: &crate::config::Config) -> Option<Target> {
     Some(Target { key: config.server_key(), origin, token: config.token() })
 }
 
-/// What `connect` did.
-pub struct Connected {
-    pub origin: String,
-    /// The new sign-in, when it made one (none: that T3's saved sign-in was used).
-    pub signed: Option<SignIn>,
-}
-
-/// The one way the companion moves to another T3, or signs in again to its own:
-/// `t3wow.exe login`, the tray's Sign in to T3… and its connect-to-another-T3 entry all
-/// come through here. `origin`: None for the T3 in use now, Some(None) for the one on this
-/// PC, Some(Some(url)) for one on another machine. Signs in when `fresh` or when that T3
-/// has no saved sign-in; another T3's saved sign-in stays as it is. The origin is saved
-/// only once there is a sign-in for it, and in the same write as that sign-in, so a failed
-/// or cancelled sign-in leaves the companion where it was, and a running companion moves
-/// to both at once (`app::Control::SignedIn` tells it now; otherwise it looks every 30 s).
-/// There, `Bridge::set_login` drops everything the previous T3 showed in the game.
-pub fn connect(origin: Option<Option<String>>, fresh: bool, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Connected, String> {
-    use crate::config::{canonical_origin, Config};
-    let origin = origin.map(|o| o.map(|url| canonical_origin(&url)));
-    let mut config = Config::load();
-    if let Some(origin) = &origin {
-        config.origin = origin.clone();
-    }
-    let target = target_in(&config).ok_or("T3 Code is not running on this PC. Start the T3 Code desktop app, or pass --origin.")?;
-    let signed = match target.token.as_ref().filter(|_| !fresh) {
-        Some(_) => None,
-        None => Some(login(&target.origin, &target.key, log, cancelled)?),
-    };
-    let mut saved = Ok(());
-    Config::update(|c| {
-        if let Some(signed) = &signed {
-            saved = c.set_sign_in(&target.key, &signed.token, signed.expires_at);
-        }
-        if let (Ok(()), Some(origin)) = (&saved, &origin) {
-            c.origin = origin.clone();
-        }
-    });
-    saved?;
-    Ok(Connected { origin: target.origin, signed })
-}
-
 fn random_url_safe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).expect("random bytes");
@@ -193,11 +152,93 @@ fn status_and_json(response: Result<ureq::http::Response<ureq::Body>, ureq::Erro
     Ok((status, response.body_mut().read_json().unwrap_or(Value::Null)))
 }
 
+/// Said before signing in to a T3 on another machine over plain HTTP.
+pub const PLAIN_HTTP_NOTE: &str =
+    "This T3 uses plain HTTP: the sign-in token crosses your network unencrypted. That's fine on a home network you trust; anywhere else, use HTTPS.";
+
+/// What `connect` did.
+#[derive(Debug)]
+pub struct Connected {
+    pub origin: String,
+    /// The tray's name for this T3 (`config::server_label`).
+    pub label: String,
+    /// The access a new sign-in got; None when the sign-in saved for this T3 still worked.
+    pub scope: Option<String>,
+    /// The companion now uses another T3 than before.
+    pub switched: bool,
+}
+
+/// The one way to sign in and to switch T3, for `t3wow.exe login` and the tray alike.
+/// `switch_to` names the T3 to move to (`Some(None)`: the one on this PC; None: stay).
+/// With `reuse_saved`, a sign-in already saved for that T3 is tried first and, if T3 still
+/// takes it, used without the browser. Otherwise this checks that T3 answers, then signs in
+/// through the browser (`on_browser` runs once the page is open). Only once that succeeded
+/// is the sign-in saved and the switch made (`Config::apply_sign_in`), in one write: a
+/// failed or cancelled sign-in leaves the companion on the T3 it had, and a running
+/// companion moves to both at once (`app::Control::SignedIn` tells it now; otherwise it
+/// looks every 30 s). There, `Bridge::set_login` drops everything the previous T3 showed.
+pub fn connect(
+    switch_to: Option<Option<String>>,
+    reuse_saved: bool,
+    log: &dyn Fn(&str),
+    on_browser: &dyn Fn(),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Connected, String> {
+    use crate::config::{canonical_origin, server_label, unencrypted_over_network, Config};
+    let mut config = Config::load();
+    let before = config.origin.as_deref().map(canonical_origin);
+    if let Some(origin) = &switch_to {
+        config.origin = origin.as_deref().map(canonical_origin);
+    }
+    let remote = config.origin.is_some();
+    let label = server_label(config.origin.as_deref());
+    let target = target_in(&config).ok_or("T3 Code isn't running on this PC. Start the T3 Code desktop app, or connect to T3 on another machine.")?;
+    let switched = config.origin != before;
+    let trouble = |error: &str| {
+        let hint = if remote {
+            " Check that T3 is running on that machine and accepts connections from other machines, and that its firewall lets the port through."
+        } else {
+            " Check that the T3 Code desktop app is running."
+        };
+        format!("Couldn't reach T3 at {}: {error}.{hint}", target.origin)
+    };
+    let saved_works = match (&target.token, reuse_saved) {
+        (Some(token), true) => match McpClient::new(&target.origin, token).call("t3_environment_links", json!({})) {
+            Ok(_) => true,
+            Err(T3Error::Auth(_)) => {
+                log("The sign-in saved for this T3 no longer works: signing in again.");
+                false
+            }
+            Err(T3Error::Other(error)) => return Err(trouble(error.trim_start_matches("T3 unreachable: "))),
+        },
+        _ => false,
+    };
+    let signed = if saved_works {
+        None
+    } else {
+        reachable(&target.origin).map_err(|e| trouble(&e))?;
+        if unencrypted_over_network(&target.origin) {
+            log(PLAIN_HTTP_NOTE);
+        }
+        Some(login(&target.origin, &target.key, log, on_browser, cancelled)?)
+    };
+    let mut saved = Ok(());
+    Config::update(|c| saved = c.apply_sign_in(&target.key, signed.as_ref().map(|s| (s.token.as_str(), s.expires_at)), switch_to.clone()));
+    saved?;
+    Ok(Connected { origin: target.origin, label, scope: signed.map(|s| s.scope), switched })
+}
+
+/// Whether anything answers HTTP at `origin` (any status will do), so an unreachable T3 is
+/// reported as that before a browser page opens for it.
+fn reachable(origin: &str) -> Result<(), String> {
+    agent().get(origin).config().max_redirects(0).build().call().map(drop).map_err(|e| e.to_string())
+}
+
 /// T3's MCP sign-in: register a public client (once per server: the client id is saved under
 /// `key`), send the user to the approval page, receive the code on a loopback port, exchange
 /// it with PKCE. The approval page is where the user picks the access (Full access lets it
 /// write to full-access threads). `cancelled` ends the wait early.
-pub fn login(origin: &str, key: &str, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<SignIn, String> {
+fn login(origin: &str, key: &str, log: &dyn Fn(&str), on_browser: &dyn Fn(), cancelled: &dyn Fn() -> bool) -> Result<SignIn, String> {
     use crate::config::Config;
     let state = random_url_safe(16);
     let verifier = random_url_safe(32);
@@ -258,6 +299,7 @@ pub fn login(origin: &str, key: &str, log: &dyn Fn(&str), cancelled: &dyn Fn() -
     log("If it asks for a pairing code, create one in T3: Settings > Sharing & access.");
     log(&format!("If no browser opened, visit: {authorize}"));
     open_browser(&authorize);
+    on_browser();
 
     let code = wait_for_code(&listener, &state, Duration::from_secs(600), cancelled)?;
 
