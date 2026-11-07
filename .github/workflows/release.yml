@@ -3,7 +3,8 @@
 # MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
 # t3wow.exe, its SHA-256, and the addon on its own (zipped, for CurseForge or a manual
 # install). Publishing there needs the RELEASES_TOKEN secret: a fine-grained token with
-# Contents read and write on t3wow-releases only.
+# Contents read and write on t3wow-releases only. The addon zip is also uploaded to the
+# CurseForge project with the CURSEFORGE_TOKEN secret (a CurseForge API token).
 name: Release
 
 on:
@@ -15,6 +16,9 @@ permissions:
 
 env:
   RELEASES_REPO: MatiasCiccone/t3wow-releases
+  CURSEFORGE_PROJECT: "1788778"
+  # CurseForge's game version type for WoW Forever.
+  CURSEFORGE_GAME_TYPE: "88568"
 
 jobs:
   release:
@@ -74,3 +78,32 @@ jobs:
             release/t3wow.exe
             release/t3wow.exe.sha256
             release/T3WoW-${{ github.ref_name }}.zip
+
+      # The addon zip goes to CurseForge too, filed under the WoW Forever version whose API
+      # version is the .toc's ## Interface. Skipped while the CURSEFORGE_TOKEN secret isn't set.
+      - name: Upload the addon to CurseForge
+        shell: pwsh
+        env:
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+        run: |
+          if (-not $env:CURSEFORGE_TOKEN) { "No CURSEFORGE_TOKEN secret: skipping CurseForge."; exit 0 }
+          $headers = @{ "X-Api-Token" = $env:CURSEFORGE_TOKEN }
+          $interface = (Select-String -Path addon/T3WoW/T3WoW.toc -Pattern '^## Interface: *(\d+)').Matches[0].Groups[1].Value
+          $versions = Invoke-RestMethod -Headers $headers -Uri https://wow.curseforge.com/api/game/versions
+          $version = $versions | Where-Object { $_.gameVersionTypeID -eq $env:CURSEFORGE_GAME_TYPE -and $_.apiVersion -eq $interface } | Select-Object -First 1
+          if (-not $version) { throw "CurseForge has no WoW Forever version for interface ${interface}." }
+          $changes = (Get-Content release/NOTES.md | Where-Object { $_ -notmatch '^Download ' }) -join "`n"
+          $changelog = "$changes`nThe addon needs the T3 WoW companion (t3wow.exe): https://github.com/$env:RELEASES_REPO/releases/latest"
+          $metadata = @{
+            changelog = $changelog
+            changelogType = "markdown"
+            displayName = "T3 WoW ${{ github.ref_name }}"
+            gameVersions = @($version.id)
+            releaseType = "release"
+          } | ConvertTo-Json -Compress
+          $uri = "https://wow.curseforge.com/api/projects/$env:CURSEFORGE_PROJECT/upload-file"
+          $result = Invoke-RestMethod -Method Post -Headers $headers -Uri $uri -Form @{
+            metadata = $metadata
+            file = Get-Item "release/T3WoW-${{ github.ref_name }}.zip"
+          }
+          "Uploaded to CurseForge as file $($result.id), for WoW Forever $($version.name)."
