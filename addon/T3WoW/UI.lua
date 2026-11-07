@@ -723,8 +723,8 @@ do
 
     -- A table as lines of plain text, its columns padded to one width, "│" between them and
     -- a rule under the header, in at most `room` characters: when it doesn't fit, the widest
-    -- columns are cut down until it does (to 3 characters at least), and a cell cut short
-    -- ends in "…".
+    -- columns are cut down until it does (to 3 characters at least, then the last columns
+    -- give way to a "…" column), and a cell cut short ends in "…".
     function UI.TableLines(rows, align, room)
         local n = 0
         for _, row in ipairs(rows) do n = math.max(n, type(row) == "table" and #row or 0) end
@@ -747,6 +747,12 @@ do
             return sum
         end
         while cap > 3 and total() > room do cap = cap - 1 end
+        -- Still too wide: the last columns go, and a "…" column says so.
+        local more = total() > room
+        if more then
+            while n > 1 and total() + 4 > room do n = n - 1 end
+            if total() + 4 > room then cap = math.max(1, room - 4) end
+        end
         local lines = {}
         for i, row in ipairs(cells) do
             local out = {}
@@ -763,10 +769,12 @@ do
                 end
                 out[j] = text
             end
+            if more then out[n + 1] = "…" end
             lines[#lines + 1] = (table.concat(out, " │ "):gsub(" +$", ""))
             if i == 1 then
                 local rule = {}
                 for j = 1, n do rule[j] = ("─"):rep(math.min(widths[j], cap)) end
+                if more then rule[n + 1] = "─" end
                 lines[#lines + 1] = table.concat(rule, "─┼─")
             end
         end

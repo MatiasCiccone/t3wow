@@ -36,6 +36,10 @@
     "segments": [{ "c": "unclosed fence" }]
   },
   {
+    "input": "Call `__init__` or `[a](b)` **now**\n\n| `__x__` |\n|---|\n| **y** |",
+    "segments": ["Call \u0001__init__\u0002 or \u0001[a](b)\u0002 now", { "t": [["__x__"], ["y"]] }]
+  },
+  {
     "input": "```\n```\n\n\n\n`x`",
     "segments": ["\u0001x\u0002"]
   }
