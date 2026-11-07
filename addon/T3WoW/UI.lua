@@ -212,9 +212,24 @@ local function row(index)
     return r
 end
 
+-- Show more, at the end of a group with more threads than the companion listed: the next
+-- updates list more of it, for this UI session. Working and Needs you come from the open
+-- list, so Open's covers them.
+local moreButtons = {}
+local function moreButton(key)
+    local b = moreButtons[key]
+    if not b then
+        b = button(listChild, "Show more", LIST_WIDTH - 60, function(self) ns.Link.Send({ t = "list", g = self.group }) end)
+        b.group = key
+        moreButtons[key] = b
+    end
+    return b
+end
+
 local function renderList()
     for _, r in ipairs(rows) do r:Hide() end
     for _, h in ipairs(headers) do h:Hide() end
+    for _, b in pairs(moreButtons) do b:Hide() end
     local groups = { working = {}, open = {}, snoozed = {}, settled = {} }
     -- Threads an agent launched sit under the thread that launched them when both are in
     -- the same group, as in T3's sidebar, and don't count in it. In another group than
@@ -274,6 +289,13 @@ local function renderList()
                 for _, child in ipairs(launched[id] or {}) do place(child, math.min(indent + 14, 42)) end
             end
             for _, t in ipairs(groups[key]) do place(t, 0) end
+            -- An older companion sends no "more": no row.
+            if inbox and type(inbox.more) == "table" and inbox.more[key] then
+                local b = moreButton(key)
+                b:SetPoint("TOPLEFT", 10, -y - 2)
+                b:Show()
+                y = y + 30
+            end
         end
     end
     listChild:SetHeight(math.max(y, 1))

@@ -46,7 +46,7 @@ Each login and reload says in chat that T3 WoW loaded, then that it connected to
 
 `/t3`, the **T3 WoW** minimap button, or a key bound under **Options → Keybindings → AddOns → T3 WoW** opens the window. The button registers through LibDBIcon when another addon has loaded it, so collectors like MinimapButtonButton gather it with your other buttons. Right-click it (or `/t3 settings`, or **Settings** in the window) for the settings.
 
-- Pick a thread on the left; **Open**, **Working**, **Snoozed** and **Settled** match T3's sidebar, with up to 80 open, 25 snoozed and 25 settled threads per machine. The machine name is under each title. Threads an agent started sit indented under the thread that started them, as in T3. A thread whose agent is asking you something shows **Needs you**.
+- Pick a thread on the left; **Open**, **Working**, **Snoozed** and **Settled** match T3's sidebar, with up to 80 open, 25 snoozed and 25 settled threads per machine at first. A group with more ends in **Show more**, which lists more of it (twice as many each time, up to 320 open, 200 snoozed and 200 settled) until a new UI session (Reload UI or login). The machine name is under each title. Threads an agent started sit indented under the thread that started them, as in T3. A thread whose agent is asking you something shows **Needs you**.
 - Type in the box and press **Enter** (Shift+Enter for a new line). Sending to a busy thread steers it or queues, as in T3. If T3 refuses a message, it comes back to the box (when the box is empty) with the reason. A message too long to send from the game stays in the box.
 - **New Thread** asks for the machine and project, then starts a thread with your message as its task, and opens it. If the machine is unlinked or the project removed meanwhile, **Start** refuses and keeps your text.
 - **Stop** interrupts a running thread. **Settle** / **Unsettle** moves it between Open and Settled.
@@ -74,7 +74,7 @@ The tray menu's **Commands from the game** sets how far the companion follows co
 
 - **Full** (the default): everything the window offers.
 - **No new threads**: everything but starting threads.
-- **Read-only**: nothing that changes T3. Messages, starts, answers, **Stop**, **Settle** and **Unsettle** are refused. Reading threads, opening one, loading earlier messages, **Refresh**, `/t3 probe` and **Open in T3** still work.
+- **Read-only**: nothing that changes T3. Messages, starts, answers, **Stop**, **Settle** and **Unsettle** are refused. Reading threads, opening one, loading earlier messages, **Show more**, **Refresh**, `/t3 probe` and **Open in T3** still work.
 
 The setting applies at once and is saved in `config.json` (`gameCommands`). A refused command never reaches T3: the companion logs it, and the window gets it back as a failure with the reason and puts your text back (an addon older than the companion only shows the companion's note). Approvals can't be given from the game at any level.
 
