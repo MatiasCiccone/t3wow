@@ -4,6 +4,7 @@
 use crate::app::{App, Control, Status, Update};
 use crate::config::Config;
 use crate::log;
+use crate::slots::Slots;
 use std::ptr::null_mut;
 use std::sync::Arc;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -47,6 +48,55 @@ fn relaunch() -> ! {
     std::process::exit(0)
 }
 
+/// A Yes/No question; true for Yes.
+fn confirm(title: &str, text: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide(title).as_ptr(), MB_YESNO | MB_ICONQUESTION) == IDYES }
+}
+
+/// Reads WoW's interface version and, when the addon declares another, rewrites the
+/// `## Interface:` lines (nothing else) and restarts the companion so it uses the new number
+/// from then on. Slot addons show as out of date when WoW's patch raised the number.
+fn match_interface(app: &App) {
+    let Some(dir) = app.wow_dir.lock().unwrap().clone() else {
+        crate::message_box("T3 WoW", "T3 WoW hasn't found the WoW folder yet: choose it first.");
+        return;
+    };
+    let current = Config::load().interface();
+    let Some(found) = crate::wow::interface_version(&dir) else {
+        crate::message_box(
+            "T3 WoW",
+            &format!(
+                "Couldn't read WoW's interface version in {}.\n\nIn the game, /dump select(4, GetBuildInfo()) prints it; then run this in a terminal:\nt3wow.exe install --interface <number>",
+                dir.display()
+            ),
+        );
+        return;
+    };
+    let wow = found.wow_version.map(|v| format!("WoW {v}")).unwrap_or_else(|| "WoW".into());
+    if found.interface == current {
+        crate::message_box("T3 WoW", &format!("The addon already matches {wow} (interface {current})."));
+        return;
+    }
+    let question = format!(
+        "{wow} uses interface {}; the addon says {current}.\n\nSwitch the addon to {}? Your sign-in and settings stay. WoW needs a full restart afterwards.",
+        found.interface, found.interface
+    );
+    if !confirm("T3 WoW", &question) {
+        return;
+    }
+    match Slots::for_wow(&dir, &found.interface).set_interface() {
+        Ok(_) => {
+            Config::update(|c| c.interface = Some(found.interface.clone()));
+            log::line(&format!("Interface version set to {} (was {current}); restarting the companion.", found.interface));
+            crate::message_box("T3 WoW", "Done. Restart WoW completely (not /reload) so it reads the new version.");
+            relaunch();
+        }
+        Err(error) => crate::message_box("T3 WoW", &format!("Couldn't rewrite the addon files: {error}")),
+    }
+}
+
 fn icon() -> Icon {
     Icon::from_rgba(include_bytes!("../assets/tray-32.rgba").to_vec(), 32, 32).expect("tray icon")
 }
@@ -57,6 +107,7 @@ pub fn run(app: Arc<App>) -> ! {
     let sign_in = MenuItem::new("Sign in to T3…", true, None);
     let wow_folder = MenuItem::new("Choose WoW folder…", true, None);
     let reinstall = MenuItem::new("Reinstall addon", true, None);
+    let interface = MenuItem::new("Match WoW's interface version…", true, None);
     let open_log = MenuItem::new("Open log", true, None);
     let autostart = CheckMenuItem::new("Start with Windows", true, autostart_enabled(), None);
     let updates = MenuItem::new("Check for updates", true, None);
@@ -69,6 +120,7 @@ pub fn run(app: Arc<App>) -> ! {
         &sign_in,
         &wow_folder,
         &reinstall,
+        &interface,
         &open_log,
         &autostart,
         &updates,
@@ -123,6 +175,8 @@ pub fn run(app: Arc<App>) -> ! {
                     open_path(&log::path());
                 } else if id == *reinstall.id() {
                     app.send(Control::Reinstall);
+                } else if id == *interface.id() {
+                    match_interface(&app);
                 } else if id == *autostart.id() {
                     set_autostart(autostart.is_checked());
                     autostart.set_checked(autostart_enabled());
