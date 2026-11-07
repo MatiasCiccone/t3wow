@@ -203,6 +203,11 @@ pub struct Bridge {
     threads: BTreeMap<String, Vec<Value>>,
     projects: BTreeMap<String, Vec<Value>>,
     settled_totals: BTreeMap<String, u64>,
+    /// Per machine: which of its three lists have more threads than were listed.
+    list_more: BTreeMap<String, [bool; LIST_COUNT]>,
+    /// How many threads each of the three lists asks for; the game's Show more raises them
+    /// for the UI session.
+    list_limits: [usize; LIST_COUNT],
     view_data: Option<Value>,
     view_key: Option<String>,
     view_cache: Option<ViewCache>,
@@ -299,8 +304,8 @@ fn with_args(base: Value, extra: &Map<String, Value>) -> Value {
     base
 }
 
-/// A machine's sidebar threads and its settled count.
-type ThreadLists = Result<(Vec<Value>, u64), T3Error>;
+/// A machine's sidebar threads, its settled count, and which lists have more.
+type ThreadLists = Result<(Vec<Value>, u64, [bool; LIST_COUNT]), T3Error>;
 
 /// A whole poll gets this long; past it, optional reads wait for the next one.
 const POLL_DEADLINE_MS: i64 = 20_000;
@@ -335,7 +340,8 @@ enum Step {
     Machines,
     ServerName(Value),
     Projects(String),
-    /// One of the three thread lists, every machine's at once.
+    /// A page of one of the three thread lists, every machine's at once (a list longer
+    /// than T3's page takes a step per page).
     List(usize),
     /// One machine's lists, as read. Then, for it: each working thread's question check
     /// (and what it waits on), each launcher, the status changes, each active thread that
@@ -359,6 +365,7 @@ struct Listed {
     env: String,
     threads: Vec<Value>,
     settled_total: u64,
+    more: [bool; LIST_COUNT],
     /// The working threads looked at: their pending counts stay, the machine's others go.
     seen: Vec<String>,
 }
@@ -388,20 +395,53 @@ struct ViewRead {
 
 /// T3's sidebar is made of three lists per machine (open, snoozed, settled), read in turn.
 const LIST_COUNT: usize = 3;
+/// The lists as the game names them.
+const LIST_NAMES: [&str; LIST_COUNT] = ["open", "snoozed", "settled"];
+/// How many threads each list shows at first, and at most after Show more (each one
+/// doubles it), which keeps an update's size reasonable.
+const LIST_LIMITS: [usize; LIST_COUNT] = [80, 25, 25];
+const LIST_CAPS: [usize; LIST_COUNT] = [320, 200, 200];
+/// T3 lists at most this many threads a request; past it, a list is read a page at a time.
+const LIST_PAGE: usize = 100;
 
-/// One of a machine's three lists.
-fn fetch_list(client: &dyn T3, n: usize, env_arg: &Map<String, Value>) -> Result<Value, T3Error> {
+/// The page a machine's list needs: its machine argument, where it starts, how many threads.
+type ListPage = (Map<String, Value>, Option<u64>, usize);
+
+/// A page of one of a machine's three lists: `limit` threads from `cursor` on.
+fn fetch_list(client: &dyn T3, n: usize, cursor: Option<u64>, limit: usize, env_arg: &Map<String, Value>) -> Result<Value, T3Error> {
     let which = match n {
-        0 => json!({ "settled": false, "snoozed": false, "limit": 80 }),
-        1 => json!({ "settled": false, "snoozed": true, "limit": 25 }),
-        _ => json!({ "settled": true, "limit": 25 }),
+        0 => json!({ "settled": false, "snoozed": false }),
+        1 => json!({ "settled": false, "snoozed": true }),
+        _ => json!({ "settled": true }),
     };
-    let base = with_args(json!({ "allProjects": true, "includeSubagents": false }), which.as_object().unwrap());
+    let mut base = with_args(json!({ "allProjects": true, "includeSubagents": false, "limit": limit }), which.as_object().unwrap());
+    if let Some(cursor) = cursor {
+        base["cursor"] = json!(cursor);
+    }
     client.call("t3_thread_list", with_args(base, env_arg))
 }
 
-/// A machine's sidebar threads from its three lists, and its settled count.
-fn combine_lists(lists: &[Value]) -> (Vec<Value>, u64) {
+/// How many threads a list read so far holds.
+fn listed_count(list: &Value) -> usize {
+    list["threads"].as_array().map_or(0, Vec::len)
+}
+
+/// Where the next page of a list read so far starts, if it needs one to reach `limit`.
+fn next_page(list: &Value, limit: usize) -> Option<u64> {
+    list["nextCursor"].as_u64().filter(|_| listed_count(list) < limit)
+}
+
+/// A list has more threads than it holds: by its total, or, without one, by its cursor.
+fn has_more(list: &Value) -> bool {
+    match list["total"].as_u64() {
+        Some(total) => total > listed_count(list) as u64,
+        None => list["nextCursor"].is_u64(),
+    }
+}
+
+/// A machine's sidebar threads from its three lists, its settled count, and which lists
+/// have more.
+fn combine_lists(lists: &[Value]) -> (Vec<Value>, u64, [bool; LIST_COUNT]) {
     let items = |n: usize| lists.get(n).and_then(|v| v["threads"].as_array()).cloned().unwrap_or_default();
     let mut threads: Vec<Value> = items(0).into_iter().filter(|t| t["snoozed"] != true).collect();
     threads.extend(items(1).into_iter().filter(|t| t["snoozed"] == true));
@@ -409,7 +449,8 @@ fn combine_lists(lists: &[Value]) -> (Vec<Value>, u64) {
     threads.retain(|t| !is_subagent(t));
     let settled_listed = items(2).iter().filter(|t| on_sidebar(t)).count() as u64;
     let total = lists.get(2).and_then(|v| v["total"].as_u64()).unwrap_or(0);
-    (threads, total.max(settled_listed))
+    let more = [0, 1, 2].map(|n| lists.get(n).is_some_and(has_more));
+    (threads, total.max(settled_listed), more)
 }
 impl Bridge {
     pub fn new(
@@ -439,6 +480,8 @@ impl Bridge {
             threads: BTreeMap::new(),
             projects: BTreeMap::new(),
             settled_totals: BTreeMap::new(),
+            list_more: BTreeMap::new(),
+            list_limits: LIST_LIMITS,
             view_data: None,
             view_key: None,
             view_cache: None,
@@ -504,6 +547,7 @@ impl Bridge {
         self.threads.clear();
         self.projects.clear();
         self.settled_totals.clear();
+        self.list_more.clear();
         self.last_status.clear();
         self.unlisted_misses.clear();
         self.pending_counts.clear();
@@ -610,6 +654,8 @@ impl Bridge {
             }
             self.queued.remove(k);
             self.outcomes.clear();
+            // Show more lasts for the UI session it was asked in.
+            self.list_limits = LIST_LIMITS;
             self.log(&format!("Game UI connected (session {u}, next slot {})", self.link.slot));
         } else if l > 0 {
             // The game draws a frame with its current slot count, so it is the authority on
@@ -749,6 +795,12 @@ impl Bridge {
                     self.view_changed();
                 }
                 "refresh" => self.view_changed(),
+                // Show more: the next poll lists more of that group, up to its cap.
+                "list" => {
+                    if let Some(n) = LIST_NAMES.iter().position(|g| *g == str_of(&command["g"])) {
+                        self.list_limits[n] = (self.list_limits[n] * 2).min(LIST_CAPS[n]);
+                    }
+                }
                 _ => return Ok(()),
             }
             Ok(())
@@ -875,22 +927,36 @@ impl Bridge {
         }
     }
 
-    /// The `n`th of the three thread lists from every machine still answering, all at once;
-    /// after the last, each machine's lists are taken in, one machine after another.
+    /// A page of the `n`th of the three thread lists from every machine still answering,
+    /// all at once. A machine whose list needs another page to reach its limit gets it in
+    /// the next step; after the last list, each machine's lists are taken in, one machine
+    /// after another.
     fn read_lists(&mut self, n: usize) {
         let mut lists = match self.poll_run.as_mut() {
-            Some(run) if n > 0 => std::mem::take(&mut run.lists),
+            Some(run) if n > 0 || !run.lists.is_empty() => std::mem::take(&mut run.lists),
             Some(_) => self.envs.iter().filter(|e| e.ok).map(|e| (e.id.clone(), Ok(Vec::new()))).collect(),
             None => return,
         };
-        let args: Vec<Option<Map<String, Value>>> = lists.iter().map(|(env, so_far)| so_far.is_ok().then(|| self.env_arg(env))).collect();
+        let limit = self.list_limits[n];
+        // Per machine, the page it needs now, if any: where it starts and how many threads.
+        let args: Vec<Option<ListPage>> = lists
+            .iter()
+            .map(|(env, so_far)| {
+                let page = match so_far {
+                    Ok(replies) if replies.len() == n => Some((None, limit.min(LIST_PAGE))),
+                    Ok(replies) => replies.get(n).and_then(|list| next_page(list, limit).map(|c| (Some(c), (limit - listed_count(list)).min(LIST_PAGE)))),
+                    Err(_) => None,
+                };
+                page.map(|(cursor, count)| (self.env_arg(env), cursor, count))
+            })
+            .collect();
         let client = Arc::clone(&self.client);
         let replies: Vec<Option<Result<Value, T3Error>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = args
                 .iter()
                 .map(|arg| {
                     let client = &client;
-                    arg.as_ref().map(|arg| scope.spawn(move || fetch_list(client.as_ref(), n, arg)))
+                    arg.as_ref().map(|(arg, cursor, count)| scope.spawn(move || fetch_list(client.as_ref(), n, *cursor, *count, arg)))
                 })
                 .collect();
             handles
@@ -899,20 +965,27 @@ impl Bridge {
                 .collect()
         });
         for ((_, so_far), reply) in lists.iter_mut().zip(replies) {
-            match reply {
-                Some(Ok(list)) => {
-                    if let Ok(replies) = so_far {
-                        replies.push(list);
+            match (reply, so_far.as_mut()) {
+                // A later page: its threads join the list; its cursor and total replace.
+                (Some(Ok(page)), Ok(replies)) if replies.len() > n => {
+                    let list = &mut replies[n];
+                    let threads = page["threads"].as_array().cloned().unwrap_or_default();
+                    if let Some(all) = list["threads"].as_array_mut() {
+                        all.extend(threads);
                     }
+                    list["nextCursor"] = page["nextCursor"].clone();
+                    list["total"] = page["total"].clone();
                 }
-                Some(Err(error)) => *so_far = Err(error),
-                None => {}
+                (Some(Ok(page)), Ok(replies)) => replies.push(page),
+                (Some(Err(error)), _) => *so_far = Err(error),
+                _ => {}
             }
         }
-        if n + 1 < LIST_COUNT {
+        let another_page = lists.iter().any(|(_, so_far)| so_far.as_ref().is_ok_and(|replies| replies.get(n).is_some_and(|list| next_page(list, limit).is_some())));
+        if another_page || n + 1 < LIST_COUNT {
             if let Some(run) = self.poll_run.as_mut() {
                 run.lists = lists;
-                run.steps.push_front(Step::List(n + 1));
+                run.steps.push_front(Step::List(if another_page { n } else { n + 1 }));
             }
         } else {
             self.push_steps(lists.into_iter().map(|(env, so_far)| Step::Machine(env, so_far.map(|lists| combine_lists(&lists)))).collect());
@@ -924,12 +997,12 @@ impl Bridge {
     fn take_lists(&mut self, env: String, result: ThreadLists) -> Result<(), T3Error> {
         let name = if env.is_empty() { "local".to_string() } else { env.clone() };
         match result {
-            Ok((threads, settled_total)) => {
+            Ok((threads, settled_total, more)) => {
                 let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
                 steps.extend([Step::Track, Step::Keep]);
                 if let Some(run) = self.poll_run.as_mut() {
-                    run.listed = Some(Listed { env, threads, settled_total, seen: Vec::new() });
+                    run.listed = Some(Listed { env, threads, settled_total, more, seen: Vec::new() });
                 }
                 self.push_steps(steps);
                 Ok(())
@@ -1117,10 +1190,11 @@ impl Bridge {
 
     /// The machine's lists, taken in: they show from now on.
     fn keep_lists(&mut self) {
-        let Some(Listed { env, threads, settled_total, .. }) = self.poll_run.as_mut().and_then(|run| run.listed.take()) else { return };
+        let Some(Listed { env, threads, settled_total, more, .. }) = self.poll_run.as_mut().and_then(|run| run.listed.take()) else { return };
         self.listed_envs.insert(env.clone());
         self.threads.insert(env.clone(), threads);
         self.settled_totals.insert(env.clone(), settled_total);
+        self.list_more.insert(env.clone(), more);
         if let Some(target) = self.envs.iter_mut().find(|e| e.id == env) {
             target.ok = true;
         }
@@ -1176,6 +1250,7 @@ impl Bridge {
         self.threads.retain(|env, _| linked(env));
         self.projects.retain(|env, _| linked(env));
         self.settled_totals.retain(|env, _| linked(env));
+        self.list_more.retain(|env, _| linked(env));
         self.listed_envs.retain(|env| linked(env));
         self.last_status.retain(|key, _| linked(env_of(key)));
         self.unlisted_misses.retain(|key, _| linked(env_of(key)));
@@ -1593,6 +1668,18 @@ impl Bridge {
         out.insert("envs".into(), json!(self.envs.iter().map(|e| json!({ "id": e.id, "name": plain(&e.name, 40), "ok": e.ok })).collect::<Vec<_>>()));
         out.insert("threads".into(), json!(threads));
         out.insert("settledTotal".into(), json!(self.settled_totals.values().sum::<u64>()));
+        // The groups with more threads than listed that Show more can still raise (left
+        // out when there are none).
+        let mut more = Map::new();
+        for (n, name) in LIST_NAMES.iter().enumerate() {
+            let unlisted = self.list_more.iter().any(|(env, m)| m[n] && env_index(env) > 0);
+            if unlisted && self.list_limits[n] < LIST_CAPS[n] {
+                more.insert((*name).into(), json!(true));
+            }
+        }
+        if !more.is_empty() {
+            out.insert("more".into(), Value::Object(more));
+        }
         out.insert("projects".into(), json!(projects));
         out.insert("view".into(), view.unwrap_or(Value::Null));
         out.insert("notes".into(), json!(self.notes));
