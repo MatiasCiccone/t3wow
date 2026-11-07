@@ -194,6 +194,109 @@ fn lenient_trust<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Trust>
     Ok(value.map(|v| serde_json::from_value(v).unwrap_or(Trust::ReadOnly)))
 }
 
+/// How often the companion looks for a new release by itself, from the tray's Update checks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateInterval {
+    Hour,
+    #[default]
+    SixHours,
+    Day,
+    Week,
+    /// No timed checks (a check when the companion starts is its own setting).
+    Never,
+}
+
+impl UpdateInterval {
+    pub const ALL: [UpdateInterval; 5] = [UpdateInterval::Hour, UpdateInterval::SixHours, UpdateInterval::Day, UpdateInterval::Week, UpdateInterval::Never];
+
+    /// As the tray menu names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            UpdateInterval::Hour => "Every hour",
+            UpdateInterval::SixHours => "Every 6 hours",
+            UpdateInterval::Day => "Every day",
+            UpdateInterval::Week => "Every week",
+            UpdateInterval::Never => "Never",
+        }
+    }
+
+    /// Between two timed checks, in milliseconds; None for Never.
+    pub fn millis(self) -> Option<i64> {
+        let hours = match self {
+            UpdateInterval::Hour => 1,
+            UpdateInterval::SixHours => 6,
+            UpdateInterval::Day => 24,
+            UpdateInterval::Week => 24 * 7,
+            UpdateInterval::Never => return None,
+        };
+        Some(hours * 3600 * 1000)
+    }
+}
+
+/// When the companion looks for a new release without being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateChecks {
+    pub on_start: bool,
+    pub every: UpdateInterval,
+}
+
+impl UpdateChecks {
+    /// What a new install does: look when it starts and every 6 hours.
+    pub const DEFAULT: UpdateChecks = UpdateChecks { on_start: true, every: UpdateInterval::SixHours };
+    pub const MANUAL_ONLY: UpdateChecks = UpdateChecks { on_start: false, every: UpdateInterval::Never };
+
+    /// No automatic checks at all: only the tray's Check for updates (or `t3wow.exe update`).
+    pub fn manual_only(self) -> bool {
+        self == Self::MANUAL_ONLY
+    }
+
+    /// The tray's "Only when I check": turns every automatic check off, or, chosen again,
+    /// back to what a new install does.
+    pub fn toggle_manual_only(self) -> UpdateChecks {
+        if self.manual_only() {
+            Self::DEFAULT
+        } else {
+            Self::MANUAL_ONLY
+        }
+    }
+
+    /// For the tray's submenu: "Update checks: at start, every 6 hours".
+    pub fn summary(self) -> String {
+        let every = self.every.label().to_lowercase();
+        match (self.on_start, self.every) {
+            (false, UpdateInterval::Never) => "Update checks: only when I check".into(),
+            (true, UpdateInterval::Never) => "Update checks: when T3 WoW starts".into(),
+            (false, _) => format!("Update checks: {every}"),
+            (true, _) => format!("Update checks: at start, {every}"),
+        }
+    }
+
+    /// What it means, for the tray's confirmation.
+    pub fn description(self) -> String {
+        let every = self.every.label().to_lowercase();
+        match (self.on_start, self.every) {
+            (false, UpdateInterval::Never) => "T3 WoW no longer looks for updates by itself. Choose Check for updates in the tray menu to look.".into(),
+            (true, UpdateInterval::Never) => "T3 WoW looks for a new release when it starts, and tells you when there is one.".into(),
+            (false, _) => format!("T3 WoW looks for a new release {every}, and tells you when there is one."),
+            (true, _) => format!("T3 WoW looks for a new release when it starts and {every}, and tells you when there is one."),
+        }
+    }
+}
+
+/// A value this version doesn't know (a typo in a hand edit) reads as the default interval.
+fn lenient_interval<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<UpdateInterval>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.map(|v| serde_json::from_value(v).unwrap_or_default()))
+}
+
+/// Whether a timed update check is due: `last` is when the last check (timed or asked for)
+/// started, in epoch milliseconds. A clock set back counts as due rather than waiting out
+/// the gap.
+pub fn update_check_due(every: UpdateInterval, last: i64, now: i64) -> bool {
+    every.millis().is_some_and(|gap| now < last || now - last >= gap)
+}
+
 /// What is saved for one T3 server.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -227,6 +330,16 @@ pub struct Config {
     /// The tray's "Commands from the game"; none means Full.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_trust")]
     pub game_commands: Option<Trust>,
+    /// The tray's "When T3 WoW starts" under Update checks; none means on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check_on_start: Option<bool>,
+    /// How often to look for a new release while running; none means every 6 hours.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_interval")]
+    pub update_check_every: Option<UpdateInterval>,
+    /// When the last update check started (epoch milliseconds), so a timed check counts
+    /// from it across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_check: Option<i64>,
     /// Sign-ins by server (see `server_key`): a token is only ever sent to the server that
     /// issued it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -414,6 +527,18 @@ impl Config {
 
     pub fn trust(&self) -> Trust {
         self.game_commands.unwrap_or_default()
+    }
+
+    pub fn update_checks(&self) -> UpdateChecks {
+        UpdateChecks {
+            on_start: self.update_check_on_start.unwrap_or(UpdateChecks::DEFAULT.on_start),
+            every: self.update_check_every.unwrap_or(UpdateChecks::DEFAULT.every),
+        }
+    }
+
+    pub fn set_update_checks(&mut self, checks: UpdateChecks) {
+        self.update_check_on_start = Some(checks.on_start);
+        self.update_check_every = Some(checks.every);
     }
 
     pub fn interface(&self) -> String {
@@ -650,6 +775,50 @@ mod tests {
         let (config, _) = Config::read(&file).unwrap();
         assert_eq!(config.trust(), Trust::ReadOnly);
         assert_eq!(config.wow_dir.as_deref(), Some("C:\\wow"), "the rest of the file still reads");
+    }
+
+    #[test]
+    fn update_checks_default_to_start_and_six_hours_and_save() {
+        let file = temp_file("update-checks");
+        assert_eq!(Config::update_at(&file, |_| {}).update_checks(), UpdateChecks::DEFAULT);
+        Config::update_at(&file, |c| c.set_update_checks(UpdateChecks::MANUAL_ONLY));
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains(r#""updateCheckOnStart": false"#) && text.contains(r#""updateCheckEvery": "never""#), "{text}");
+        assert!(Config::read(&file).unwrap().0.update_checks().manual_only());
+        fs::write(&file, r#"{"updateCheckEvery":"fortnightly","updateCheckOnStart":false,"wowDir":"C:\\wow"}"#).unwrap();
+        let (config, _) = Config::read(&file).unwrap();
+        assert_eq!(config.update_checks(), UpdateChecks { on_start: false, every: UpdateInterval::SixHours }, "an unknown interval reads as the default");
+        assert_eq!(config.wow_dir.as_deref(), Some("C:\\wow"), "the rest of the file still reads");
+    }
+
+    #[test]
+    fn a_timed_update_check_is_due_once_its_interval_has_passed() {
+        let hour = 3600 * 1000;
+        assert!(!update_check_due(UpdateInterval::SixHours, 0, 5 * hour));
+        assert!(update_check_due(UpdateInterval::SixHours, 0, 6 * hour));
+        assert!(update_check_due(UpdateInterval::Hour, 0, hour));
+        assert!(!update_check_due(UpdateInterval::Day, 0, 23 * hour));
+        assert!(!update_check_due(UpdateInterval::Week, 0, 6 * 24 * hour));
+        assert!(!update_check_due(UpdateInterval::Never, 0, 1000 * 24 * hour), "never means never");
+        assert!(update_check_due(UpdateInterval::Day, 10 * hour, hour), "a clock set back doesn't wait out the gap");
+    }
+
+    #[test]
+    fn update_check_settings_read_as_the_menu_says_them() {
+        assert_eq!(UpdateChecks::DEFAULT.summary(), "Update checks: at start, every 6 hours");
+        assert_eq!(UpdateChecks::MANUAL_ONLY.summary(), "Update checks: only when I check");
+        assert_eq!(UpdateChecks { on_start: true, every: UpdateInterval::Never }.summary(), "Update checks: when T3 WoW starts");
+        assert_eq!(UpdateChecks { on_start: false, every: UpdateInterval::Day }.summary(), "Update checks: every day");
+        assert!(UpdateChecks::MANUAL_ONLY.description().contains("Check for updates"));
+        assert!(!UpdateChecks { on_start: true, every: UpdateInterval::Never }.manual_only());
+    }
+
+    #[test]
+    fn only_when_i_check_turns_every_automatic_check_off_and_back() {
+        assert_eq!(UpdateChecks::DEFAULT.toggle_manual_only(), UpdateChecks::MANUAL_ONLY);
+        assert_eq!(UpdateChecks::MANUAL_ONLY.toggle_manual_only(), UpdateChecks::DEFAULT);
+        let daily = UpdateChecks { on_start: false, every: UpdateInterval::Day };
+        assert_eq!(daily.toggle_manual_only(), UpdateChecks::MANUAL_ONLY, "any automatic check counts");
     }
 
     #[test]
