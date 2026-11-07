@@ -8,7 +8,7 @@ use crate::slots::Slots;
 use std::ptr::null_mut;
 use std::sync::Arc;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, PostQuitMessage, SetTimer, TranslateMessage, MSG, WM_TIMER};
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -97,6 +97,35 @@ fn match_interface(app: &App) {
     }
 }
 
+/// Shows a notification from the tray icon (a toast on Windows 10 and 11). tray-icon has
+/// no call for it, so this changes its icon directly. Windows names a tray icon by its
+/// window and an id; tray-icon gives one hidden window to each icon but keeps the id to
+/// itself, so the first few ids are tried, and only the real one exists on that window.
+/// Needs the shell, so it isn't unit-tested.
+fn notify(tray: &TrayIcon, title: &str, text: &str) {
+    use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_INFO, NIIF_INFO, NIM_MODIFY, NOTIFYICONDATAW};
+    fn copy(to: &mut [u16], text: &str) {
+        let room = to.len() - 1; // the last unit stays 0
+        for (slot, unit) in to.iter_mut().zip(text.encode_utf16().take(room)) {
+            *slot = unit;
+        }
+    }
+    let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    data.hWnd = tray.window_handle();
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_INFO;
+    copy(&mut data.szInfoTitle, title);
+    copy(&mut data.szInfo, text);
+    for id in 1..=16 {
+        data.uID = id;
+        if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0 {
+            return;
+        }
+    }
+    log::line("Couldn't show the update notification.");
+}
+
 fn icon() -> Icon {
     Icon::from_rgba(include_bytes!("../assets/tray-32.rgba").to_vec(), 32, 32).expect("tray icon")
 }
@@ -136,6 +165,8 @@ pub fn run(app: Arc<App>) -> ! {
         });
     }
     let mut shown_update: Option<Update> = None;
+    // The version a notification went out for: one per new release, not one per check.
+    let mut notified: Option<String> = None;
     let tray = TrayIconBuilder::new()
         .with_icon(icon())
         .with_tooltip("T3 WoW")
@@ -210,6 +241,13 @@ pub fn run(app: Arc<App>) -> ! {
                     Update::Failed(_) => "Update check failed: try again".to_string(),
                 });
                 updates.set_enabled(!matches!(update, Update::Checking | Update::Installing(_)));
+                if let Update::Available(release) = &update {
+                    if notified.as_ref() != Some(&release.version) {
+                        let text = format!("T3 WoW {} is out. Choose Update to {} in the tray menu.", release.version, release.version);
+                        notify(&tray, "T3 WoW update", &text);
+                        notified = Some(release.version.clone());
+                    }
+                }
                 shown_update = Some(update);
             }
             let status = app.status.lock().unwrap().clone();
