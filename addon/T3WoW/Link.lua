@@ -419,7 +419,6 @@ poller:SetScript("OnUpdate", function(_, delta)
             return
         end
         if watched <= SIGNAL_COUNT and (not state.lastCheckAt or now - state.lastCheckAt >= every) then
-
             startFontCheck(signalPath(watched), watched)
             state.lastCheckAt = now
             state.checksOfWatched = (state.checksOfWatched or 0) + 1
@@ -470,7 +469,6 @@ function Link.Status()
         nextSignal = watchedSignal(),
         nextSlot = state.nextSlot,
         slotsUsed = math.min(SLOT_COUNT, state.nextSlot - 1),
-
         queue = db and #db.queue or 0,
         loadError = state.loadError,
         signalCheck = state.signalCheck,
