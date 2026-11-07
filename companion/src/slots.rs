@@ -154,6 +154,29 @@ impl Slots {
         Ok(written)
     }
 
+    /// Points the addon and its slots at this game's interface version in place: only the
+    /// `## Interface:` lines change, so slots already written, the signals, the sign-in and
+    /// the addon's saved settings all stay. Returns how many files changed.
+    pub fn set_interface(&self) -> io::Result<u32> {
+        let slot_tocs = (1..=SLOT_COUNT).map(|n| self.addons_dir.join(slot_name(n)).join(format!("{}.toc", slot_name(n))));
+        let mut changed = 0;
+        for toc in std::iter::once(self.addon_dir.join(format!("{ADDON}.toc"))).chain(slot_tocs) {
+            let Ok(text) = fs::read_to_string(&toc) else { continue };
+            let updated: String = text
+                .split_inclusive('\n')
+                .map(|line| match line.strip_prefix("## Interface:") {
+                    Some(rest) => format!("## Interface: {}{}", self.interface, &rest[rest.trim_end_matches(['\r', '\n']).len()..]),
+                    None => line.to_string(),
+                })
+                .collect();
+            if updated != text {
+                fs::write(&toc, updated)?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
     /// Creates the slot addons, blank signal files and probe files. With `reset`, existing
     /// ones are blanked too (a fresh install); without, only missing ones are created.
     /// Returns how many files did not exist before.
@@ -381,6 +404,24 @@ mod tests {
         assert_eq!((repair.addon, repair.created), (None, 0));
         assert!(!dir.join("T3WoW/Link.lua").exists());
         assert_eq!(fs::read_to_string(&toc).unwrap(), newer);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_interface_version_changes_only_the_interface_lines() {
+        let dir = temp_dir("interface");
+        fixture_slots(&dir, "16001").install().unwrap();
+        let inbox = dir.join(slot_name(5)).join("Inbox.lua");
+        fs::write(&inbox, "T3WoW_Inbox = { slot = 5 }").unwrap();
+        let toc = dir.join("T3WoW/T3WoW.toc");
+        let before = fs::read_to_string(&toc).unwrap();
+
+        assert_eq!(fixture_slots(&dir, "16002").set_interface().unwrap(), 1 + SLOT_COUNT);
+        assert_eq!(fs::read_to_string(&toc).unwrap(), before.replace("## Interface: 16001\r\n", "## Interface: 16002\r\n"));
+        let slot_toc = fs::read_to_string(dir.join(slot_name(5)).join(format!("{}.toc", slot_name(5)))).unwrap();
+        assert!(slot_toc.starts_with("## Interface: 16002\n## Title:"));
+        assert_eq!(fs::read_to_string(&inbox).unwrap(), "T3WoW_Inbox = { slot = 5 }");
+        assert_eq!(fixture_slots(&dir, "16002").set_interface().unwrap(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 
