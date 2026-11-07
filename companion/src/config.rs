@@ -1,6 +1,8 @@
 //! Settings and sign-in, in %APPDATA%\t3wow\config.json (the same file the earlier Node
 //! companion used, so an existing sign-in carries over).
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -52,7 +54,8 @@ pub fn canonical_origin(origin: &str) -> String {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerAuth {
-    /// The bearer token.
+    /// The bearer token as stored: `dpapi:<base64>` on Windows (only this Windows user can
+    /// read it back), plain text elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
     /// Epoch milliseconds; none means the token doesn't expire.
@@ -88,7 +91,7 @@ impl Config {
 
     pub fn load() -> Config {
         match Self::read(&Self::file()) {
-            // Save the moved token right away.
+            // Save the moved or protected token right away, so plain text doesn't linger.
             Ok((_, true)) => Self::update(|_| {}),
             Ok((config, false)) => config,
             Err(error) => {
@@ -98,7 +101,7 @@ impl Config {
         }
     }
 
-    /// The file's settings, and whether an old sign-in was moved on the way.
+    /// The file's settings, and whether an old sign-in was moved or protected on the way.
     /// A file that isn't valid JSON is kept as config.json.bad and reads as defaults.
     fn read(file: &Path) -> io::Result<(Config, bool)> {
         let text = match fs::read_to_string(file) {
@@ -124,7 +127,7 @@ impl Config {
         }
     }
 
-    /// Moves a 0.4.1 sign-in under the server it was made for.
+    /// Moves a 0.4.1 sign-in under the server it was made for, and protects plain tokens.
     fn migrate(&mut self) -> bool {
         let mut changed = false;
         if let Some(token) = self.token.take() {
@@ -132,10 +135,19 @@ impl Config {
             let key = self.server_key();
             if self.servers.get(&key).is_none_or(|s| s.token.is_none()) {
                 let server = self.servers.entry(key).or_default();
-                server.token = Some(token);
+                server.token = Some(protect(&token));
                 server.token_expires_at = expires_at;
             }
             changed = true;
+        }
+        for server in self.servers.values_mut() {
+            if let Some(stored) = server.token.as_deref().filter(|s| !s.starts_with(PROTECTED)) {
+                let protected = protect(stored);
+                if protected != stored {
+                    server.token = Some(protected);
+                    changed = true;
+                }
+            }
         }
         changed
     }
@@ -197,12 +209,12 @@ impl Config {
     pub fn saved_token(&self, key: &str) -> Option<String> {
         let server = self.servers.get(key)?;
         let expired = server.token_expires_at.is_some_and(|at| at > 0.0 && (at as i64) < now_ms());
-        server.token.clone().filter(|_| !expired)
+        server.token.as_deref().filter(|_| !expired).and_then(unprotect)
     }
 
     pub fn set_sign_in(&mut self, key: &str, token: &str, expires_at: Option<f64>) {
         let server = self.servers.entry(key.to_string()).or_default();
-        server.token = Some(token.to_string());
+        server.token = Some(protect(token));
         server.token_expires_at = expires_at;
     }
 
@@ -223,6 +235,75 @@ impl Config {
 fn warn(message: &str) {
     crate::log::line(message);
     eprintln!("{message}");
+}
+
+const PROTECTED: &str = "dpapi:";
+
+/// A token as stored. On Windows, encrypted for this Windows user (DPAPI); if that fails,
+/// or elsewhere, as it is.
+fn protect(token: &str) -> String {
+    #[cfg(windows)]
+    if let Some(blob) = dpapi::protect(token.as_bytes()) {
+        return format!("{PROTECTED}{}", STANDARD.encode(blob));
+    }
+    token.to_string()
+}
+
+/// A stored token back as text; none if it can't be decrypted (another user or PC).
+fn unprotect(stored: &str) -> Option<String> {
+    let Some(encoded) = stored.strip_prefix(PROTECTED) else {
+        return Some(stored.to_string());
+    };
+    let blob = STANDARD.decode(encoded).ok()?;
+    #[cfg(windows)]
+    let plain = dpapi::unprotect(&blob);
+    #[cfg(not(windows))]
+    let plain: Option<Vec<u8>> = {
+        let _ = blob;
+        None
+    };
+    plain.and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+#[cfg(windows)]
+mod dpapi {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
+
+    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
+        CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 }
+    }
+
+    /// Copies the output out and frees the buffer Windows allocated for it.
+    unsafe fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+        let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        LocalFree(out.pbData.cast());
+        bytes
+    }
+
+    pub fn protect(data: &[u8]) -> Option<Vec<u8>> {
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        let ok = unsafe {
+            CryptProtectData(&blob(data), std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+        };
+        (ok != 0).then(|| unsafe { take(out) })
+    }
+
+    pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        let ok = unsafe {
+            CryptUnprotectData(
+                &blob(data),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        (ok != 0).then(|| unsafe { take(out) })
+    }
 }
 
 #[cfg(test)]
@@ -277,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_single_sign_in_moves_under_its_server() {
+    fn an_old_single_sign_in_moves_under_its_server_and_is_protected() {
         let file = temp_file("migrate");
         let later = now_ms() as f64 + 3_600_000.0;
         fs::write(&file, format!(r#"{{"wowDir":"C:\\wow","token":"old-token","tokenExpiresAt":{later}}}"#)).unwrap();
@@ -291,6 +372,8 @@ mod tests {
         let text = fs::read_to_string(&file).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(json.get("token").is_none() && json.get("tokenExpiresAt").is_none(), "the old fields are gone: {text}");
+        #[cfg(windows)]
+        assert!(!text.contains("old-token"), "the token is encrypted: {text}");
         let (again, changed) = Config::read(&file).unwrap();
         assert!(!changed);
         assert_eq!(again.saved_token(LOCAL).as_deref(), Some("old-token"));
@@ -313,5 +396,15 @@ mod tests {
         assert_eq!(config.interface.as_deref(), Some("1"));
         assert_eq!(fs::read_to_string(file.with_extension("json.bad")).unwrap(), "{ not json");
         assert!(Config::read(&file).is_ok());
+    }
+
+    #[test]
+    fn stored_tokens_read_back() {
+        let stored = protect("secret");
+        #[cfg(windows)]
+        assert!(stored.starts_with(PROTECTED));
+        assert_eq!(unprotect(&stored).as_deref(), Some("secret"));
+        assert_eq!(unprotect("plain").as_deref(), Some("plain"));
+        assert_eq!(unprotect("dpapi:AAAA"), None);
     }
 }
