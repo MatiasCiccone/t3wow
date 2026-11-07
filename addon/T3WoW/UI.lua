@@ -67,6 +67,22 @@ local function isSelectedView(view)
     return view ~= nil and selected ~= nil and not selected.new and view.id == selected.id and envIdOf(view.e) == selected.env
 end
 
+-- The companion's tray setting "Commands from the game" (inbox.trust: "nonew" or
+-- "readonly"; an older companion leaves it out) limits what the game may make T3 do. The
+-- companion refuses those commands anyway: the window greys them out and says why.
+local TRUST_NAME = { nonew = "No new threads", readonly = "Read-only" }
+local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true }
+local BLOCKED_LEAD = {
+    send = "Sending messages from the game is off", new = "Starting threads from the game is off",
+    answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
+}
+local function blockedReason(kind)
+    local trust = inbox and inbox.trust
+    if (trust == "readonly" and CHANGES_T3[kind]) or (trust == "nonew" and kind == "new") then
+        return format('%s: the T3 WoW tray menu has "Commands from the game" set to %s.', BLOCKED_LEAD[kind], TRUST_NAME[trust])
+    end
+end
+
 -- ---------------------------------------------------------------- frame
 
 local frame = CreateFrame("Frame", "T3WoWFrame", UIParent, "BackdropTemplate")
@@ -375,6 +391,11 @@ end
 local function sendAnswer(text)
     local ask = pendingAsk()
     if not ask then return false end
+    local why = blockedReason("answer")
+    if why then
+        UI.Notice(why)
+        return false -- what you typed stays
+    end
     local answers, any, typedUsed = {}, false, false
     for qi, q in ipairs(ask.qs or {}) do
         local list = {}
@@ -470,7 +491,7 @@ end
 local function renderAsk(view, y)
     hideAsk()
     local ask = view.ask
-    if setPlaceholder then setPlaceholder(ask ~= nil) end
+    if setPlaceholder then setPlaceholder() end
     if not ask then
         if view.approval then
             local fs = askString(1)
@@ -509,6 +530,7 @@ local function renderAsk(view, y)
             b:SetText(picked and ("|cff40ff40" .. mark .. o.l .. "|r") or (mark .. o.l))
             b:SetWidth(math.min(width, math.max(140, b:GetFontString():GetStringWidth() + 32)))
             if picked then b:LockHighlight() else b:UnlockHighlight() end
+            b:SetEnabled(not blockedReason("answer"))
             b:ClearAllPoints()
             b:SetPoint("TOPLEFT", 12, -y)
             b:Show()
@@ -517,15 +539,17 @@ local function renderAsk(view, y)
         y = y + 8
     end
     local sending = askState.sent == ask.k and GetTime() - (askState.sentAt or 0) < ANSWER_TIMEOUT
+    local blocked = blockedReason("answer")
     askSend:ClearAllPoints()
     askSend:SetPoint("TOPLEFT", 12, -y)
     askSend:SetText(sending and "Sending…" or "Send answer")
-    askSend:SetEnabled(not sending)
+    askSend:SetEnabled(not sending and not blocked)
     askSend:Show()
     si = si + 1
     local hint = askString(si)
     hint:SetWidth(math.max(80, width - 150))
-    hint:SetText("|cffa0a0a0or type your own answer below and press Enter|r")
+    hint:SetText(blocked and ("|cffff8000" .. blocked .. " Answer it in T3.|r")
+        or "|cffa0a0a0or type your own answer below and press Enter|r")
     hint:ClearAllPoints()
     hint:SetPoint("LEFT", askSend, "RIGHT", 10, 0)
     hint:Show()
@@ -546,7 +570,8 @@ function renderView()
         local project = selectedProject()
         viewTitle:SetText("New thread")
         viewMeta:SetText("Type the task below and press Send.")
-        newHelp:SetText("The thread uses the project's default model and mode.")
+        local blocked = blockedReason("new")
+        newHelp:SetText(blocked and ("|cffff8000" .. blocked .. "|r") or "The thread uses the project's default model and mode.")
         envButton:SetText("Machine: " .. (e and e.name or "|cffff4040no longer linked: pick another|r"))
         projectButton:SetText("Project: " .. (project and project.t
             or (selected.project and "|cffff4040gone: pick another|r" or "No project (scratch)")))
@@ -658,8 +683,11 @@ placeholder:SetText("Message the agent (Shift+Enter for a new line)")
 input:SetScript("OnTextChanged", function(self)
     placeholder:SetShown(self:GetText() == "")
 end)
-setPlaceholder = function(asking)
-    placeholder:SetText(asking and "Type your own answer, or pick one above"
+-- What the empty box says: what Enter does, or that the tray setting turned it off.
+setPlaceholder = function()
+    local asking = pendingAsk() ~= nil
+    local blocked = blockedReason((selected and selected.new) and "new" or (asking and "answer" or "send"))
+    placeholder:SetText(blocked or (asking and "Type your own answer, or pick one above")
         or "Message the agent (Shift+Enter for a new line)")
 end
 input:SetScript("OnCursorChanged", function(_, _, y, _, height)
@@ -678,6 +706,11 @@ local function sendCurrent()
         return
     end
     if text == "" or not selected then return end
+    local blocked = blockedReason(selected.new and "new" or "send")
+    if blocked then
+        UI.Notice(blocked)
+        return
+    end
     -- What was picked may have gone since (a machine unlinked, a project removed): then
     -- nothing is sent and the text stays.
     if not envById(selected.env) then
@@ -731,11 +764,14 @@ send:SetPoint("BOTTOMRIGHT", -18, 16)
 local settle = button(frame, "Settle", 90, function()
     if not selected or selected.new then return end
     local listed = selectedThread()
-    ns.Link.Send({ t = (listed and listed.set) and "unsettle" or "settle", e = selected.env, id = selected.id })
+    local kind = (listed and listed.set) and "unsettle" or "settle"
+    if blockedReason(kind) then return UI.Notice(blockedReason(kind)) end
+    ns.Link.Send({ t = kind, e = selected.env, id = selected.id })
 end)
 settle:SetPoint("RIGHT", send, "LEFT", -6, 0)
 local stop = button(frame, "Stop", 80, function()
     if not selected or selected.new then return end
+    if blockedReason("stop") then return UI.Notice(blockedReason("stop")) end
     ns.Link.Send({ t = "stop", e = selected.env, id = selected.id })
 end)
 stop:SetPoint("RIGHT", settle, "LEFT", -6, 0)
@@ -761,6 +797,8 @@ local function renderStatus()
         connected = "|cffff4040" .. inbox.auth .. "|r"
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
+    elseif inbox.trust and TRUST_NAME[inbox.trust] then
+        connected = format("|cff40c040Connected|r |cffa0a0a0(%s: see Commands from the game in the T3 WoW tray menu)|r", TRUST_NAME[inbox.trust])
     else
         connected = "|cff40c040Connected|r"
     end
@@ -775,10 +813,11 @@ local function renderStatus()
     statusLine:SetText(line or "")
     local listed = selectedThread()
     settle:SetText(listed and listed.set and "Unsettle" or "Settle")
-    settle:SetEnabled(listed ~= nil)
-    stop:SetEnabled(listed ~= nil and WORKING[listed.s] == true)
+    settle:SetEnabled(listed ~= nil and not blockedReason(listed.set and "unsettle" or "settle"))
+    stop:SetEnabled(listed ~= nil and WORKING[listed.s] == true and not blockedReason("stop"))
     send:SetText((selected and selected.new and "Start") or (pendingAsk() and "Answer") or "Send")
-    send:SetEnabled(selected ~= nil)
+    send:SetEnabled(selected ~= nil and not blockedReason((selected.new and "new") or (pendingAsk() and "answer") or "send"))
+    setPlaceholder()
 end
 
 -- ---------------------------------------------------------------- settings

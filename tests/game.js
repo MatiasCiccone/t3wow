@@ -114,6 +114,13 @@ function UIDropDownMenu_EnableDropDown() end
 function UIDropDownMenu_DisableDropDown() end
 C_AddOns = { LoadAddOn = function(name) loads[#loads + 1] = name; T3WoW_Inbox = inboxes[name]; return true end }
 
+-- Sends a game event (PLAYER_LOGOUT, say) to every frame that has an OnEvent script.
+function fire(event, ...)
+  for _, f in ipairs(frames) do
+    if f.scripts.OnEvent then f.scripts.OnEvent(f, event, ...) end
+  end
+end
+
 function tick(seconds)
   for _ = 1, math.floor(seconds / 0.25 + 0.5) do
     clock = clock + 0.25
