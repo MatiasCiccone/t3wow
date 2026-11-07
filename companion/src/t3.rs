@@ -43,9 +43,23 @@ pub fn discover_origin() -> Option<String> {
     origin.starts_with("http").then(|| origin.trim_end_matches('/').to_string())
 }
 
-/// Where to reach T3: the origin saved by `login --origin`, else the T3 running on this PC.
-pub fn origin() -> Option<String> {
-    crate::config::Config::load().origin.or_else(discover_origin)
+/// The T3 to talk to and the sign-in saved for it, read together so a token never goes to
+/// another server than the one that issued it.
+pub struct Target {
+    /// Where its sign-in is saved (`Config::server_key`).
+    pub key: String,
+    pub origin: String,
+    pub token: Option<String>,
+}
+
+/// The origin saved by `login --origin`, else the T3 running on this PC.
+pub fn target() -> Option<Target> {
+    target_in(&crate::config::Config::load())
+}
+
+pub fn target_in(config: &crate::config::Config) -> Option<Target> {
+    let origin = config.origin.as_deref().map(crate::config::canonical_origin).or_else(discover_origin)?;
+    Some(Target { key: config.server_key(), origin, token: config.token() })
 }
 
 fn random_url_safe(bytes: usize) -> String {

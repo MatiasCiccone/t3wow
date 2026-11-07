@@ -25,8 +25,8 @@ pub struct Status {
 }
 
 pub enum Control {
-    /// A new sign-in finished.
-    SignedIn(String),
+    /// A new sign-in finished and is saved.
+    SignedIn,
     SignedOut,
     Reinstall,
 }
@@ -65,12 +65,9 @@ impl App {
         *self.status.lock().unwrap() = Status { t3: t3.into(), wow: wow.into(), attention, signed_in };
     }
 
-    /// Forgets the T3 sign-in; the menu then offers Sign in again.
+    /// Forgets the current T3's sign-in; the menu then offers Sign in again.
     pub fn sign_out(&self) {
-        Config::update(|c| {
-            c.token = None;
-            c.token_expires_at = None;
-        });
+        Config::update(Config::sign_out);
         log::line("Signed out of T3.");
         self.send(Control::SignedOut);
     }
@@ -130,21 +127,16 @@ impl App {
         }
         let app = Arc::clone(self);
         std::thread::spawn(move || {
-            match t3::origin() {
+            match t3::target() {
                 None => log::line("Can't sign in: T3 Code is not running on this PC."),
-                Some(origin) => match t3::login(&origin, &|m| log::line(m)) {
-                    // `login --origin` changed where T3 is while the browser was open: this
-                    // token is for the old one.
-                    Ok(_) if t3::origin().as_deref() != Some(origin.as_str()) => {
-                        log::line(&format!("T3 moved away from {origin} during the sign-in: sign in again."));
-                    }
+                Some(target) => match t3::login(&target.origin, &|m| log::line(m)) {
+                    // Saved for the server that issued it, even if `login --origin` moved the
+                    // companion elsewhere meanwhile: the worker pairs tokens with servers.
                     Ok(signed) => {
-                        Config::update(|c| {
-                            c.token = Some(signed.token.clone());
-                            c.token_expires_at = signed.expires_at;
-                        });
-                        log::line(&format!("Signed in to {origin} ({}).", if signed.scope.is_empty() { "no scope reported" } else { &signed.scope }));
-                        app.send(Control::SignedIn(signed.token));
+                        Config::update(|c| c.set_sign_in(&target.key, &signed.token, signed.expires_at));
+                        let scope = if signed.scope.is_empty() { "no scope reported" } else { &signed.scope };
+                        log::line(&format!("Signed in to {} ({scope}).", target.origin));
+                        app.send(Control::SignedIn);
                     }
                     Err(error) => log::line(&error),
                 },
@@ -197,28 +189,24 @@ pub fn run(app: Arc<App>) {
         Err(error) => log::line(&format!("Couldn't write the addon files: {error}")),
     }
 
-    // 3. T3 on this PC.
-    let origin = loop {
-        if let Some(origin) = t3::origin() {
-            break origin;
-        }
-        app.set("T3 Code isn't running on this PC", "WoW: waiting for T3", true, Config::load().token().is_some());
-        let _ = wait(&control_rx, 5);
-    };
-
-    // 4. Signed in (the first time, the browser opens by itself).
-    let token = loop {
-        if let Some(token) = Config::load().token() {
-            break token;
-        }
-        app.set("T3: sign-in needed (approve it in your browser)", "WoW: waiting for the sign-in", true, false);
-        app.sign_in();
-        if let Some(Control::SignedIn(token)) = wait(&control_rx, 600) {
-            break token;
+    // 3. T3 (on this PC, or the saved origin) and a sign-in for it, read together (the first
+    //    time, the browser opens by itself).
+    let (mut key, origin, token) = loop {
+        match t3::target() {
+            Some(t3::Target { key, origin, token: Some(token) }) => break (key, origin, token),
+            Some(_) => {
+                app.set("T3: sign-in needed (approve it in your browser)", "WoW: waiting for the sign-in", true, false);
+                app.sign_in();
+                let _ = wait(&control_rx, 600);
+            }
+            None => {
+                app.set("T3 Code isn't running on this PC", "WoW: waiting for T3", true, false);
+                let _ = wait(&control_rx, 5);
+            }
         }
     };
 
-    // 5. The bridge, fed by the screen capture.
+    // 4. The bridge, fed by the screen capture.
     let mut client = Arc::new(McpClient::new(&origin, &token));
     let mut bridge = Bridge::new(
         client.clone() as Arc<dyn T3>,
@@ -236,6 +224,7 @@ pub fn run(app: Arc<App>) {
 
     let mut origin = origin;
     let mut checked_origin = Instant::now();
+    let mut recheck = false;
     let mut signed_out = false;
     loop {
         while let Ok(message) = capture_rx.try_recv() {
@@ -243,10 +232,10 @@ pub fn run(app: Arc<App>) {
         }
         while let Ok(control) = control_rx.try_recv() {
             match control {
-                Control::SignedIn(token) => {
+                // Picked up from the config below, paired with the server it's for.
+                Control::SignedIn => {
                     signed_out = false;
-                    client.set_token(&token);
-                    bridge.set_client(client.clone());
+                    recheck = true;
                 }
                 Control::SignedOut => {
                     // T3 now refuses the empty token, which the game window shows too.
@@ -267,13 +256,16 @@ pub fn run(app: Arc<App>) {
         let s = bridge.status();
         // Look again now and then: `t3wow.exe login` may have changed (or cleared) the saved
         // origin or signed in, or the T3 on this PC restarted on another port. A saved origin
-        // always wins.
-        if checked_origin.elapsed() > Duration::from_secs(30) {
+        // always wins. The origin and token come from one read of the config, so a token
+        // only goes to the server it was issued for.
+        if recheck || checked_origin.elapsed() > Duration::from_secs(30) {
             checked_origin = Instant::now();
-            let token = Config::load().token().unwrap_or_default();
-            if let Some(found) = t3::origin().filter(|o| *o != origin) {
-                log::line(&format!("T3 moved to {found}"));
-                origin = found;
+            recheck = false;
+            let found = t3::target();
+            let token = found.as_ref().and_then(|t| t.token.clone()).unwrap_or_default();
+            if let Some(found) = found.filter(|t| t.origin != origin || t.key != key) {
+                log::line(&format!("T3 moved to {}", found.origin));
+                (key, origin) = (found.key, found.origin);
                 client = Arc::new(McpClient::new(&origin, &token));
                 bridge.set_client(client.clone());
             } else if !token.is_empty() && token != client.token() {

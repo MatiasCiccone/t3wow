@@ -102,7 +102,7 @@ const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
   t3wow.exe run        run in this console instead, logging here
   t3wow.exe install    [--wow <_forever_ folder>] [--interface 16001]   reinstall the addon from scratch
   t3wow.exe login      [--origin http://<host>:<port> | local]          sign in to T3 again (local: the T3 on this PC)
-  t3wow.exe status     check the addon install and the T3 connection
+  t3wow.exe status     [--origin http://<host>:<port> | local]          check the addon install and the T3 connection
   t3wow.exe uninstall  remove the addon
   t3wow.exe update     install the newest release, if there is one";
 
@@ -118,24 +118,31 @@ fn wow_dir(args: &Args, config: &Config) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The T3 a command talks to: `--origin` when given (`login` saves it once the sign-in
+/// succeeds), else the saved one. Its token is the one saved for that server, if any.
+fn target(origin: &Option<Option<String>>) -> Option<t3::Target> {
+    let mut config = Config::load();
+    if let Some(origin) = origin {
+        config.origin = origin.clone();
+    }
+    t3::target_in(&config)
+}
+
 fn command(args: Args) -> Result<(), String> {
     let config = Config::load();
-    match args.origin.as_deref() {
-        // Back to finding the T3 on this PC.
-        Some("local") => {
-            Config::update(|c| c.origin = None);
-            if t3::discover_origin().is_none() {
-                println!("Back to the T3 on this PC, but it isn't running: a running companion keeps its current T3 until it starts.");
-            }
-        }
-        Some(origin) if origin.starts_with("http://") || origin.starts_with("https://") => {
-            Config::update(|c| c.origin = Some(origin.trim_end_matches('/').to_string()));
-        }
+    let command = args.command.as_deref().unwrap_or("help");
+    // Some(None) is the T3 on this PC.
+    let origin = match args.origin.as_deref() {
+        Some("local") => Some(None),
+        Some(origin) if origin.starts_with("http://") || origin.starts_with("https://") => Some(Some(config::canonical_origin(origin))),
         Some(origin) => return Err(format!("--origin takes http://<host>:<port> or local, not {origin}")),
-        None => {}
+        None => None,
+    };
+    if origin.is_some() && !matches!(command, "login" | "status") {
+        return Err("--origin goes with login (to switch T3) or status (to check one).".into());
     }
     let interface = args.interface.clone().unwrap_or_else(|| config.interface());
-    match args.command.as_deref().unwrap_or("help") {
+    match command {
         "install" => {
             let dir = wow_dir(&args, &config)?;
             let slots = Slots::for_wow(&dir, &interface);
@@ -150,13 +157,16 @@ fn command(args: Args) -> Result<(), String> {
             println!("Removed the T3WoW addon and its slots. Your sign-in stays in {}", Config::file().display());
         }
         "login" => {
-            let origin = t3::origin().ok_or("T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.")?;
-            let signed = t3::login(&origin, &|m| println!("{m}"))?;
+            let target = target(&origin).ok_or("T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.")?;
+            let signed = t3::login(&target.origin, &|m| println!("{m}"))?;
+            // The new T3 and its token are saved together: a running companion moves to both.
             Config::update(|c| {
-                c.token = Some(signed.token.clone());
-                c.token_expires_at = signed.expires_at;
+                if let Some(origin) = &origin {
+                    c.origin = origin.clone();
+                }
+                c.set_sign_in(&target.key, &signed.token, signed.expires_at);
             });
-            println!("Signed in to {origin} ({}).", signed.scope);
+            println!("Signed in to {} ({}).", target.origin, signed.scope);
         }
         "status" => {
             let dir = wow_dir(&args, &config)?;
@@ -167,8 +177,8 @@ fn command(args: Args) -> Result<(), String> {
             }
             #[cfg(windows)]
             println!("WoW client: {}", if capture::find_wow(&dir).is_some() { "running" } else { "not running" });
-            let origin = t3::origin().ok_or("T3: not running on this PC")?;
-            let token = Config::load().token().ok_or("T3: not signed in: run t3wow.exe login")?;
+            let t3::Target { origin, token, .. } = target(&origin).ok_or("T3: not running on this PC")?;
+            let token = token.ok_or(format!("T3 ({origin}): not signed in: run t3wow.exe login"))?;
             let client = t3::McpClient::new(&origin, &token);
             use t3::T3;
             let links = client.call("t3_environment_links", serde_json::json!({})).map_err(|e| format!("T3 ({origin}): {e}"))?;
