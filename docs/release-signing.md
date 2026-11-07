@@ -8,7 +8,7 @@ A T3 WoW release can be signed in two separate ways. They protect different thin
 | Who checks it | the companion's updater, before it installs an update | Windows (SmartScreen, the file's Properties → Digital Signatures) |
 | What it stops | an update that someone other than this project's CI built, even if they can publish to `t3wow-releases` | the "Windows protected your PC / unrecognized app" warning, over time |
 | Cost | free | about $10 a month, or more (see below) |
-| Status | built; waiting for the key ([set it up](#set-up-the-release-key)) | built behind a switch; waiting for a certificate ([set it up](#set-up-authenticode)) |
+| Status | built; waiting for the key ([set it up](#set-up-the-release-key)) | deferred until the source is open ([decision](#decision-november-2026)); the workflow step stays off without its secrets |
 
 ## The release key
 
@@ -158,6 +158,29 @@ For a solo developer with a private source repository:
 2. **Anywhere else (Argentina included): an SSL.com IV certificate with eSigner, about $309 a year.** Working for a US company doesn't make you eligible for Artifact Signing as an individual: validation uses your own ID and your Azure billing address. SSL.com's IV certificate is for individuals with a government ID, and eSigner signs in its cloud HSM from GitHub Actions with no hardware. SSL.com doesn't list country limits, but ask them before buying whether they validate individuals in your country. This is what `release.yml` is wired for.
 3. Wait, or skip it, if $120 to $309 a year isn't worth "Publisher: <your name>" in a warning that stays anyway for a while. The release key above protects updates either way; Authenticode is about first installs.
 
+### Decision (November 2026)
+
+**Skip Authenticode for now.** The source will be opened (under an OSI license) after alpha testing and the overhaul, which makes the free and nearly free options available. Until then:
+
+- releases go out without Authenticode, and the README's "More info → Run anyway" note stays;
+- the eSigner step in `release.yml` stays off (it only warns), since its secrets aren't set;
+- the release key is set up regardless: it's free, and it's what protects updates.
+
+### After open-sourcing
+
+Revisit with these two, both of which need the source to be public:
+
+- **[SignPath Foundation](https://signpath.org/terms), free.** It signs with its own certificate, so Windows shows "SignPath Foundation" as the publisher, not you. Conditions:
+  - every component under an OSI-approved license, with no proprietary parts;
+  - builds that SignPath can trace back to the public source, which means GitHub-hosted runners and their GitHub Action submitting the build for signing;
+  - MFA for everyone on the project, with authors, reviewers and approvers named;
+  - a "Code signing policy" section on the project's home page, and a privacy statement;
+  - a manual approval for each release;
+  - some reputation before they take an executable on.
+- **Certum Open Source Code Signing, €49 a year.** Issued to you as a natural person, with "Open Source Developer" in the certificate. Its key is in Certum's cloud (SimplySign), whose codes come from a phone app, so CI needs unofficial tools. It gets revoked if used on software sold commercially.
+
+SignPath is the better fit if its conditions are acceptable: free, and made for CI. Either one replaces the eSigner step (and its test) in `release.yml`. The paid options above stay open if neither works out.
+
 ### Set up Authenticode
 
 With SSL.com eSigner, which `release.yml` already runs once its secrets exist. SSL.com's pages change; where these steps and theirs differ, theirs win ([eSigner automation guide](https://www.ssl.com/how-to/automate-esigner-ev-code-signing/)).
@@ -234,8 +257,8 @@ Artifact Signing's certificates last 72 hours and renew daily. The timestamp kee
 ## Checklist for the next release
 
 - [ ] Release key: run `bash scripts/release-signing-wizard.sh`, merge its pull request, confirm `T3WOW_SIGNING_KEY` is set.
-- [ ] Optional, Authenticode: buy the certificate, add the four `ESIGNER_*` secrets.
+- [ ] Authenticode: skipped until the source is open (see [Decision](#decision-november-2026)). The "Authenticode not set up" warning in the run is expected.
 - [ ] Bump the version in the three files and push the tag.
-- [ ] In the run: **Release key** says the key matches; no "Authenticode not set up" warning if you set it up.
-- [ ] On `t3wow-releases`: `t3wow.exe.sha256.sig` is there; `t3wow.exe` shows your name under **Digital Signatures** if signed.
+- [ ] In the run: **Release key** says the key matches.
+- [ ] On `t3wow-releases`: `t3wow.exe.sha256.sig` is there.
 - [ ] From a 0.5.0 companion, **Update to x.y.z** installs it. After the update, a forged release (for instance, the same release with its `.sig` removed, on a test repository through `T3WOW_UPDATE_REPO` in a debug build) is refused.
