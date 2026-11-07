@@ -400,7 +400,9 @@ messageScroll:SetPoint("TOPLEFT", 0, -40)
 messageScroll:SetPoint("BOTTOMRIGHT", -24, 92)
 local messageStrings = {}
 local earlier = button(messageChild, "Show earlier messages", 180, function() ns.Link.Send({ t = "more" }) end)
+local openCopy -- the copy box, made after the composer
 
+-- Each message has a button over it: clicking a message opens it in the copy box.
 local function messageString(index)
     local fs = messageStrings[index]
     if not fs then
@@ -409,6 +411,21 @@ local function messageString(index)
         fs:SetJustifyH("LEFT")
         fs:SetWordWrap(true)
         fs:SetSpacing(2)
+        local hit = CreateFrame("Button", nil, messageChild)
+        hit:SetPoint("TOPLEFT", fs, "TOPLEFT", -4, 4)
+        hit:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", 4, -4)
+        local glow = hit:CreateTexture(nil, "HIGHLIGHT")
+        glow:SetAllPoints()
+        glow:SetColorTexture(1, 1, 1, 0.06)
+        hit:SetScript("OnClick", function(self) openCopy(self.copyText) end)
+        hit:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Click to copy")
+            GameTooltip:Show()
+        end)
+        hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        hit:Hide()
+        fs.hit = hit
         messageStrings[index] = fs
     end
     return fs
@@ -682,7 +699,10 @@ function renderView()
     -- Stay at the end while new messages come in, unless you scrolled up to read.
     local stickToBottom = scrollToEnd
         or messageScroll:GetVerticalScroll() >= messageScroll:GetVerticalScrollRange() - 8
-    for _, fs in ipairs(messageStrings) do fs:Hide() end
+    for _, fs in ipairs(messageStrings) do
+        fs:Hide()
+        fs.hit:Hide()
+    end
     hideAsk()
     earlier:Hide()
     if selected and selected.new then
@@ -734,6 +754,8 @@ function renderView()
         local who = item.r == "u" and "|cff7fbfffYou|r" or "|cff40c0c0Agent|r"
         fs:SetText(who .. "\n" .. item.x)
         place(fs, 4, 14)
+        fs.hit.copyText = item.x
+        fs.hit:Show()
     end
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may
@@ -812,6 +834,65 @@ input:SetScript("OnCursorChanged", function(_, _, y, _, height)
     if -y < offset then inputScroll:SetVerticalScroll(-y)
     elseif -y + height > offset + inputScroll:GetHeight() then inputScroll:SetVerticalScroll(-y + height - inputScroll:GetHeight()) end
 end)
+
+-- ---------------------------------------------------------------- copying
+-- The game can't write to the clipboard, so a clicked message opens over the conversation
+-- in a read-only box, highlighted: Ctrl+C copies it (or the part you select), and closes
+-- the box, as does Escape.
+local copyBox = CreateFrame("Frame", nil, right, "BackdropTemplate")
+copyBox:SetPoint("TOPLEFT", messageScroll, -4, 4)
+copyBox:SetPoint("BOTTOMRIGHT", messageScroll, 24, -4)
+copyBox:SetBackdrop({
+    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true, tileSize = 16, edgeSize = 14,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+})
+copyBox:SetBackdropColor(0, 0, 0, 0.95)
+copyBox:SetFrameLevel(messageScroll:GetFrameLevel() + 20)
+copyBox:EnableMouse(true)
+copyBox:Hide()
+local copyHelp = copyBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+copyHelp:SetPoint("TOPLEFT", 10, -10)
+copyHelp:SetText("Ctrl+C copies the highlighted text. Escape closes.")
+local copyClose = CreateFrame("Button", nil, copyBox, "UIPanelCloseButton")
+copyClose:SetPoint("TOPRIGHT", 2, 2)
+local copyScroll = CreateFrame("ScrollFrame", nil, copyBox, "UIPanelScrollFrameTemplate")
+copyScroll:SetPoint("TOPLEFT", 10, -28)
+copyScroll:SetPoint("BOTTOMRIGHT", -30, 8)
+local copyEdit = CreateFrame("EditBox", nil, copyScroll)
+copyEdit:SetMultiLine(true)
+copyEdit:SetAutoFocus(false)
+copyEdit:SetFontObject(ChatFontNormal)
+copyEdit:SetMaxLetters(0)
+copyEdit:SetWidth(messageWidth() - 8)
+copyScroll:SetScrollChild(copyEdit)
+copyEdit:SetScript("OnEscapePressed", function() copyBox:Hide() end)
+-- Read-only: whatever is typed puts the message back.
+copyEdit:SetScript("OnTextChanged", function(self, userInput)
+    if userInput then
+        self:SetText(copyBox.text or "")
+        self:HighlightText()
+    end
+end)
+copyEdit:SetScript("OnKeyDown", function(_, key)
+    if key == "C" and (IsControlKeyDown() or (IsMetaKeyDown and IsMetaKeyDown())) then
+        C_Timer.After(0.1, function() copyBox:Hide() end) -- after the game has copied
+    end
+end)
+copyBox:SetScript("OnHide", function() copyEdit:ClearFocus() end)
+messageScroll:HookScript("OnHide", function() copyBox:Hide() end)
+
+-- Messages come as game text: color codes go, and doubled pipes are single again.
+function openCopy(text)
+    copyBox.text = ((text or ""):gsub("||", "\1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("\1", "|"))
+    copyEdit:SetWidth(messageWidth() - 8)
+    copyEdit:SetText(copyBox.text)
+    copyBox:Show()
+    copyScroll:SetVerticalScroll(0)
+    copyEdit:SetFocus()
+    copyEdit:HighlightText()
+end
 
 local function sendCurrent()
     local text = input:GetText():gsub("^%s+", ""):gsub("%s+$", "")
@@ -1460,6 +1541,7 @@ function UI.IsShown() return frame:IsShown() end
 function selectThread(envId, threadId)
     selected = { env = envId, id = threadId }
     scrollToEnd = true
+    copyBox:Hide()
     ns.Link.Send({ t = "open", e = envId, id = threadId })
     UI.Refresh()
 end
@@ -1475,6 +1557,7 @@ local function applyWidth()
     messageChild:SetWidth(width)
     for _, fs in ipairs(messageStrings) do fs:SetWidth(width - 8) end
     input:SetWidth(width - 30)
+    copyEdit:SetWidth(width - 8)
 end
 
 frame:SetScript("OnSizeChanged", function()

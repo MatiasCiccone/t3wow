@@ -95,7 +95,11 @@ local function frame(kind, name)
     return function() return f end
   end })
 end
-function CreateFrame(kind, name) return frame(kind, name) end
+function CreateFrame(kind, name, parent)
+  local f = frame(kind, name)
+  f.parent = parent
+  return f
+end
 UIParent, WorldFrame, Minimap = frame(), frame(), frame()
 UISpecialFrames = {}
 tinsert = table.insert
@@ -104,6 +108,8 @@ GameTooltip = frame()
 ChatFontNormal = {}
 C_Timer = { After = function(_, fn) fn() end }
 function IsShiftKeyDown() return false end
+controlDown = false
+function IsControlKeyDown() return controlDown end
 function ReloadUI() end
 function PlaySound() end
 function CloseDropDownMenus() end

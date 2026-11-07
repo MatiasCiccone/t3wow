@@ -539,3 +539,45 @@ assert(below(working, agent), "Working… isn't below the reply")
 return "ok"
 `);
 });
+
+test("clicking a message opens it highlighted in a read-only copy box, without game text codes", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local text = "Run |cffc8c8a0npm test|r in a || pipe"
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = text } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+local hit = shownString("npm test").hit
+assert(hit and hit.shown, "the message can't be clicked")
+hit.scripts.OnClick(hit, "LeftButton")
+local edit
+for _, f in ipairs(frames) do
+  if f.kind == "EditBox" and f.text == "Run npm test in a | pipe" then edit = f end
+end
+assert(edit, "no copy box with the message's plain text")
+local box = edit.parent.parent
+assert(box.shown, "copy box hidden")
+-- Read-only: typing puts the message back.
+edit.text = "changed"
+edit.scripts.OnTextChanged(edit, true)
+assert(edit.text == "Run npm test in a | pipe", edit.text)
+edit.scripts.OnEscapePressed(edit)
+assert(not box.shown, "Escape didn't close it")
+-- Ctrl+C closes it too, once the game has copied.
+hit.scripts.OnClick(hit, "LeftButton")
+assert(box.shown, "didn't open again")
+controlDown = true
+edit.scripts.OnKeyDown(edit, "C")
+controlDown = false
+assert(not box.shown, "Ctrl+C didn't close it")
+-- Opening another thread closes it.
+hit.scripts.OnClick(hit, "LeftButton")
+UI.Select({ e = 1, id = "t2" })
+assert(not box.shown, "stayed open on another thread")
+-- Status lines can't be copied.
+inboxWith(ENVS, { threads = { { e = 1, id = "t2", t = "Other", s = "running", set = false, at = time(), p = "" } },
+  view = { e = 1, id = "t2", t = "Other", s = "running", items = {} } })
+assert(not shownString("Working…").hit.shown, "Working… is clickable")
+return "ok"
+`);
+});
