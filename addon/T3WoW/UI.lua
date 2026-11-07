@@ -731,7 +731,7 @@ end
 -- ---------------------------------------------------------------- settings
 
 local DEFAULTS = {
-    toasts = true, chat = true, sound = true, duration = 8, maxToasts = 4,
+    toasts = true, chat = true, sound = true, duration = 8, maxToasts = 4, approvalOpensT3 = false,
     onCompleted = true, onWaiting = true, onFailed = true, onStopped = false,
 }
 local EVENT_SETTING = {
@@ -919,7 +919,7 @@ local function showToast(event)
             break
         end
     end
-    toast.threadId, toast.envId, toast.inT3 = event.id, event.e, event.s == "approval"
+    toast.threadId, toast.envId, toast.inT3 = event.id, event.e, event.s == "approval" and settings().approvalOpensT3 == true
     toast.icon:SetTexture(STATUS_ICON[event.s] or STATUS_ICON.completed)
     toast.head:SetText(format("T3 WoW · |cff%s%s|r", s[2], s[1]))
     toast.title:SetText(event.t ~= "" and event.t or "Thread")
@@ -955,7 +955,7 @@ end
 -- ---------------------------------------------------------------- settings panel
 
 local settingsPanel = CreateFrame("Frame", "T3WoWSettings", frame, "BackdropTemplate")
-settingsPanel:SetSize(270, 448)
+settingsPanel:SetSize(270, 474)
 settingsPanel:SetPoint("TOPLEFT", frame, "TOPRIGHT", -4, 0)
 settingsPanel:SetBackdrop({
     bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -1124,6 +1124,9 @@ checkbox("Finishes", "onCompleted")
 checkbox("Needs you", "onWaiting")
 checkbox("Fails", "onFailed")
 checkbox("Is stopped", "onStopped")
+-- Off by default: a stray click mid-fight shouldn't pull you out of the game. Off, an
+-- approval's notification opens the thread here, and its Open in T3 button goes on.
+checkbox("Clicking an approval opens T3", "approvalOpensT3")
 layoutY = layoutY - 8
 
 sectionLabel("Minimap")
