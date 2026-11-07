@@ -9,7 +9,7 @@ use crate::slots::Slots;
 use crate::t3::{self, McpClient, T3};
 use crate::updater::{self, Release};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -45,7 +45,8 @@ pub enum Update {
 pub struct App {
     pub status: Mutex<Status>,
     pub control: Mutex<Option<Sender<Control>>>,
-    signing_in: AtomicBool,
+    /// Counts sign-ins started: a waiting sign-in ends when a newer one starts.
+    sign_in_run: AtomicU64,
     pub wow_dir: Mutex<Option<PathBuf>>,
     pub update: Mutex<Update>,
 }
@@ -55,7 +56,7 @@ impl App {
         Arc::new(App {
             status: Mutex::new(Status::default()),
             control: Mutex::new(None),
-            signing_in: AtomicBool::new(false),
+            sign_in_run: AtomicU64::new(0),
             wow_dir: Mutex::new(None),
             update: Mutex::new(Update::NotChecked),
         })
@@ -120,16 +121,16 @@ impl App {
         }
     }
 
-    /// Opens T3's sign-in page in the browser (once at a time) and hands the token over.
+    /// Opens T3's sign-in page in the browser and waits for the approval in the background.
+    /// Asked again while one waits, it starts over: the old wait ends and a new page opens.
     pub fn sign_in(self: &Arc<App>) {
-        if self.signing_in.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        let run = self.sign_in_run.fetch_add(1, Ordering::SeqCst) + 1;
         let app = Arc::clone(self);
         std::thread::spawn(move || {
+            let cancelled = || app.sign_in_run.load(Ordering::SeqCst) != run;
             match t3::target() {
                 None => log::line("Can't sign in: T3 Code is not running on this PC."),
-                Some(target) => match t3::login(&target.origin, &target.key, &|m| log::line(m)) {
+                Some(target) => match t3::login(&target.origin, &target.key, &|m| log::line(m), &cancelled) {
                     // Saved for the server that issued it, even if `login --origin` moved the
                     // companion elsewhere meanwhile: the worker pairs tokens with servers.
                     Ok(signed) => {
@@ -138,10 +139,10 @@ impl App {
                         log::line(&format!("Signed in to {} ({scope}).", target.origin));
                         app.send(Control::SignedIn);
                     }
+                    Err(_) if cancelled() => log::line("Started the sign-in over."),
                     Err(error) => log::line(&error),
                 },
             }
-            app.signing_in.store(false, Ordering::SeqCst);
         });
     }
 }
@@ -189,21 +190,23 @@ pub fn run(app: Arc<App>) {
         Err(error) => log::line(&format!("Couldn't write the addon files: {error}")),
     }
 
-    // 3. T3 (on this PC, or the saved origin) and a sign-in for it, read together (the first
-    //    time, the browser opens by itself).
+    // 3. T3 (on this PC, or the saved origin) and a sign-in for it. The browser opens by
+    //    itself once per start; after that, the tray's Sign in to T3… opens it again. A
+    //    terminal `login` is picked up too.
+    let mut asked = false;
     let (mut key, origin, token) = loop {
         match t3::target() {
             Some(t3::Target { key, origin, token: Some(token) }) => break (key, origin, token),
             Some(_) => {
-                app.set("T3: sign-in needed (approve it in your browser)", "WoW: waiting for the sign-in", true, false);
-                app.sign_in();
-                let _ = wait(&control_rx, 600);
+                app.set("T3: sign-in needed (approve it in your browser, or choose Sign in to T3)", "WoW: waiting for the sign-in", true, false);
+                if !asked {
+                    asked = true;
+                    app.sign_in();
+                }
             }
-            None => {
-                app.set("T3 Code isn't running on this PC", "WoW: waiting for T3", true, false);
-                let _ = wait(&control_rx, 5);
-            }
+            None => app.set("T3 Code isn't running on this PC", "WoW: waiting for T3", true, false),
         }
+        let _ = wait(&control_rx, 5);
     };
 
     // 4. The bridge, fed by the screen capture.
