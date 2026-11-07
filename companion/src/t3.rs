@@ -149,8 +149,8 @@ fn status_and_json(response: Result<ureq::http::Response<ureq::Body>, ureq::Erro
 /// T3's MCP sign-in: register a public client (once per server: the client id is saved under
 /// `key`), send the user to the approval page, receive the code on a loopback port, exchange
 /// it with PKCE. The approval page is where the user picks the access (Full access lets it
-/// write to full-access threads).
-pub fn login(origin: &str, key: &str, log: &dyn Fn(&str)) -> Result<SignIn, String> {
+/// write to full-access threads). `cancelled` ends the wait early.
+pub fn login(origin: &str, key: &str, log: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<SignIn, String> {
     use crate::config::Config;
     let state = random_url_safe(16);
     let verifier = random_url_safe(32);
@@ -212,7 +212,7 @@ pub fn login(origin: &str, key: &str, log: &dyn Fn(&str)) -> Result<SignIn, Stri
     log(&format!("If no browser opened, visit: {authorize}"));
     open_browser(&authorize);
 
-    let code = wait_for_code(&listener, &state, Duration::from_secs(600))?;
+    let code = wait_for_code(&listener, &state, Duration::from_secs(600), cancelled)?;
 
     let form: Vec<String> = [
         ("grant_type", "authorization_code"),
@@ -271,10 +271,13 @@ fn respond(mut stream: &TcpStream, status: &str, page: &str) {
 
 /// Serves the loopback redirect until the browser brings back the code. A callback without
 /// this sign-in's state (another program, an old tab) is turned away and the wait goes on.
-fn wait_for_code(listener: &TcpListener, state: &str, timeout: Duration) -> Result<String, String> {
+fn wait_for_code(listener: &TcpListener, state: &str, timeout: Duration, cancelled: &dyn Fn() -> bool) -> Result<String, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if cancelled() {
+            return Err("Sign-in cancelled.".into());
+        }
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -514,7 +517,7 @@ mod tests {
     fn callback_server(state: &'static str) -> (u16, std::thread::JoinHandle<Result<String, String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let waiting = std::thread::spawn(move || wait_for_code(&listener, state, Duration::from_secs(10)));
+        let waiting = std::thread::spawn(move || wait_for_code(&listener, state, Duration::from_secs(10), &|| false));
         (port, waiting)
     }
 
@@ -553,5 +556,11 @@ mod tests {
         assert!(reply.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{reply}");
         assert!(!reply.contains("<script>"), "{reply}");
         assert_eq!(waiting.join().unwrap(), Err("Sign-in failed: <script>alert(1)</script>".to_string()));
+    }
+
+    #[test]
+    fn a_cancelled_wait_ends() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert_eq!(wait_for_code(&listener, "s", Duration::from_secs(10), &|| true), Err("Sign-in cancelled.".to_string()));
     }
 }
