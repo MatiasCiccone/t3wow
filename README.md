@@ -6,9 +6,9 @@ T3 Code inside World of Warcraft: Forever. You bring your harnesses to T3 Code; 
 
 An in-game window lists your T3 threads from every machine your T3 Code reaches (this PC and its linked environments), shows a thread's conversation, and lets you message it, answer an agent's questions, start a new thread, stop a run, and settle or unsettle a thread. When a thread finishes, fails or needs you, a notification slides in.
 
-<p align="center"><img src="assets/screenshots/question.png" alt="The T3 WoW window: a thread whose agent asks two questions, with option buttons and Send answer" width="720"></p>
+<p align="center"><img src="assets/screenshots/theme-t3.png" alt="The T3 WoW window in the T3 theme: a thread whose agent asks two questions, with option chips and Send answer, beside Settings and three notifications" width="720"></p>
 
-More screenshots are in [`assets/screenshots`](assets/screenshots).
+The Flat and Classic themes and the compact thread list are in [`assets/screenshots`](assets/screenshots). These images are rendered from the themes' colors, fonts and sizes, not captured in the game.
 
 ## What you need
 
