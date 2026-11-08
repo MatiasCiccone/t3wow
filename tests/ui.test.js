@@ -407,6 +407,30 @@ return "ok"
 `);
 });
 
+test("the box keeps the keyboard after Enter sends a message or an answer", () => {
+  run(`
+local lost = 0
+composer().ClearFocus = function() lost = lost + 1 end
+local function enter() composer().scripts.OnEnterPressed(composer()) end
+local thread = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "running", items = {} } })
+UI.Select(thread)
+typeText("first")
+enter()
+assert(sent().m == "first", "not sent")
+assert(typed() == "", "box not cleared")
+assert(lost == 0, "the message took the keyboard away")
+local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } } } }
+thread.s = "waiting"
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+typeText("Green")
+enter()
+assert(typed() == "", "answer not sent")
+assert(lost == 0, "the answer took the keyboard away")
+return "ok"
+`);
+});
+
 test("an overlong message stays in the box instead of being dropped", () => {
   run(`
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
