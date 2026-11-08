@@ -44,6 +44,10 @@ const PENDING_RECHECK_MS: i64 = 20_000;
 /// watch can end, the PR merged, without the thread changing).
 const WATCH_RECHECK_MS: i64 = 60_000;
 
+/// How long a thread must keep waiting on you before it notifies. T3 can list a run that
+/// just ended as "waiting" for a moment before "completed"; a real question stays.
+const CONFIRM_WAITING_MS: i64 = 5_000;
+
 fn working(status: &str) -> bool {
     WORKING.contains(&status)
 }
@@ -340,6 +344,8 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
+    /// Threads seen waiting on you but not yet notified, and when that was first seen.
+    unconfirmed: HashMap<String, i64>,
     /// Active threads off the lists whose last reads failed, and how many times in a row.
     unlisted_misses: HashMap<String, u32>,
     /// What working threads wait on, keyed by thread: T3's list says "running" while an
@@ -843,6 +849,7 @@ impl Bridge {
             events: Vec::new(),
             event_seq: 0,
             last_status: HashMap::new(),
+            unconfirmed: HashMap::new(),
             unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
             watches: HashMap::new(),
@@ -973,6 +980,7 @@ impl Bridge {
         self.settled_totals.clear();
         self.list_more.clear();
         self.last_status.clear();
+        self.unconfirmed.clear();
         self.unlisted_misses.clear();
         self.pending_counts.clear();
         self.watches.clear();
@@ -1982,11 +1990,16 @@ impl Bridge {
         if !working(&status) && self.stopping.remove(&key).is_some() {
             self.note("Stopped.");
         }
-        let before = self.last_status.insert(key, status.clone());
+        let now = self.now_ms();
+        let before = self.last_status.insert(key.clone(), status.clone());
+        // When it was first seen waiting on you, if that hasn't notified yet.
+        let since = self.unconfirmed.remove(&key).filter(|_| before.is_some());
         let notify = match before.as_deref() {
             // A thread new since the last list that already waits on you (an agent that
             // asked straight away) notifies too; on the first list everything is old news.
             None => needs_you(&status) && self.listed_envs.contains(env),
+            // Seen waiting on you before, not yet notified, and still waiting.
+            Some(_) if since.is_some() && needs_you(&status) => true,
             Some(before) if before == status => false,
             // Stopped working: finished, failed, stopped, or now waits on you. A run that
             // ended watching its pull request isn't done yet: it notifies when that ends.
@@ -1995,6 +2008,14 @@ impl Bridge {
             Some(before) if needs_you(before) => !active(&status) && !needs_you(&status),
             Some(_) => false,
         };
+        // Waiting on you: held until a look CONFIRM_WAITING_MS later still agrees.
+        if notify && needs_you(&status) {
+            let first = since.unwrap_or(now);
+            if now - first < CONFIRM_WAITING_MS {
+                self.unconfirmed.insert(key, first);
+                return;
+            }
+        }
         if notify {
             self.event_seq = (self.event_seq + 1).max(self.now_ms());
             self.events.push(json!({

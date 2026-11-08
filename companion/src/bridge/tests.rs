@@ -596,13 +596,16 @@ fn a_running_thread_with_a_question_needs_you_and_notifies() {
     rig.bridge.tick();
     let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
     assert!(inbox.contains("id=\"t1\",t=\"Fix tests\",s=\"waiting\""), "{inbox}");
-    assert!(inbox.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "an alert: {inbox}");
+    assert!(!inbox.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "no alert on the first look: {inbox}");
 
-    // Nothing changed: the next poll reuses the count instead of reading every thread again.
+    // Nothing changed: the next poll reuses the count instead of reading every thread again,
+    // and the question, still there, notifies.
     let reads = rig.t3.calls_to("t3_thread_read").len();
     rig.advance(5_000);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_read").len(), reads);
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "an alert: {inbox}");
 
     // Answered in T3: the agent runs again.
     rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(0);
@@ -658,6 +661,25 @@ fn a_thread_watching_its_pull_request_shows_as_watching_and_notifies_when_the_wa
 }
 
 #[test]
+fn a_run_seen_waiting_for_one_look_as_it_ends_only_notifies_finished() {
+    let mut rig = Rig::new(6_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+
+    // T3 can list a run that just ended as "waiting" for a moment before "completed".
+    rig.t3.set("waiting", "2026-11-06T10:01:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    rig.t3.set("completed", "2026-11-06T10:01:01Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let slots: Vec<String> = rig.written.lock().unwrap().slots.values().cloned().collect();
+    assert!(slots.iter().all(|s| !s.contains("t=\"Fix tests\",s=\"waiting\"}")), "no Needs you alert: {slots:?}");
+    let latest = slots.last().unwrap();
+    assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "a Finished alert: {latest}");
+}
+
+#[test]
 fn a_new_thread_that_already_asks_notifies_but_old_ones_dont_at_start() {
     let mut rig = Rig::new(7_000_000);
     rig.t3.set("waiting", "2026-11-06T10:00:00Z");
@@ -670,6 +692,10 @@ fn a_new_thread_that_already_asks_notifies_but_old_ones_dont_at_start() {
         "threadId": "t2", "projectId": "p1", "title": "Quick question", "status": "running",
         "settled": false, "updatedAt": "2026-11-06T10:03:00Z", "itemCount": 2, "pendingRequestCount": 1
     }));
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(!latest.contains("t=\"Quick question\",s=\"waiting\"}"), "no alert on the first look: {latest}");
     rig.advance(15_000);
     rig.bridge.tick();
     let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
@@ -689,6 +715,10 @@ fn an_approval_shows_as_approve_in_t3_and_the_game_can_open_t3_on_it() {
     rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(1);
     rig.t3.set("running", "2026-11-06T10:01:00Z");
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "open", "id": "mcp:t1" }] }));
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(!inbox.contains("s=\"approval\"}"), "no alert on the first look: {inbox}");
     rig.advance(15_000);
     rig.bridge.tick();
     let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
