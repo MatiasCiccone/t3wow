@@ -161,9 +161,10 @@ impl T3 for FakeT3 {
             }
             "t3_thread_list" => {
                 let mut threads = if args["settled"] == true { self.settled.lock().unwrap().clone() } else { self.threads.lock().unwrap().clone() };
-                // Like T3, the list has no pending-question count: only a thread read does.
+                // Like T3, the list has no pending-question count or branch: only a thread read does.
                 for t in &mut threads {
                     t.as_object_mut().unwrap().remove("pendingRequestCount");
+                    t.as_object_mut().unwrap().remove("branch");
                 }
                 // A page at a time, as T3 pages: at most 100 from the cursor on.
                 let limit = args["limit"].as_u64().unwrap_or(50) as usize;
@@ -1089,6 +1090,27 @@ fn a_command_waits_for_one_request_at_most_while_a_slow_poll_reads() {
         assert!(ran - at <= REQUEST, "Stop {s}, pressed at +{} ms, ran at +{} ms", at - start, ran - start);
     }
     assert!(stops.len() + 1 >= pressed.len(), "{} of {} presses ran", stops.len(), pressed.len());
+}
+
+#[test]
+fn the_open_thread_says_which_branch_it_is_on() {
+    let mut rig = Rig::new(18_600_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    rig.t3.threads.lock().unwrap()[0]["branch"] = json!("feature/show|branch");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    // Pipes escaped for the game, as other text is.
+    assert_eq!(snapshot["view"]["br"], "feature/show||branch");
+    // T3's list has no branch, so the listed threads don't either.
+    assert!(snapshot["threads"][0]["br"].is_null());
+
+    // A thread with no checkout of its own (a scratch thread) has none.
+    rig.t3.threads.lock().unwrap()[0].as_object_mut().unwrap().remove("branch");
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["view"]["br"].is_null());
 }
 
 #[test]

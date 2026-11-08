@@ -658,7 +658,7 @@ local right = CreateFrame("Frame", nil, frame)
 right:SetPoint("TOPLEFT", LIST_WIDTH + 1, -SIZE.title - 1)
 right:SetPoint("BOTTOMRIGHT", -1, SIZE.footer + 1)
 
--- The thread's title, then its status pill, machine and age; a line under them.
+-- The thread's title, then its status pill, machine, age and branch; a line under them.
 local viewTitle = right:CreateFontString(nil, "OVERLAY")
 viewTitle:SetFontObject(Skin.fonts.title)
 viewTitle:SetPoint("TOPLEFT", 18, -12)
@@ -670,6 +670,8 @@ viewPill:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -6)
 local viewMeta = right:CreateFontString(nil, "OVERLAY")
 viewMeta:SetFontObject(Skin.fonts.small)
 viewMeta:SetJustifyH("LEFT")
+-- One line: a long branch is cut short with "…" at the panel's edge.
+viewMeta:SetWordWrap(false)
 do
     local headerLine = Skin.Line(right)
     headerLine:SetPoint("TOPLEFT", 0, -SIZE.header)
@@ -688,6 +690,7 @@ local function setViewMeta(status, text)
         viewPill:SetShown(false)
         viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -8)
     end
+    viewMeta:SetPoint("RIGHT", right, "RIGHT", -18, 0)
     viewMeta:SetText(text or "")
 end
 
@@ -1710,7 +1713,13 @@ function renderView()
     viewTitle:SetText((view and view.t) or (listed and listed.t) or "")
     local status = (listed and listed.s) or (view and view.s)
     local e = envById(selected.env)
-    setViewMeta(status, format("%s · %s", e and e.name or "?", age(listed and listed.at)))
+    local meta = format("%s · %s", e and e.name or "?", age(listed and listed.at))
+    -- The branch its checkout is on, last so a long one is what gets cut short. Only the
+    -- open thread's read carries it (T3's list doesn't), so the list rows go without.
+    if view and view.br and view.br ~= "" then
+        meta = meta .. " · " .. view.br
+    end
+    setViewMeta(status, meta)
     if not view then
         flowStart(0)
         placeMessage(messageString(1), "|cff" .. Skin.Hex("dim") .. "Loading…|r", false)

@@ -2245,7 +2245,7 @@ impl Bridge {
         let more = messages.len() > items.len() || earlier;
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
         let status = if pending && working(str_of(&thread["status"])) { "waiting" } else { str_of(&thread["status"]) };
-        read.built = Some(json!({
+        let mut built = json!({
             "e": env,
             "id": id,
             "t": plain(str_of(&thread["title"]), 120),
@@ -2254,7 +2254,14 @@ impl Bridge {
             "at": iso_seconds(str_of(&thread["updatedAt"])),
             "more": more,
             "items": items,
-        }));
+        });
+        // The branch its checkout is on, for the header. Only a thread read has it, not T3's
+        // list, so the game shows it for the open thread alone.
+        let branch = plain(str_of(&thread["branch"]), 80);
+        if !branch.is_empty() {
+            built["br"] = json!(branch);
+        }
+        read.built = Some(built);
         read.positions = positions;
         read.embedded = embedded;
         if let Some(run) = self.poll_run.as_mut() {
