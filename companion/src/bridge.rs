@@ -2,6 +2,7 @@
 //! threads, and publishes what the game shows into slot files, raising the signal files
 //! that tell the game to read them.
 
+use crate::clip::{self, Clipped};
 use crate::codec::decode_cells;
 use crate::config::Trust;
 use crate::lua::{name_thread_links, plain, to_lua, wow_segments, wow_text};
@@ -251,8 +252,8 @@ fn new_login_stamp() -> String {
 pub enum CaptureMessage {
     /// The WoW client process changed: Some(key) when one runs, None when none does.
     Wow(Option<String>),
-    /// Cell values read from the strip.
-    Strip(Vec<u8>),
+    /// Cell values read from the strip, and when (epoch ms).
+    Strip(Vec<u8>, i64),
 }
 
 #[derive(Clone)]
@@ -352,8 +353,9 @@ pub struct Bridge {
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
     /// Commands waiting to run: client key, the UI session they came in, the stamp of the
-    /// sign-in the game drew them under (none from an older addon), the command.
-    commands: VecDeque<(String, String, Option<String>, Value)>,
+    /// sign-in the game drew them under (none from an older addon), the command, and when
+    /// the frame that brought it was read.
+    commands: VecDeque<(String, String, Option<String>, Value, i64)>,
     /// Per client key, the highest command queued to run but not yet run (not saved: a
     /// command only counts as done once it ran).
     queued: HashMap<String, u64>,
@@ -399,6 +401,21 @@ pub struct Bridge {
     scan: Option<ScanCache>,
     /// Pictures that couldn't be drawn, why, and when (tried again after PICTURE_RETRY_MS).
     picture_errors: HashMap<String, (String, i64)>,
+    /// Reads the image on the clipboard (`clip::read_image`); replaced in tests.
+    pub clipboard: Box<dyn Fn() -> Result<Option<Clipped>, String> + Send>,
+    /// Ctrl+V presses seen in WoW, and when the last was (`keys::presses`); replaced in tests.
+    pub presses: Box<dyn Fn() -> (u64, i64) + Send>,
+    /// The presses pastes have used: each press lets one paste through.
+    presses_used: u64,
+    /// Images pasted in the game, by the message they go with: "new" for New Thread,
+    /// "{e}:{id}" for a thread, as the game's commands name its machine and id.
+    drafts: BTreeMap<String, Vec<Pasted>>,
+    pasted_count: u64,
+    /// When this companion started (epoch ms), so its pasted images' small pictures don't
+    /// take the image slot keys of an earlier run's.
+    started_ms: i64,
+    /// When the frame that brought the command being run was read (epoch ms).
+    command_seen_at: i64,
 }
 
 /// The pages an agent showed (html_render) in the open thread, found by reading its
@@ -552,6 +569,26 @@ struct Watch {
     updated: String,
     read_at: i64,
     watching: bool,
+}
+
+/// Images pasted for one message at most (T3 takes 8).
+const MAX_PASTED: usize = 8;
+/// A paste counts only if the frame that brought it was read this soon after a Ctrl+V
+/// in WoW (see `keys`), and not before it.
+const PASTE_PRESS_MS: i64 = 5000;
+const UNPROVEN_PASTE: &str = "T3 WoW pastes only right after you press Ctrl+V in its message box";
+const NO_IMAGE: &str = "the clipboard holds no image";
+
+/// An image pasted in the game, waiting to go with the message it was pasted for.
+struct Pasted {
+    /// Its number, for the game to remove it by.
+    n: u64,
+    png: Vec<u8>,
+    w: u32,
+    h: u32,
+    /// The image slot holding its small picture, and that picture's size (None: the game
+    /// can't show pictures, or every slot is in use).
+    thumb: Option<(u32, u32, u32)>,
 }
 
 /// A working thread's pending requests, as last read.
@@ -779,6 +816,7 @@ impl Bridge {
         // A picture whose file is gone or blank (a reinstall, a cleanup) is no picture: the
         // game would show a blank slot as a placeholder.
         link.images.retain(|n, _| slots.has_image(*n));
+        let started_ms = now();
         Bridge {
             client,
             slots,
@@ -837,6 +875,13 @@ impl Bridge {
             cards_ok: false,
             scan: None,
             picture_errors: HashMap::new(),
+            clipboard: Box::new(clip::read_image),
+            presses: Box::new(crate::keys::presses),
+            presses_used: 0,
+            drafts: BTreeMap::new(),
+            pasted_count: 0,
+            started_ms,
+            command_seen_at: 0,
         }
     }
 
@@ -902,6 +947,7 @@ impl Bridge {
         self.events.clear();
         self.notes.clear();
         self.outcomes.clear();
+        self.drafts.clear();
         self.list_errors.clear();
         self.polled_ok = false;
         self.auth_error = None;
@@ -1001,9 +1047,9 @@ impl Bridge {
                     self.save_state();
                 }
             }
-            CaptureMessage::Strip(cells) => {
+            CaptureMessage::Strip(cells, at) => {
                 if let Some(payload) = decode_cells(&cells).and_then(|frame| serde_json::from_str::<Value>(&frame.payload).ok()) {
-                    self.on_frame(&payload);
+                    self.on_frame(&payload, at);
                 }
             }
         }
@@ -1014,6 +1060,8 @@ impl Bridge {
     /// their disk space back.
     fn new_game_images(&mut self) {
         self.link.images_shown.clear();
+        // Images pasted in a game that quit: their small pictures' slots can go to others.
+        self.drafts.clear();
         let mut by_use: Vec<(i64, u32)> = self.link.images.iter().map(|(n, slot)| (slot.used, *n)).collect();
         by_use.sort_unstable_by(|a, b| b.cmp(a));
         for (_, n) in by_use.into_iter().skip(IMAGES_KEPT) {
@@ -1022,7 +1070,8 @@ impl Bridge {
         }
     }
 
-    pub fn on_frame(&mut self, frame: &Value) {
+    /// A frame from the game's strip, read at `at` (epoch ms).
+    pub fn on_frame(&mut self, frame: &Value, at: i64) {
         let (Some(k), Some(u)) = (frame["k"].as_str(), frame["u"].as_str()) else { return };
         // An addon that can show pictures says so in every frame.
         let images_ok = frame["im"] == 1;
@@ -1087,7 +1136,7 @@ impl Bridge {
             }
             let entry = self.queued.entry(k.to_string()).or_insert(0);
             *entry = (*entry).max(s);
-            self.commands.push_back((k.to_string(), u.to_string(), frame["lid"].as_str().map(str::to_string), command.clone()));
+            self.commands.push_back((k.to_string(), u.to_string(), frame["lid"].as_str().map(str::to_string), command.clone(), at));
         }
         self.save_state();
     }
@@ -1130,11 +1179,19 @@ impl Bridge {
             return Some(json!({ "s": command["s"], "ok": false, "x": reason }));
         }
         let env_arg = self.env_arg(&env);
+        // The images pasted for this message, if it is one.
+        let draft = if kind == "new" { "new".to_string() } else { format!("{}:{id}", str_of(&command["e"])) };
+        let with_images = matches!(kind.as_str(), "send" | "new") && self.drafts.get(&draft).is_some_and(|d| !d.is_empty());
         let mut started: Option<String> = None;
         let mut stop_state: Option<&str> = None;
+        let mut pasted = false;
         let result: Result<(), T3Error> = (|| {
             match kind.as_str() {
-                "hello" | "ui" => self.window_open = command["o"] == true,
+                "hello" | "ui" => {
+                    self.window_open = command["o"] == true;
+                    // Ctrl+V is looked for only while the window is open (see `keys`).
+                    crate::keys::arm(self.window_open);
+                }
                 "open" => {
                     self.view = (!id.is_empty()).then(|| View { env: env.clone(), id: id.clone(), depth: 1 });
                     self.view_changed();
@@ -1145,17 +1202,38 @@ impl Bridge {
                     }
                     self.view_changed();
                 }
-                "send" if !id.is_empty() && !message.is_empty() => {
-                    let args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
-                    self.client.call("t3_thread_send", with_args(args, &env_arg))?;
+                "send" if !id.is_empty() && (!message.is_empty() || with_images) => {
+                    if with_images {
+                        // T3's send with attachments has no mode or retry key: it starts an
+                        // idle thread, and steers or queues on a busy one, as a send does.
+                        let attachments = self.upload_draft(&draft)?;
+                        let mut args = json!({ "threadId": id, "attachments": attachments });
+                        if !message.is_empty() {
+                            args["message"] = json!(message);
+                        }
+                        if let Err(error) = self.client.call("t3_thread_send_attachments", with_args(args, &env_arg)) {
+                            self.discard_uploads(&attachments);
+                            return Err(error);
+                        }
+                        self.drafts.remove(&draft);
+                    } else {
+                        let args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
+                        self.client.call("t3_thread_send", with_args(args, &env_arg))?;
+                    }
                     self.note("Sent.");
                     let depth = self.view.as_ref().filter(|v| v.id == id).map(|v| v.depth).unwrap_or(1);
                     self.view = Some(View { env: env.clone(), id: id.clone(), depth });
                     self.view_changed();
                 }
-                "new" if !message.is_empty() => {
-                    let title: String = message.split('\n').next().unwrap_or("").chars().take(60).collect();
-                    let mut args = json!({ "title": title, "message": message, "clientRequestId": request_id });
+                "new" if !message.is_empty() || with_images => {
+                    let mut title: String = message.split('\n').next().unwrap_or("").chars().take(60).collect();
+                    if title.trim().is_empty() {
+                        title = "Pasted image".into();
+                    }
+                    let mut args = json!({ "title": title, "clientRequestId": request_id });
+                    if !message.is_empty() {
+                        args["message"] = json!(message);
+                    }
                     match command["p"].as_str() {
                         Some(project) => args["projectId"] = json!(project),
                         None => args["scratch"] = json!(true),
@@ -1165,7 +1243,18 @@ impl Bridge {
                     if command["p"].is_string() && command["w"] == true {
                         args["workspaceStrategy"] = json!({ "type": "worktree", "baseRef": "HEAD" });
                     }
-                    let launched = self.client.call("t3_thread_launch", with_args(args, &env_arg))?;
+                    let attachments = if with_images { self.upload_draft(&draft)? } else { Vec::new() };
+                    if !attachments.is_empty() {
+                        args["attachments"] = json!(attachments);
+                    }
+                    let launched = match self.client.call("t3_thread_launch", with_args(args, &env_arg)) {
+                        Ok(launched) => launched,
+                        Err(error) => {
+                            self.discard_uploads(&attachments);
+                            return Err(error);
+                        }
+                    };
+                    self.drafts.remove(&draft);
                     let new_id = launched["threadId"].as_str().or(launched["thread"]["threadId"].as_str()).map(str::to_string);
                     self.note(&format!("Started \"{title}\"."));
                     if let Some(new_id) = new_id {
@@ -1230,6 +1319,27 @@ impl Bridge {
                     self.pending_ask = None;
                     self.view_changed();
                 }
+                // An image pasted in the message box, read from the clipboard here: only right
+                // after a real Ctrl+V in WoW, which no addon can fake.
+                "paste" if !str_of(&command["d"]).is_empty() => {
+                    let draft = str_of(&command["d"]).to_string();
+                    self.check_paste_press()?;
+                    if self.drafts.get(&draft).map_or(0, Vec::len) >= MAX_PASTED {
+                        return Err(T3Error::Other(format!("a message takes {MAX_PASTED} images at most")));
+                    }
+                    let clipped = (self.clipboard)().map_err(T3Error::Other)?.ok_or_else(|| T3Error::Other(NO_IMAGE.into()))?;
+                    self.stage(draft, clipped);
+                    self.note("Image pasted.");
+                    pasted = true;
+                }
+                "unpaste" => {
+                    let n = command["i"].as_u64().unwrap_or(0);
+                    if let Some(images) = self.drafts.get_mut(str_of(&command["d"])) {
+                        images.retain(|image| image.n != n);
+                    }
+                    self.drafts.retain(|_, images| !images.is_empty());
+                    self.note("Image removed.");
+                }
                 "refresh" => self.view_changed(),
                 // Show more: the next poll lists more of that group, up to its cap.
                 "list" => {
@@ -1252,7 +1362,89 @@ impl Bridge {
             }
             Ok(()) => started
                 .map(|id| json!({ "s": command["s"], "ok": true, "env": env, "id": id }))
-                .or_else(|| stop_state.map(|st| json!({ "s": command["s"], "ok": true, "st": st }))),
+                .or_else(|| stop_state.map(|st| json!({ "s": command["s"], "ok": true, "st": st })))
+                .or_else(|| pasted.then(|| json!({ "s": command["s"], "ok": true }))),
+        }
+    }
+
+    // ---- pasted images ----
+
+    /// Lets a paste through only if a Ctrl+V in WoW came just before the frame that brought
+    /// it, and no other paste used that press.
+    fn check_paste_press(&mut self) -> Result<(), T3Error> {
+        let (count, at) = (self.presses)();
+        let seen = self.command_seen_at;
+        if count <= self.presses_used || at > seen || seen - at > PASTE_PRESS_MS {
+            self.log("paste from the game without a Ctrl+V in WoW just before it: refused");
+            return Err(T3Error::Other(UNPROVEN_PASTE.into()));
+        }
+        self.presses_used = count;
+        Ok(())
+    }
+
+    /// Keeps a pasted image for `draft`'s message, and its small picture in an image slot
+    /// for the game to show above the box.
+    fn stage(&mut self, draft: String, clipped: Clipped) {
+        self.pasted_count += 1;
+        let n = self.pasted_count;
+        let mut thumb = None;
+        if self.images_ok {
+            let key = format!("paste:{}:{n}", self.started_ms);
+            let small = clip::thumbnail(&clipped.bitmap);
+            match self.store_picture(&key, &small) {
+                Ok(()) => {
+                    let now = self.now_ms();
+                    if let Some((slot, image)) = self.link.images.iter_mut().find(|(_, image)| image.key == key) {
+                        image.used = now;
+                        thumb = Some((*slot, small.width, small.height));
+                    }
+                    if let Some((slot, _, _)) = thumb.filter(|(slot, _, _)| !self.link.images_shown.contains(slot)) {
+                        self.link.images_shown.push(slot);
+                    }
+                    self.save_state();
+                }
+                Err(error) => self.log(&format!("couldn't show the pasted image in the game: {error}")),
+            }
+        }
+        let (w, h) = (clipped.bitmap.width, clipped.bitmap.height);
+        self.log(&format!("Image pasted from the clipboard ({w}x{h}, {} KB)", clipped.png.len() / 1024));
+        self.drafts.entry(draft).or_default().push(Pasted { n, png: clipped.png, w, h, thumb });
+    }
+
+    /// Uploads `draft`'s images to T3, as attachments for a message.
+    fn upload_draft(&self, draft: &str) -> Result<Vec<Value>, T3Error> {
+        let mut attachments: Vec<Value> = Vec::new();
+        for (i, image) in self.drafts.get(draft).into_iter().flatten().enumerate() {
+            let name = format!("pasted-image-{}.png", i + 1);
+            let size = image.png.len();
+            let upload = json!({ "type": "image", "name": name, "mimeType": "image/png", "sizeBytes": size });
+            let sent = self.client.call("t3_attachment_prepare_upload", json!({ "upload": upload })).and_then(|prepared| {
+                let id = str_of(&prepared["attachmentId"]).to_string();
+                let url = str_of(&prepared["relativeUrl"]);
+                if id.is_empty() || url.is_empty() {
+                    return Err(T3Error::Other("T3 gave nowhere to upload it".into()));
+                }
+                if let Err(error) = self.client.upload(url, "image/png", &image.png) {
+                    self.discard_uploads(&[json!({ "id": id })]);
+                    return Err(error);
+                }
+                Ok(id)
+            });
+            match sent {
+                Ok(id) => attachments.push(json!({ "type": "image", "id": id, "name": name, "mimeType": "image/png", "sizeBytes": size })),
+                Err(error) => {
+                    self.discard_uploads(&attachments);
+                    return Err(T3Error::Other(format!("couldn't upload the image: {error}")));
+                }
+            }
+        }
+        Ok(attachments)
+    }
+
+    /// Gives back uploads a message didn't take (best effort: T3 drops them in time anyway).
+    fn discard_uploads(&self, attachments: &[Value]) {
+        for attachment in attachments {
+            let _ = self.client.call("t3_attachment_discard", json!({ "attachmentId": attachment["id"] }));
         }
     }
 
@@ -2585,6 +2777,27 @@ impl Bridge {
             out.insert("out".into(), json!(self.outcomes.iter().map(|(_, o)| o).collect::<Vec<_>>()));
         }
         out.insert("auth".into(), json!(self.auth_error));
+        // This companion pastes images (the game offers Ctrl+V for them), and the ones pasted
+        // so far, by the message they go with (left out when there are none).
+        out.insert("pi".into(), json!(true));
+        let pasted: Vec<Value> = self
+            .drafts
+            .iter()
+            .flat_map(|(draft, images)| {
+                images.iter().map(move |image| {
+                    let mut entry = json!({ "d": draft, "i": image.n, "w": image.w, "h": image.h });
+                    if let Some((slot, tw, th)) = image.thumb {
+                        entry["f"] = json!(slot);
+                        entry["tw"] = json!(tw);
+                        entry["th"] = json!(th);
+                    }
+                    entry
+                })
+            })
+            .collect();
+        if !pasted.is_empty() {
+            out.insert("att".into(), json!(pasted));
+        }
         // What the tray setting blocks, so the window can say so (left out when nothing is).
         if let Some(code) = self.trust.code() {
             out.insert("trust".into(), json!(code));
@@ -2619,6 +2832,7 @@ impl Bridge {
             "auth": data["auth"],
             "trust": data["trust"],
             "av": data["av"],
+            "att": data["att"],
             "open": self.window_open,
             // A question appearing (or going away) in the open thread is urgent too.
             "view": if data["view"].is_null() {
@@ -2720,8 +2934,9 @@ impl Bridge {
     /// Runs the game's queued commands. Each counts as done (acked) once it ran, and only
     /// for the UI session it came from: a newer session counts afresh.
     fn run_commands(&mut self) {
-        while let Some((client_key, session, login, command)) = self.commands.pop_front() {
+        while let Some((client_key, session, login, command, seen_at)) = self.commands.pop_front() {
             let s = command["s"].as_u64().unwrap_or(0);
+            self.command_seen_at = seen_at;
             let outcome = self.run(&client_key, login.as_deref(), command);
             if Some(session.as_str()) == self.link.ui_session.as_deref() && Some(client_key.as_str()) == self.link.client_key.as_deref() {
                 let entry = self.link.acked.entry(client_key).or_insert(0);

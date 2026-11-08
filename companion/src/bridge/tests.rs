@@ -32,6 +32,8 @@ struct FakeT3 {
     thread_modes: Mutex<HashMap<String, &'static str>>,
     /// Whether the threads' agents watch their pull requests.
     watching: Mutex<bool>,
+    /// Images uploaded: the address, its content type and how many bytes.
+    uploads: Mutex<Vec<(String, String, usize)>>,
 }
 
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
@@ -66,6 +68,7 @@ impl FakeT3 {
             thread_modes: Mutex::new(HashMap::new()),
             item_texts: Mutex::new(HashMap::new()),
             watching: Mutex::new(false),
+            uploads: Mutex::new(Vec::new()),
         })
     }
 
@@ -134,6 +137,11 @@ impl T3 for FakeT3 {
                     })
                     .collect();
                 json!({ "pullRequests": prs })
+            }
+            // As T3 answers: an id and an address that carries its own permission.
+            "t3_attachment_prepare_upload" => {
+                let n = self.calls_to("t3_attachment_prepare_upload").len() - 1;
+                json!({ "attachmentId": format!("pending-{n}"), "relativeUrl": format!("/api/attachments/upload/token{n}"), "expiresAt": 0 })
             }
             // As T3 answers: the interrupt is requested for a run under way; with none, it
             // says so (or names how the last run ended).
@@ -222,6 +230,14 @@ impl T3 for FakeT3 {
             },
             _ => json!({}),
         })
+    }
+
+    fn upload(&self, relative_url: &str, content_type: &str, bytes: &[u8]) -> Result<(), T3Error> {
+        if let Some(message) = self.failing.lock().unwrap().get("upload") {
+            return Err(T3Error::Other(message.clone()));
+        }
+        self.uploads.lock().unwrap().push((relative_url.to_string(), content_type.to_string(), bytes.len()));
+        Ok(())
     }
 }
 
@@ -323,7 +339,8 @@ impl Rig {
 
     fn frame(&mut self, value: Value) {
         let cells = crate::codec::encode_frame(1, &value.to_string());
-        self.bridge.on_capture(CaptureMessage::Strip(cells));
+        let at = *self.clock.lock().unwrap();
+        self.bridge.on_capture(CaptureMessage::Strip(cells, at));
     }
 
     /// The links the bridge would have opened, in order.
@@ -2009,4 +2026,230 @@ fn without_an_addon_that_draws_cards_links_still_read_as_words_and_no_activity_i
     let items = view_items(&rig);
     assert_eq!(items.len(), 2);
     assert_eq!(items[1]["x"], "Sol is reviewing in a delegated task. Back in “Fix tests” after.");
+}
+
+// ---- pasted images ----
+
+/// A rig whose game can show pictures, with an image on the clipboard (`w` x `h`, its PNG
+/// `png_bytes` long) and Ctrl+V presses set by the test.
+fn paste_rig(start_ms: i64, w: u32, h: u32, png_bytes: usize) -> (Rig, Arc<Mutex<(u64, i64)>>) {
+    let mut rig = Rig::new(start_ms);
+    let presses = Arc::new(Mutex::new((0u64, 0i64)));
+    let read = Arc::clone(&presses);
+    rig.bridge.presses = Box::new(move || *read.lock().unwrap());
+    rig.bridge.clipboard = Box::new(move || {
+        Ok(Some(Clipped { png: vec![7; png_bytes], bitmap: Bitmap { width: w, height: h, rgba: vec![200; (w * h * 4) as usize] } }))
+    });
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "im": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    (rig, presses)
+}
+
+/// You press Ctrl+V in WoW now.
+fn press(rig: &Rig, presses: &Mutex<(u64, i64)>) {
+    let mut p = presses.lock().unwrap();
+    *p = (p.0 + 1, *rig.clock.lock().unwrap());
+}
+
+/// The outcome the game hears for command `s`.
+fn outcome(rig: &Rig, s: u64) -> Value {
+    rig.bridge.snapshot()["out"].as_array().into_iter().flatten().find(|o| o["s"] == s).cloned().unwrap_or(Value::Null)
+}
+
+#[test]
+fn a_paste_right_after_ctrl_v_in_wow_shows_above_the_box_and_goes_with_the_message() {
+    let (mut rig, presses) = paste_rig(50_000_000, 1920, 1080, 5000);
+    rig.advance(2000);
+    press(&rig, &presses);
+    rig.advance(300);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "paste", "d": "mac:t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 2), json!({ "s": 2, "ok": true }));
+    // Its small picture is in an image slot, named to the game process.
+    let att = rig.bridge.snapshot()["att"].clone();
+    assert_eq!(att, json!([{ "d": "mac:t1", "i": 1, "w": 1920, "h": 1080, "f": 1, "tw": 142, "th": 80 }]));
+    assert!(rig.written.lock().unwrap().images.contains_key(&1));
+    assert!(rig.bridge.link.images_shown.contains(&1));
+    assert!(rig.slot(2).contains("att={{d=\"mac:t1\",i=1,"), "{}", rig.slot(2));
+
+    // The message carries it: uploaded, then sent with T3's send for attachments.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "send", "e": "mac", "id": "t1", "m": "what's this?" }] }));
+    rig.bridge.tick();
+    let prepared = rig.t3.calls_to("t3_attachment_prepare_upload");
+    assert_eq!(prepared, vec![json!({ "upload": { "type": "image", "name": "pasted-image-1.png", "mimeType": "image/png", "sizeBytes": 5000 } })]);
+    assert_eq!(rig.t3.uploads.lock().unwrap().clone(), vec![("/api/attachments/upload/token0".to_string(), "image/png".to_string(), 5000)]);
+    let sends = rig.t3.calls_to("t3_thread_send_attachments");
+    assert_eq!(sends, vec![json!({
+        "threadId": "t1",
+        "attachments": [{ "type": "image", "id": "pending-0", "name": "pasted-image-1.png", "mimeType": "image/png", "sizeBytes": 5000 }],
+        "message": "what's this?",
+        "environmentId": "mac",
+    })]);
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty());
+    assert!(rig.bridge.snapshot()["att"].is_null(), "sent: no longer above the box");
+
+    // The next message has none: an ordinary send.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "thanks" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+    assert_eq!(rig.t3.calls_to("t3_thread_send_attachments").len(), 1);
+}
+
+#[test]
+fn no_addon_can_paste_without_your_ctrl_v_and_each_press_pastes_once() {
+    let (mut rig, presses) = paste_rig(51_000_000, 4, 4, 100);
+    let paste = |rig: &mut Rig, s: u64| {
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": s, "t": "paste", "d": "mac:t1" }] }));
+        rig.bridge.tick();
+        outcome(rig, s)
+    };
+    // No Ctrl+V at all: another addon drew it.
+    let refused = paste(&mut rig, 2);
+    assert_eq!(refused["ok"], false);
+    assert_eq!(refused["x"], UNPROVEN_PASTE);
+    // A Ctrl+V long before: refused too.
+    press(&rig, &presses);
+    rig.advance(PASTE_PRESS_MS + 1000);
+    assert_eq!(paste(&mut rig, 3)["ok"], false);
+    // Right after one: taken, once.
+    press(&rig, &presses);
+    rig.advance(200);
+    assert_eq!(paste(&mut rig, 4)["ok"], true);
+    rig.advance(200);
+    assert_eq!(paste(&mut rig, 5)["x"], UNPROVEN_PASTE, "that press was used");
+    // A paste drawn before the press it would ride on (the frame was read first).
+    let count = presses.lock().unwrap().0;
+    *presses.lock().unwrap() = (count + 1, *rig.clock.lock().unwrap() + 1);
+    assert_eq!(paste(&mut rig, 6)["ok"], false);
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(1));
+    // Removing one needs no press: it only takes back what you pasted.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 7, "t": "unpaste", "d": "mac:t1", "i": 1 }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["att"].is_null());
+}
+
+#[test]
+fn a_paste_reads_the_frame_time_not_when_a_slow_t3_let_it_run() {
+    let (mut rig, presses) = paste_rig(52_000_000, 4, 4, 100);
+    press(&rig, &presses);
+    rig.advance(300);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "paste", "d": "new" }] }));
+    // The worker was busy with a slow request: the command runs much later.
+    rig.advance(PASTE_PRESS_MS * 3);
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 2)["ok"], true);
+}
+
+#[test]
+fn a_new_thread_starts_with_its_pasted_images_and_a_failed_send_keeps_them() {
+    let (mut rig, presses) = paste_rig(53_000_000, 4, 4, 100);
+    for s in 2..4 {
+        press(&rig, &presses);
+        rig.advance(100);
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": s, "t": "paste", "d": "new" }] }));
+        rig.bridge.tick();
+    }
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(2));
+    // The launch fails: what was uploaded is given back, and the images stay for another try.
+    rig.t3.failing.lock().unwrap().insert("t3_thread_launch".into(), "T3 is busy".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "new", "e": "mac", "m": "" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 4)["ok"], false);
+    let discarded: Vec<Value> = rig.t3.calls_to("t3_attachment_discard").iter().map(|a| a["attachmentId"].clone()).collect();
+    assert_eq!(discarded, vec![json!("pending-0"), json!("pending-1")]);
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(2));
+    // Again, and it starts: images only, so it gets a title of its own.
+    rig.t3.failing.lock().unwrap().clear();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 5, "t": "new", "e": "mac", "m": "" }] }));
+    rig.bridge.tick();
+    let launched = rig.t3.calls_to("t3_thread_launch").last().cloned().unwrap();
+    assert_eq!(launched["title"], "Pasted image");
+    assert!(launched["message"].is_null());
+    let ids: Vec<Value> = launched["attachments"].as_array().unwrap().iter().map(|a| a["id"].clone()).collect();
+    assert_eq!(ids, vec![json!("pending-2"), json!("pending-3")]);
+    assert_eq!(outcome(&rig, 5)["id"], "new1");
+    assert!(rig.bridge.snapshot()["att"].is_null());
+}
+
+#[test]
+fn a_failed_upload_sends_nothing_and_says_why() {
+    let (mut rig, presses) = paste_rig(54_000_000, 4, 4, 100);
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "paste", "d": ":t1" }] }));
+    rig.bridge.tick();
+    rig.t3.failing.lock().unwrap().insert("upload".into(), "T3 refused the image (413): too large".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "send", "id": "t1", "m": "look" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3)["x"], "couldn't upload the image: T3 refused the image (413): too large");
+    assert!(rig.t3.calls_to("t3_thread_send_attachments").is_empty());
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty(), "not sent without its image");
+    assert_eq!(rig.t3.calls_to("t3_attachment_discard").len(), 1);
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn pastes_stop_at_eight_need_an_image_and_follow_the_tray_setting() {
+    let (mut rig, presses) = paste_rig(55_000_000, 4, 4, 100);
+    for s in 2..=10 {
+        press(&rig, &presses);
+        rig.advance(100);
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": s, "t": "paste", "d": "new" }] }));
+        rig.bridge.tick();
+    }
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(MAX_PASTED));
+    assert_eq!(outcome(&rig, 10)["x"], "a message takes 8 images at most");
+
+    rig.bridge.clipboard = Box::new(|| Ok(None));
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 11, "t": "paste", "d": "mac:t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 11)["x"], NO_IMAGE);
+
+    // Read-only: no paste (it would only be sent), but taking one back still works.
+    rig.bridge.set_trust(Trust::ReadOnly);
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 12, "t": "paste", "d": "mac:t1" }, { "s": 13, "t": "unpaste", "d": "new", "i": 1 }] }));
+    rig.bridge.tick();
+    assert!(str_of(&outcome(&rig, 12)["x"]).starts_with("blocked by the T3 WoW tray setting"));
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(MAX_PASTED - 1));
+}
+
+#[test]
+fn pasted_images_go_with_the_sign_in_and_the_game_process_they_came_from() {
+    let (mut rig, presses) = paste_rig(56_000_000, 4, 4, 100);
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "paste", "d": "new" }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["att"].is_array());
+    // A /reload keeps them: the game shows them again from the next update.
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "im": 1, "q": [{ "s": 3, "t": "hello", "o": false }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["att"].is_array());
+    // WoW restarted: gone.
+    rig.bridge.on_capture(CaptureMessage::Wow(Some("456@2".into())));
+    assert!(rig.bridge.snapshot()["att"].is_null());
+    // And so with another sign-in.
+    press(&rig, &presses);
+    rig.frame(json!({ "k": "c1", "u": "ui3", "n": 0, "l": 1, "im": 1, "q": [{ "s": 4, "t": "paste", "d": "new" }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["att"].is_array());
+    rig.bridge.set_login("another-t3");
+    assert!(rig.bridge.snapshot()["att"].is_null());
+}
+
+#[test]
+fn without_pictures_in_the_game_a_paste_still_works_with_no_small_picture() {
+    let mut rig = Rig::new(57_000_000);
+    rig.bridge.presses = Box::new(|| (1, 57_000_050));
+    rig.bridge.clipboard = Box::new(|| Ok(Some(Clipped { png: vec![1; 10], bitmap: Bitmap { width: 2, height: 2, rgba: vec![0; 16] } })));
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "paste", "d": "new" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["att"], json!([{ "d": "new", "i": 1, "w": 2, "h": 2 }]));
+    assert!(rig.written.lock().unwrap().images.is_empty());
+    assert_eq!(rig.bridge.snapshot()["pi"], true);
 }
