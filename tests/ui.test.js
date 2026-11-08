@@ -945,3 +945,23 @@ function PlaySound(kit) played[#played + 1] = "kit" .. kit end` });
     "notification-completion.mp3@SFX", "kit3081",
   ].join(" "));
 });
+
+test("the pill's Reload UI soon is a click that reloads, and only while it says so", () => {
+  const out = run(`
+local function pillHit()
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and f.parent == T3WoWFrame and f.scripts.OnDragStart then return f end
+  end
+end
+inboxWith(ENVS)
+assert(showing("^|cff40c040Connected|r$"), "not connected")
+assert(not pillHit().shown, "clickable while connected")
+Link.state.nextSlot = 192
+UI.Refresh()
+assert(showing("191/200 updates used: Reload UI soon"), "no Reload UI soon")
+assert(pillHit().shown, "Reload UI soon isn't clickable")
+pillHit().scripts.OnClick(pillHit(), "LeftButton")
+return tostring(reloads)
+`, { before: `reloads = 0; function ReloadUI() reloads = reloads + 1 end` });
+  assert.equal(out, "1");
+});

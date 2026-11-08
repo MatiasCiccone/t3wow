@@ -202,6 +202,26 @@ connection:SetFontObject(Skin.fonts.muted)
 connection:SetPoint("LEFT", connectionPill.proxy, "LEFT", 20, 0)
 connection:SetJustifyH("LEFT")
 connection:SetWordWrap(false)
+-- While the pill says to Reload UI, a click on it does (shown only then: renderStatus). It
+-- sits on the pill's table: the main chunk is near its 200 locals. Dragging it still moves
+-- the window.
+connectionPill.hit = CreateFrame("Button", nil, frame)
+do
+    local hit = connectionPill.hit
+    hit:SetAllPoints(connectionPill.proxy)
+    hit:RegisterForClicks("LeftButtonUp")
+    hit:RegisterForDrag("LeftButton")
+    hit:SetScript("OnClick", function() ReloadUI() end)
+    hit:SetScript("OnDragStart", function() frame:StartMoving() end)
+    hit:SetScript("OnDragStop", function() frame:GetScript("OnDragStop")(frame) end)
+    hit:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Click to Reload UI")
+        GameTooltip:Show()
+    end)
+    hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    hit:Hide()
+end
 
 local function makeScroll(parent, width)
     local scroll = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
@@ -1781,6 +1801,7 @@ local function renderStatus()
     local dot = connected:match("^|cff(%x%x%x%x%x%x)")
     connectionDot:SetColors(dot and { hexColor(dot) } or "dim")
     reload:SetShown(ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil)
+    connectionPill.hit:SetShown(connected:find("Reload UI", 1, true) ~= nil)
     local line = notice
     if not line and inbox and inbox.notes and #inbox.notes > 0 then
         local last = inbox.notes[#inbox.notes]
