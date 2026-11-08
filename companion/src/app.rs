@@ -632,6 +632,7 @@ pub fn run(app: Arc<App>) {
             (true, true, _) if s.write_problem.is_some() => s.write_problem.as_deref().unwrap_or("").chars().take(70).collect::<String>(),
             (true, true, _) if used >= SLOT_COUNT => "in game, all 200 updates used: Reload UI in the game".to_string(),
             (true, true, true) => format!("in game, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) if s.signals_lost => "in game, signal files missing: Reinstall addon, then restart WoW".to_string(),
             (true, true, false) if s.signals_out => format!("in game, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
             (true, true, false) => format!("in game, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
         };

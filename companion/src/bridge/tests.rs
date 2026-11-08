@@ -249,6 +249,8 @@ struct Written {
     cleared: u32,
     /// While set, every write fails with this error.
     failing: Option<String>,
+    /// While set, raising a signal fails with this kind of error (slots still write).
+    failing_signals: Option<std::io::ErrorKind>,
     /// The addon version "on disk".
     addon_version: Option<String>,
     /// What each image slot holds, and the slots blanked.
@@ -271,6 +273,9 @@ impl SlotWriter for FakeSlots {
         let mut written = self.0.lock().unwrap();
         if let Some(error) = &written.failing {
             return Err(std::io::Error::other(error.clone()));
+        }
+        if let Some(kind) = written.failing_signals {
+            return Err(std::io::Error::new(kind, "The system cannot find the path specified. (os error 3)"));
         }
         written.raised.push(n);
         Ok(())
@@ -873,6 +878,53 @@ fn the_game_watching_past_the_last_signal_file_gets_its_updates_by_timer() {
     rig.bridge.tick();
     assert!(rig.raised().iter().all(|n| *n <= SIGNAL_COUNT), "{:?}", rig.raised());
     assert!(rig.slot(2).contains("sigoff=\"") && rig.slot(2).contains("s=\"completed\""), "{}", rig.slot(2));
+}
+
+#[test]
+fn when_the_signal_files_are_gone_the_game_is_told_to_use_the_timer() {
+    let mut rig = Rig::new(15_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    let raised = rig.raised().len();
+    assert!(raised > 0, "signals work at first");
+
+    // Something replaced the addon folder: sig\ is gone, the slots are still there.
+    rig.written.lock().unwrap().failing_signals = Some(std::io::ErrorKind::NotFound);
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    // The update still goes out, and it tells the game to load slots on a timer.
+    let inbox = rig.slot(2);
+    assert!(inbox.contains("sigoff=\"the addon folder lost its signal files"), "{inbox}");
+    assert!(inbox.contains("s=\"completed\"}"), "{inbox}");
+    let status = rig.bridge.status();
+    assert!(status.signals_out && status.signals_lost && !status.signals);
+    assert!(status.write_problem.is_none(), "the update files were written");
+    assert_eq!(rig.raised().len(), raised);
+
+    // A new WoW process (after Reinstall addon) watches signals again.
+    rig.written.lock().unwrap().failing_signals = None;
+    rig.bridge.on_capture(CaptureMessage::Wow(Some("456@1".into())));
+    assert!(!rig.bridge.status().signals_lost);
+}
+
+#[test]
+fn a_signal_that_keeps_failing_to_write_turns_signals_off_after_a_few_tries() {
+    let mut rig = Rig::new(15_700_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    rig.written.lock().unwrap().failing_signals = Some(std::io::ErrorKind::PermissionDenied);
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert!(!rig.bridge.status().signals_out, "one failure is retried");
+    for _ in 0..2 {
+        rig.advance(2_000);
+        rig.bridge.tick();
+    }
+    let status = rig.bridge.status();
+    assert!(status.signals_out && !status.signals_lost);
+    assert!(rig.slot(2).contains("sigoff=\"couldn't write the signal files"), "{}", rig.slot(2));
 }
 
 #[test]

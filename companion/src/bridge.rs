@@ -34,6 +34,10 @@ const UNLISTED_VIEW_TTL_MS: i64 = 20_000;
 
 /// Why the game was told to stop watching signals.
 const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart WoW for updates within a second";
+/// Why, when the signal files are gone from the addon folder (something replaced or
+/// cleaned it): the game can't be told an update is ready until they're back.
+const SIGNALS_LOST: &str =
+    "the addon folder lost its signal files (something replaced or cleaned it): choose Reinstall addon in the T3 WoW tray menu, then restart WoW";
 
 /// Failed reads in a row before an active thread off the lists stops being watched.
 const UNLISTED_MISSES: u32 = 5;
@@ -303,6 +307,8 @@ pub struct BridgeStatus {
     pub slot: u32,
     /// This game process used up its signal files: updates come on a timer until WoW restarts.
     pub signals_out: bool,
+    /// The signal files are gone from the addon folder: Reinstall addon, then restart WoW.
+    pub signals_lost: bool,
     /// Writing the game's update files keeps failing.
     pub write_problem: Option<String>,
 }
@@ -388,8 +394,11 @@ pub struct Bridge {
     /// Threads T3 is stopping at the game's word ("env:id"), with when it was asked: the
     /// next list that shows one no longer working says "Stopped.".
     stopping: HashMap<String, i64>,
-    /// Why signals stopped (this game process used every signal file), until WoW restarts.
+    /// Why signals stopped (this game process used every signal file, or they can't be
+    /// written), until WoW restarts.
     signals_out: Option<String>,
+    /// Publishes in a row whose update files were written but whose signals weren't.
+    signal_failures: u32,
     /// The UI session whose running out of slots was logged.
     slots_out_logged: Option<String>,
     /// The last failure writing update files, and how many publishes in a row failed.
@@ -873,6 +882,7 @@ impl Bridge {
             outcomes: Vec::new(),
             stopping: HashMap::new(),
             signals_out: None,
+            signal_failures: 0,
             slots_out_logged: None,
             write_error: None,
             write_failures: 0,
@@ -1031,6 +1041,7 @@ impl Bridge {
             machines: self.envs.iter().filter(|e| e.ok).count(),
             slot: self.link.slot,
             signals_out: self.signals_out.is_some(),
+            signals_lost: self.signals_out.as_deref() == Some(SIGNALS_LOST),
             write_problem: self.write_error.clone().filter(|_| self.write_failures >= WRITE_FAILURES_SHOWN),
         }
     }
@@ -1047,6 +1058,7 @@ impl Bridge {
                     self.slots.clear_signals();
                     self.slots.flip_probe(false);
                     self.signals_out = None;
+                    self.signal_failures = 0;
                     self.link.signal = 1;
                     self.link.signal_time = self.now_seconds();
                     self.link.wow_key = Some(key);
@@ -2917,8 +2929,30 @@ impl Bridge {
             inbox["nt"] = json!(wait.1);
             written = written.and_then(|_| self.slots.write_slot(slot, &format!("T3WoW_Inbox = {}\n", to_lua(&inbox))));
         }
+        let slots_written = written.is_ok();
         for n in raise {
             written = written.and_then(|_| self.slots.raise_signal(n));
+        }
+        if let (true, Err(error)) = (slots_written, &written) {
+            // The update is there but nothing can tell the game so: it waits on a signal
+            // that never comes. Gone files (a missing folder) don't come back by retrying;
+            // anything else gets a few tries first. Then the slots say to use the timer.
+            self.signal_failures += 1;
+            let lost = error.kind() == std::io::ErrorKind::NotFound;
+            if lost || self.signal_failures >= WRITE_FAILURES_SHOWN {
+                let reason = if lost {
+                    SIGNALS_LOST.to_string()
+                } else {
+                    format!("couldn't write the signal files ({error}); updates come on a timer until WoW restarts")
+                };
+                self.log(&format!("Couldn't raise the game's signal, so it gets updates on a timer: {reason}"));
+                self.signals_out = Some(reason);
+                self.signal_failures = 0;
+                // Again, without signals this time: the slots now carry sigoff.
+                return self.publish();
+            }
+        } else if written.is_ok() {
+            self.signal_failures = 0;
         }
         self.last_publish_at = t;
         if let Err(error) = written {
