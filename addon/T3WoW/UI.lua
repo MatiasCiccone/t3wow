@@ -167,8 +167,11 @@ local SIZE = {
     card = 14, -- the padding inside the question's card
     settings = 300, -- the settings panel's width
     -- Where a labelled control (a dropdown, the slider) starts in Settings: past the widest
-    -- label, "Stay on screen", which T3's Inter draws about 104 wide.
+    -- label, "Stay on screen", which T3's Inter draws widest.
     field = 132,
+    -- Where the New Thread form's dropdowns start: past its widest label, "Workspace", which
+    -- T3's Inter draws about 66 wide.
+    newField = 80,
 }
 -- The window is drawn in the theme (Theme.lua): a panel with a title bar and a footer, the
 -- thread list down the left.
@@ -1290,7 +1293,7 @@ local envMenu = dropdown(newPanel, "T3WoWMachineMenu", 240, {
         UI.Refresh()
     end,
 })
-envMenu:SetPoint("LEFT", envLabel, "LEFT", 70, 0)
+envMenu:SetPoint("LEFT", envLabel, "LEFT", SIZE.newField, 0)
 local projectLabel = newPanel:CreateFontString(nil, "OVERLAY")
 projectLabel:SetFontObject(Skin.fonts.strong)
 projectLabel:SetPoint("TOPLEFT", envLabel, "BOTTOMLEFT", 0, -22)
@@ -1316,7 +1319,7 @@ local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
         UI.Refresh()
     end,
 })
-projectMenu:SetPoint("LEFT", projectLabel, "LEFT", 70, 0)
+projectMenu:SetPoint("LEFT", projectLabel, "LEFT", SIZE.newField, 0)
 -- Where a project's thread runs, as T3 asks: a new worktree (from the checkout's current
 -- branch) or the project's checkout itself. A scratch thread has neither, so it's hidden.
 local workspaceLabel = newPanel:CreateFontString(nil, "OVERLAY")
@@ -1337,7 +1340,7 @@ local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 240, {
         UI.Refresh()
     end,
 })
-workspaceMenu:SetPoint("LEFT", workspaceLabel, "LEFT", 70, 0)
+workspaceMenu:SetPoint("LEFT", workspaceLabel, "LEFT", SIZE.newField, 0)
 
 -- The New Thread composer's project, if it is still listed.
 local function selectedProject()
