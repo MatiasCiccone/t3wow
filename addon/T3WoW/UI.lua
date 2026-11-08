@@ -1034,6 +1034,7 @@ end
 -- with code or a table), it is drawn from those, piece by piece.
 local function placeMessage(fs, text, mine, segments)
     local full = messageWidth() - 8
+    fs:SetFontObject(Skin.fonts.text)
     fs.bubble:SetShown(mine)
     if type(segments) == "table" and #segments > 0 then
         local first, last, width = Mono.Place(segments, mine)
@@ -1059,6 +1060,52 @@ local function placeMessage(fs, text, mine, segments)
         place(fs, 4, 18)
     end
     anchorMessage(fs, fs, 0, fs, 0, width)
+end
+
+-- A task the agent delegated, on a card as T3 draws it: its title, with its status (and
+-- the time it ended) on the right, and the start of its result below, in the muted font.
+-- d = { t = title, s = status, at = when it ended, b = result }, from the companion.
+local function placeCard(fs, d)
+    local pad = SIZE.card
+    local inner = messageWidth() - 8 - 2 * pad
+    if not rawget(fs, "card") then
+        fs.card = Skin.Box(messageChild, { shape = "panel", fill = "card", ring = "border", free = true, sub = -8 })
+        fs.head = messageChild:CreateFontString(nil, "OVERLAY")
+        fs.head:SetFontObject(Skin.fonts.strong)
+        fs.head:SetJustifyH("LEFT")
+        fs.head:SetWordWrap(true)
+        fs.state = messageChild:CreateFontString(nil, "OVERLAY")
+        fs.state:SetFontObject(Skin.fonts.small)
+        fs.state:SetJustifyH("RIGHT")
+        fs.state:SetWordWrap(false)
+    end
+    fs.bubble:Hide()
+    local s = STATUS[d.s] or { tostring(d.s or "?"), "a0a0a0" }
+    local ended = d.s ~= "running" and type(d.at) == "number" and d.at > 0 and type(date) == "function"
+    fs.state:SetText(format("|cff%s%s|r%s", s[2], s[1], ended and ("  " .. date("%H:%M", d.at)) or ""))
+    fs.head:SetWidth(math.max(40, inner - math.ceil(fs.state:GetStringWidth() or 0) - 12))
+    fs.head:SetText(type(d.t) == "string" and d.t or "Delegated task")
+    local body = type(d.b) == "string" and d.b ~= "" and d.b or nil
+    flow.gap = flow.gap + pad
+    place(fs.head, 4 + pad, body and 6 or (pad + 18))
+    fs.state:ClearAllPoints()
+    fs.state:SetPoint("TOPRIGHT", fs.head, "TOPLEFT", inner, 0)
+    fs.state:Show()
+    local last = fs.head
+    if body then
+        fs:SetFontObject(Skin.fonts.muted)
+        fs:SetWidth(inner)
+        fs:SetText(body)
+        place(fs, 4 + pad, pad + 18)
+        last = fs
+    else
+        fs:Hide()
+    end
+    fs.card:ClearAllPoints()
+    fs.card:SetPoint("TOPLEFT", fs.head, "TOPLEFT", -pad, pad)
+    fs.card:SetPoint("BOTTOMRIGHT", last, "BOTTOMLEFT", inner + pad, -pad)
+    fs.card:Show()
+    anchorMessage(fs, fs.head, 0, last, 0, inner)
 end
 
 -- ---------------------------------------------------------------- pictures
@@ -1491,6 +1538,11 @@ function renderView()
         fs:Hide()
         fs.hit:Hide()
         fs.bubble:Hide()
+        if rawget(fs, "card") then
+            fs.card:Hide()
+            fs.head:Hide()
+            fs.state:Hide()
+        end
     end
     Mono.Release()
     Pictures.Release()
@@ -1544,8 +1596,13 @@ function renderView()
     local count = #items
     for i, item in ipairs(items) do
         local fs = messageString(i)
-        local picture = item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
-        if not picture then placeMessage(fs, item.x, item.r == "u", item.g) end
+        local card = type(item.d) == "table"
+        local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
+        if card then
+            placeCard(fs, item.d)
+        elseif not picture then
+            placeMessage(fs, item.x, item.r == "u", item.g)
+        end
         -- Copying takes the message's text, not its segments: the code with its markdown.
         fs.hit.copyText = item.x
         -- A picture enlarges instead.

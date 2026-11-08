@@ -88,6 +88,7 @@ struct Patterns {
     delimiter: Regex,
     br: Regex,
     span: Regex,
+    thread: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -105,6 +106,9 @@ fn patterns() -> &'static Patterns {
         delimiter: Regex::new(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$").unwrap(),
         br: Regex::new(r"(?i)<br\s*/?>").unwrap(),
         span: Regex::new(r"\x03(\d+)\x03").unwrap(),
+        // A T3 thread link: <t3-thread://v2/{env}/{thread}> as T3's tools write it, or bare
+        // (its last character not punctuation that ends a sentence).
+        thread: Regex::new(r#"<t3-thread://v2/([^/\s<>]+)/([^\s<>]+)>|t3-thread://v2/([^/\s<>]+)/([^\s<>()\[\]]*[^\s<>()\[\].,;:!?'"])"#).unwrap(),
     })
 }
 
@@ -131,6 +135,13 @@ fn inline(line: &str, code: &str) -> String {
     });
     let l = p.image.replace_all(&l, "[$1]");
     let l = p.link.replace_all(&l, "$1");
+    let l = p.thread.replace_all(&l, |c: &regex::Captures| {
+        let (env, thread) = match (c.get(1), c.get(2)) {
+            (Some(env), Some(thread)) => (env.as_str(), thread.as_str()),
+            _ => (&c[3], &c[4]),
+        };
+        format!("{LINK_MARK}{env}/{thread}{LINK_MARK}")
+    });
     let l = p.bold.replace_all(&l, "$1");
     let l = p.under.replace_all(&l, "$1");
     let l = p.span.replace_all(&l, |c: &regex::Captures| match c[1].parse::<usize>().ok().and_then(|n| spans.get(n)) {
@@ -163,7 +174,7 @@ fn color_runs(text: &str, color: &str) -> String {
 /// literal pipes are doubled before any color codes are added.
 pub fn wow_text(markdown: &str, max_length: usize) -> String {
     let p = patterns();
-    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n");
+    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace(LINK_MARK, "");
     if text.chars().count() > max_length {
         text = text.chars().take(max_length).collect::<String>() + "\n…";
     }
@@ -188,6 +199,29 @@ pub fn wow_text(markdown: &str, max_length: usize) -> String {
 /// monospace font. T3's text can't hold them: they are taken out of it first.
 pub const CODE_OPEN: char = '\u{1}';
 pub const CODE_CLOSE: char = '\u{2}';
+
+/// Marks around a T3 thread link's "{env}/{thread}" in prose and table cells: the bridge
+/// puts the thread's name in its place (`name_thread_links`), since a raw link means
+/// nothing in the game. T3's text can't hold them: they are taken out of it first.
+pub const LINK_MARK: char = '\u{4}';
+
+/// Text with each marked thread link (see LINK_MARK) put as `name` says for its
+/// environment and thread.
+pub fn name_thread_links(text: &str, name: impl Fn(&str, &str) -> String) -> String {
+    if !text.contains(LINK_MARK) {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for (n, part) in text.split(LINK_MARK).enumerate() {
+        if n % 2 == 0 {
+            out.push_str(part);
+        } else {
+            let (env, thread) = part.split_once('/').unwrap_or(("", part));
+            out.push_str(&name(env, thread));
+        }
+    }
+    out
+}
 
 /// A table row's cells: pipes split them unless escaped (`\|`); the outer ones are optional.
 fn table_cells(line: &str) -> Vec<String> {
@@ -259,7 +293,7 @@ fn table_at(lines: &[&str], at: usize) -> Option<(Value, usize)> {
 /// code and no table: its `wow_text` draws it the same.
 pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
     let p = patterns();
-    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE], "");
+    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE, LINK_MARK], "");
     if text.chars().count() > max_length {
         text = text.chars().take(max_length).collect::<String>() + "\n…";
     }
@@ -341,6 +375,22 @@ mod tests {
             let input = case["input"].as_str().unwrap();
             assert_eq!(json!(wow_segments(input, 6000)), case["segments"], "{input}");
         }
+    }
+
+    #[test]
+    fn thread_links_are_marked_for_their_name_and_code_keeps_them() {
+        let link = "t3-thread://v2/e1/thread:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1";
+        let marked = format!("{LINK_MARK}e1/thread:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1{LINK_MARK}");
+        assert_eq!(wow_text(&format!("Sol is reviewing in <{link}>. Then"), 6000), format!("Sol is reviewing in {marked}. Then"));
+        assert_eq!(wow_text(&format!("see {link}."), 6000), format!("see {marked}."));
+        assert_eq!(wow_text(&format!("[the review]({link})"), 6000), "the review");
+        assert_eq!(wow_text(&format!("[{link}]({link})"), 6000), marked);
+        assert_eq!(wow_text(&format!("`<{link}>`"), 6000), format!("{CODE}<{link}>|r"));
+        assert_eq!(wow_text("a \u{4}x/y\u{4} b", 6000), "a x/y b");
+        let segments = wow_segments(&format!("in <{link}> and `code`"), 6000);
+        assert_eq!(segments, vec![json!(format!("in {marked} and {CODE_OPEN}code{CODE_CLOSE}"))]);
+        let named = name_thread_links(&format!("in {marked}, then"), |env, thread| format!("[{env}|{thread}]"));
+        assert_eq!(named, "in [e1|thread:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1], then");
     }
 
     #[test]

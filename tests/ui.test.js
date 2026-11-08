@@ -704,6 +704,41 @@ return "ok"
 `);
 });
 
+test("a delegated task draws as a card among the messages: title, status and the start of its result", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local card = { r = "a", x = "Sol review (round 1) (finished)\\nVERDICT: APPROVE", d = { t = "Sol review (round 1)", s = "completed", at = time(), b = "VERDICT: APPROVE" } }
+local items = { { r = "u", x = "review it" }, card, { r = "a", x = "Back after." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local head, state, body = shownString("^Sol review %(round 1%)$"), shownString("^|cff40c040Finished|r  "), shownString("^VERDICT: APPROVE$")
+assert(head and state and body, "the card's title, status or result doesn't show")
+assert(not shownString("%(finished%)"), "the text for older addons shows too")
+assert(head.fontObject == ns.Skin.fonts.strong, "the title isn't in the strong font")
+assert(body.fontObject == ns.Skin.fonts.muted, "the result isn't muted")
+assert(state.text:find(tostring(time()), 1, true), "no time it ended: " .. state.text)
+assert(below(head, shownString("review it")), "not below the message before it")
+assert(below(body, head), "the result isn't under the title")
+assert(below(shownString("Back after"), body), "the next message isn't below the card")
+-- Clicking it copies the text.
+local hit
+for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "copyText") == card.x then hit = f end end
+assert(hit, "the card can't be clicked to copy")
+-- Still running: no result yet, and the next message hangs from the title.
+card.d = { t = "Sol review (round 1)", s = "running", b = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+head = shownString("^Sol review %(round 1%)$")
+assert(shownString("^|cffffd100Working|r$"), "a running task doesn't say Working")
+assert(below(shownString("Back after"), head), "the next message isn't below the card")
+-- Gone: the strings it used are plain messages again.
+items = { { r = "u", x = "review it" }, { r = "a", x = "Plain again" }, { r = "a", x = "Back after." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(not shownString("Sol review") and not shownString("cffffd100Working"), "the card stayed")
+assert(shownString("Plain again").fontObject == ns.Skin.fonts.text, "a message after a card is muted")
+return "ok"
+`);
+});
+
 test("the strip tells the companion the game can show pictures only when the image slots were there at startup", () => {
   const frameWith = (before) =>
     runGame(
@@ -717,6 +752,7 @@ return tostring(Link.Images()) .. " " .. drawn[#drawn]`,
     );
   const on = frameWith("");
   assert.ok(on.startsWith("true ") && on.includes('"im":1'), on);
+  assert.ok(on.includes('"dc":1'), "the companion isn't told the game draws delegated tasks as cards");
   const off = frameWith(`missingTextures[ROOT .. "img\\\\here.tga"] = true`);
   assert.ok(off.startsWith("false ") && !off.includes('"im"'), off);
 });
