@@ -77,7 +77,12 @@ local function frame(kind, name)
   function f:GetScript(event) return self.scripts[event] end
   function f:CreateFontString() return fontString() end
   function f:CreateTexture() return frame("Texture") end
-  function f:Show() self.shown = true end
+  function f:GetName() return self.name end
+  function f:Show()
+    local was = self.shown
+    self.shown = true
+    if not was and self.scripts.OnShow then self.scripts.OnShow(self) end
+  end
   function f:Hide()
     local was = self.shown
     self.shown = false
@@ -116,6 +121,18 @@ function CreateFrame(kind, name, parent)
 end
 UIParent, WorldFrame, Minimap = frame(), frame(), frame()
 UISpecialFrames = {}
+-- What Escape does to addon windows in the game (UIParentPanelManager.lua).
+function CloseSpecialWindows()
+  local found
+  for _, name in pairs(UISpecialFrames) do
+    local f = _G[name]
+    if f and f:IsShown() then
+      f:Hide()
+      found = 1
+    end
+  end
+  return found
+end
 tinsert = table.insert
 unpack = unpack or table.unpack
 GameTooltip = frame()

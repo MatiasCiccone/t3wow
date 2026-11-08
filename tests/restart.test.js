@@ -17,6 +17,7 @@ function restartLines()
   for _, line in ipairs(printed) do if line:find("restart WoW", 1, true) then n = n + 1 end end
   return n
 end
+Link.Init()
 UI.Toggle()
 ${script}`,
     {
