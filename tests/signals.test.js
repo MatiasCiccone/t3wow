@@ -76,3 +76,49 @@ assert(watched ~= nil and watched >= 7 and watched < 12, "watching " .. tostring
 return "ok"
 `);
 });
+
+test("with its signal files gone, a check-in after a quiet spell brings the update and moves to the timer", () => {
+  runGame(`
+real[PROBE_VALID] = true
+Link.Init()
+inboxes.T3WoW_S001 = { k = "c1", u = Link.Session(), ack = 1, ns = 100, nt = time() }
+tick(6)
+assert(Link.Status().signals == "on", "signals " .. tostring(Link.Status().signals))
+assert(#loads == 1, "polled loads " .. #loads)
+
+-- The addon folder was replaced: the companion can't raise a signal, so it writes the
+-- update with sigoff and no signal file ever becomes real.
+inboxes.T3WoW_S002 = { k = "c1", u = Link.Session(), ack = 1, ns = 100, nt = time() - 6,
+  sigoff = "the addon folder lost its signal files",
+  events = { { n = time() * 1000, e = "", id = "t1", t = "Done", s = "completed" } } }
+tick(590)
+assert(#loads == 1, "loaded before the quiet spell was up: " .. #loads)
+tick(15)
+assert(loads[2] == "T3WoW_S002", tostring(loads[2]))
+assert(#alerts == 1, "alerts " .. #alerts)
+assert(Link.Status().recentAlerts[1].via == "a check-in after a quiet spell", Link.Status().recentAlerts[1].via)
+assert(Link.Status().signals == "off", "signals " .. tostring(Link.Status().signals))
+
+-- From now on slots load on the timer.
+local count = #loads
+tick(130)
+assert(#loads > count, "no timer loads after signals went off")
+return "ok"
+`);
+});
+
+test("check-ins come further apart while no signal arrives", () => {
+  runGame(`
+real[PROBE_VALID] = true
+Link.Init()
+inboxes.T3WoW_S001 = { k = "c1", u = Link.Session(), ack = 1, ns = 100, nt = time() }
+tick(6)
+local function loadsWithin(seconds) local before = #loads; tick(seconds); return #loads - before end
+assert(loadsWithin(605) == 1, "first check-in after 10 minutes")
+assert(loadsWithin(1180) == 0, "the second waits 20 minutes")
+assert(loadsWithin(20) == 1, "second check-in")
+assert(loadsWithin(1780) == 0, "the third waits 30 minutes")
+assert(loadsWithin(20) == 1, "third check-in")
+return "ok"
+`);
+});
