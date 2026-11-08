@@ -1330,6 +1330,9 @@ cursorX, cursorY = 1092, 290
 tick(0.25)
 assert(window.width == 1000 and window.height == 620, "dragged to " .. window.width .. "x" .. window.height)
 assert(laidOutAt == nil, "the conversation was laid out mid-drag, at " .. tostring(laidOutAt))
+-- The companion's updates keep coming while you drag: they don't bring the conversation back.
+UI.Refresh()
+assert(not messageScroll.shown, "a refresh showed the conversation mid-drag")
 cursorX, cursorY = 0, 2000
 tick(0.25)
 assert(window.width == 720 and window.height == 420, "under the smallest size: " .. window.width .. "x" .. window.height)
