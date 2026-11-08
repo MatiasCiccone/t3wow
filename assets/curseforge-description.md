@@ -10,7 +10,7 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 ![The T3 WoW window with the thread list and a conversation](https://media.forgecdn.net/attachments/2159/857/window-png.png)
 
-**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up.
+**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
 
 **Start threads.** **New Thread** asks for the machine and project, then starts a thread with your message as its task and opens it.
 

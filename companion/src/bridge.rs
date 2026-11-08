@@ -5,7 +5,8 @@
 use crate::codec::decode_cells;
 use crate::config::Trust;
 use crate::lua::{plain, to_lua, wow_segments, wow_text};
-use crate::slots::{SlotWriter, SIGNAL_COUNT, SLOT_COUNT};
+use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
+use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::t3::{T3Error, T3};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -58,6 +59,47 @@ fn is_subagent(thread: &Value) -> bool {
 
 fn on_sidebar(thread: &Value) -> bool {
     !is_subagent(thread) && thread["createdBy"] != "agent"
+}
+
+/// Whether an activity item (its text cut short) is a page an agent showed with html_render.
+fn is_page_item(text: &str) -> bool {
+    static PAGE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PAGE.get_or_init(|| regex::Regex::new(r#"^\s*\{\s*"toolName"\s*:\s*"[^"]*html_render""#).unwrap()).is_match(text)
+}
+
+/// The page's title, when its item's text (cut short) has it.
+fn page_title(text: &str) -> String {
+    static TITLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let title = TITLE.get_or_init(|| regex::Regex::new(r#""title"\s*:\s*("(?:[^"\\]|\\.)*")"#).unwrap());
+    title.captures(text).and_then(|c| serde_json::from_str::<String>(&c[1]).ok()).unwrap_or_default()
+}
+
+/// The images a message embeds from files on this PC (`![alt](C:\path)` or a file:// URL),
+/// with their alt text.
+fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
+    static IMAGE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let image = IMAGE.get_or_init(|| regex::Regex::new(r#"!\[([^\]]*)\]\(\s*<?([^)<>"]+?)>?(?:\s+"[^"]*")?\s*\)"#).unwrap());
+    image
+        .captures_iter(markdown)
+        .filter_map(|c| {
+            let target = c[2].trim();
+            let path = match target.strip_prefix("file:///").or_else(|| target.strip_prefix("file://")) {
+                Some(rest) => crate::t3::percent_decode(rest),
+                None => target.to_string(),
+            };
+            let bytes = path.as_bytes();
+            let absolute = bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/');
+            absolute.then(|| (c[1].trim().to_string(), PathBuf::from(path)))
+        })
+        .collect()
+}
+
+/// What an embedded image file is as it is now (a changed file is drawn again); None when
+/// it isn't a file on this PC.
+fn file_key(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    Some(format!("file:{}:{}:{modified}:{DRAWING_VERSION}", path.display(), meta.len()))
 }
 
 fn hash_of(value: &Value) -> u64 {
@@ -126,6 +168,23 @@ pub struct LinkState {
     /// game then drops everything it had from the previous one.
     pub login_key: Option<String>,
     pub login: Option<String>,
+    /// What each image slot holds on disk (`slots::image_file`).
+    pub images: BTreeMap<u32, ImageSlot>,
+    /// The image slots named in updates to the game process `wow_key`: it may have loaded
+    /// them, and keeps what it loaded until it quits, so they aren't written again until then.
+    pub images_shown: Vec<u32>,
+}
+
+/// A picture in an image slot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageSlot {
+    /// What was drawn (`Picture::key`).
+    pub key: String,
+    pub w: u32,
+    pub h: u32,
+    /// When an update last named it (epoch ms).
+    pub used: i64,
 }
 
 impl Default for LinkState {
@@ -141,6 +200,8 @@ impl Default for LinkState {
             polling: None,
             login_key: None,
             login: None,
+            images: BTreeMap::new(),
+            images_shown: Vec::new(),
         }
     }
 }
@@ -297,7 +358,77 @@ pub struct Bridge {
     write_failures: u32,
     /// The tray's "Commands from the game": what the game may make T3 do.
     trust: Trust,
+    /// Draws pictures for the game (None: no browser to draw with, so no pictures).
+    painter: Option<Box<dyn Painter>>,
+    /// The game's addon can show pictures this UI session (its frames say `im`).
+    images_ok: bool,
+    /// The open thread's pages found so far (see `read_view_scan`).
+    scan: Option<ScanCache>,
+    /// Pictures that couldn't be drawn, why, and when (tried again after PICTURE_RETRY_MS).
+    picture_errors: HashMap<String, (String, i64)>,
 }
+
+/// The pages an agent showed (html_render) in the open thread, found by reading its
+/// activity from the first message shown on.
+struct ScanCache {
+    env: String,
+    id: String,
+    /// The first position looked at, and the last one read past.
+    from: u64,
+    upto: Option<u64>,
+    pages: Vec<FoundPage>,
+}
+
+#[derive(Clone)]
+struct FoundPage {
+    position: u64,
+    item_id: String,
+    title: String,
+}
+
+/// A picture the open thread shows: a page an agent showed, or an image a message embeds
+/// from a file on this PC.
+#[derive(Clone)]
+enum Source {
+    Page { item_id: String },
+    File { path: PathBuf },
+}
+
+#[derive(Clone)]
+struct Picture {
+    /// What it is, for finding it in an image slot again: the item (or the file as it is
+    /// now) and the way pages are drawn.
+    key: String,
+    source: Source,
+    /// The page's title or the image's alt text.
+    label: String,
+    /// Where it goes among the shown items: twice the position of the item it comes from,
+    /// plus one for an image that follows its message.
+    order: u64,
+    role: &'static str,
+}
+
+/// A picture being drawn: the page's item text read so far, a piece at a time.
+struct Drawing {
+    picture: Picture,
+    text: String,
+    offset: Option<u64>,
+    pieces: usize,
+}
+
+/// Pictures drawn in one poll at most (each takes the browser a second or two).
+const DRAWS_PER_POLL: usize = 2;
+/// Activity pages read in one poll at most while looking for pages.
+const SCAN_PAGES: usize = 4;
+/// A picture that couldn't be drawn is tried again after this long.
+const PICTURE_RETRY_MS: i64 = 300_000;
+/// A page's item is read a piece at a time, this many pieces at most (html_render takes
+/// 512 KB of HTML).
+const PAGE_TEXT_PIECES: usize = 16;
+/// Pictures kept on disk when a new game process starts (the rest give their space back).
+const IMAGES_KEPT: usize = 40;
+/// Said in place of a picture once every image slot holds one this game process has seen.
+const IMAGES_OUT: &str = "no picture slots left in this WoW session: restart WoW to see more";
 
 /// A working thread's pending requests, as last read.
 #[derive(Clone, Debug)]
@@ -397,6 +528,11 @@ enum Step {
     ViewPage,
     ViewAsk,
     ViewAskRead(String),
+    /// Its pictures: a page of its activity (looking for pages an agent showed), each
+    /// picture to draw (a request at a time for a page's HTML), then the view with them.
+    ViewScan,
+    ViewDraw(usize),
+    ViewPictures,
 }
 
 /// One machine's lists while they're taken in.
@@ -430,6 +566,16 @@ struct ViewRead {
     passes: usize,
     /// The view for the game, once the messages are in, waiting on its question.
     built: Option<Value>,
+    /// Each built item's position, and the images its messages embed from files.
+    positions: Vec<u64>,
+    embedded: Vec<Picture>,
+    /// The pictures the view shows, and those drawn this poll.
+    pictures: Vec<Picture>,
+    drawing: Vec<Drawing>,
+    scan_pages: usize,
+    /// Something wasn't ready (pages left to look through, pictures left to draw): the
+    /// next poll reads the view again.
+    again: bool,
 }
 
 /// T3's sidebar is made of three lists per machine (open, snoozed, settled), read in turn.
@@ -499,11 +645,14 @@ impl Bridge {
         log: Box<dyn Fn(&str) + Send>,
         now: Box<dyn Fn() -> i64 + Send>,
     ) -> Bridge {
-        let link = state_file
+        let mut link = state_file
             .as_ref()
             .and_then(|f| std::fs::read_to_string(f).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
+            .and_then(|text| serde_json::from_str::<LinkState>(&text).ok())
             .unwrap_or_default();
+        // A picture whose file is gone or blank (a reinstall, a cleanup) is no picture: the
+        // game would show a blank slot as a placeholder.
+        link.images.retain(|n, _| slots.has_image(*n));
         Bridge {
             client,
             slots,
@@ -555,7 +704,16 @@ impl Bridge {
             write_error: None,
             write_failures: 0,
             trust: Trust::Full,
+            painter: None,
+            images_ok: false,
+            scan: None,
+            picture_errors: HashMap::new(),
         }
+    }
+
+    /// Draws pictures with `painter` from now on (None: none are drawn).
+    pub fn set_painter(&mut self, painter: Option<Box<dyn Painter>>) {
+        self.painter = painter;
     }
 
     /// Applies the tray's "Commands from the game" from the next command on.
@@ -708,6 +866,7 @@ impl Bridge {
                     self.link.signal_time = self.now_seconds();
                     self.link.wow_key = Some(key);
                     self.link.ui_session = None;
+                    self.new_game_images();
                     self.save_state();
                 }
             }
@@ -719,8 +878,30 @@ impl Bridge {
         }
     }
 
+    /// A new game process has loaded no picture: every image slot can be written again. The
+    /// most recently shown keep theirs (a thread opened again finds them); the rest give
+    /// their disk space back.
+    fn new_game_images(&mut self) {
+        self.link.images_shown.clear();
+        let mut by_use: Vec<(i64, u32)> = self.link.images.iter().map(|(n, slot)| (slot.used, *n)).collect();
+        by_use.sort_unstable_by(|a, b| b.cmp(a));
+        for (_, n) in by_use.into_iter().skip(IMAGES_KEPT) {
+            self.link.images.remove(&n);
+            self.slots.blank_image(n);
+        }
+    }
+
     pub fn on_frame(&mut self, frame: &Value) {
         let (Some(k), Some(u)) = (frame["k"].as_str(), frame["u"].as_str()) else { return };
+        // An addon that can show pictures says so in every frame.
+        let images_ok = frame["im"] == 1;
+        if images_ok != self.images_ok {
+            self.images_ok = images_ok;
+            if images_ok && self.painter.is_some() {
+                self.log("The game can show pictures: pages and images in threads go to it as pictures");
+            }
+            self.view_changed();
+        }
         let l = frame["l"].as_u64().unwrap_or(0) as u32;
         // Until the game watches signals (it learns the starting file from its first update,
         // and some clients can't use them) it loads slots on a timer and reports where it is.
@@ -998,6 +1179,12 @@ impl Bridge {
             Step::ViewPage => self.read_view_page(),
             Step::ViewAsk => self.read_view_ask(),
             Step::ViewAskRead(request_id) => self.read_view_request(request_id),
+            Step::ViewScan => self.read_view_scan(),
+            Step::ViewDraw(i) => self.draw_picture(i),
+            Step::ViewPictures => {
+                self.place_pictures();
+                Ok(())
+            }
         };
         match result {
             Err(error) => self.finish_poll(Err(error)),
@@ -1494,6 +1681,12 @@ impl Bridge {
                 window,
                 passes: 0,
                 built: None,
+                positions: Vec::new(),
+                embedded: Vec::new(),
+                pictures: Vec::new(),
+                drawing: Vec::new(),
+                scan_pages: 0,
+                again: false,
             });
         }
         self.push_steps(vec![Step::ViewPage]);
@@ -1584,6 +1777,8 @@ impl Bridge {
         });
         let want = VIEW_MESSAGES * depth;
         let mut items: Vec<Value> = Vec::new();
+        let mut positions: Vec<u64> = Vec::new();
+        let mut embedded: Vec<Picture> = Vec::new();
         let mut chars = 0;
         for item in messages.iter().rev().take(want) {
             let kind = str_of(&item["type"]);
@@ -1609,6 +1804,15 @@ impl Bridge {
             }
             chars += length;
             items.insert(0, shown);
+            let position = item["position"].as_u64().unwrap_or(0);
+            positions.insert(0, position);
+            let role = if kind == "user_message" { "u" } else { "a" };
+            for (alt, path) in embedded_files(str_of(&item["text"])).into_iter().rev() {
+                if let Some(key) = file_key(&path) {
+                    let label = if alt.is_empty() { "Image".to_string() } else { format!("Image: {alt}") };
+                    embedded.insert(0, Picture { key, source: Source::File { path }, label, order: position * 2 + 1, role });
+                }
+            }
         }
         let more = messages.len() > items.len() || earlier;
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
@@ -1623,14 +1827,256 @@ impl Bridge {
             "more": more,
             "items": items,
         }));
+        read.positions = positions;
+        read.embedded = embedded;
         if let Some(run) = self.poll_run.as_mut() {
             run.reading = Some(read);
         }
+        if self.images_ok && self.painter.is_some() {
+            self.push_steps(vec![Step::ViewScan]);
+        } else if pending {
+            self.push_steps(vec![Step::ViewAsk]);
+        } else {
+            self.finish_view(None);
+        }
+    }
+
+    /// The view and its pictures are built: its question is read next, if it has one.
+    fn ask_or_finish(&mut self) {
+        let pending = self.poll_run.as_ref().and_then(|run| run.reading.as_ref()).is_some_and(|r| r.thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0);
         if pending {
             self.push_steps(vec![Step::ViewAsk]);
         } else {
             self.finish_view(None);
         }
+    }
+
+    /// A page of the open thread's activity, looking for the pages an agent showed
+    /// (html_render) from the first message shown on. What was read stays for the next
+    /// read of the same thread, which goes on from there; a page still being shown is
+    /// waited for. Then the pictures are planned.
+    fn read_view_scan(&mut self) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let Some(&first) = read.positions.first() else {
+            self.plan_pictures();
+            return Ok(());
+        };
+        let View { env, id, .. } = read.view.clone();
+        let mut cache = match self.scan.take().filter(|c| c.env == env && c.id == id && c.from <= first) {
+            Some(cache) => cache,
+            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new() },
+        };
+        let mut args = json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 200 });
+        if let Some(after) = cache.upto.or(first.checked_sub(1)) {
+            args["afterPosition"] = json!(after);
+        }
+        let result = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env))) {
+            Ok(result) => result,
+            Err(error) => {
+                self.scan = Some(cache);
+                return Err(error);
+            }
+        };
+        let now = self.now_ms();
+        let mut waiting = false;
+        for item in result["items"].as_array().into_iter().flatten() {
+            let Some(position) = item["position"].as_u64() else { continue };
+            if item["type"] == "dynamic_tool" && is_page_item(str_of(&item["text"])) {
+                match str_of(&item["status"]) {
+                    "completed" => {
+                        let item_id = str_of(&item["itemId"]).to_string();
+                        if !item_id.is_empty() && !cache.pages.iter().any(|p| p.item_id == item_id) {
+                            cache.pages.push(FoundPage { position, item_id, title: page_title(str_of(&item["text"])) });
+                        }
+                    }
+                    "failed" | "declined" | "cancelled" | "interrupted" | "error" => {}
+                    // Still being shown (unless it has been at it for ages): look again next time.
+                    _ if now - iso_seconds(str_of(&item["updatedAt"])) * 1000 < 600_000 => {
+                        waiting = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            cache.upto = Some(position);
+        }
+        let more = result["hasMore"] == true && !waiting;
+        self.scan = Some(cache);
+        let Some(read) = self.view_read() else { return Ok(()) };
+        read.scan_pages += 1;
+        if more && read.scan_pages < SCAN_PAGES {
+            self.push_steps(vec![Step::ViewScan]);
+        } else {
+            read.again |= more || waiting;
+            self.plan_pictures();
+        }
+        Ok(())
+    }
+
+    /// The pictures the view shows: the pages found from its first message on, and the
+    /// images its messages embed. Those not in an image slot yet are drawn now, a few a
+    /// poll; the rest wait for the next one.
+    fn plan_pictures(&mut self) {
+        let found = self.scan.as_ref().map(|c| c.pages.clone()).unwrap_or_default();
+        let late = self.out_of_time();
+        let now = self.now_ms();
+        let Some(read) = self.view_read() else { return };
+        let View { env, id, .. } = read.view.clone();
+        let first = read.positions.first().copied().unwrap_or(u64::MAX);
+        let mut pictures: Vec<Picture> = found
+            .into_iter()
+            .filter(|p| p.position >= first)
+            .map(|p| Picture {
+                key: format!("page:{env}:{id}:{}:{DRAWING_VERSION}", p.item_id),
+                label: if p.title.is_empty() { "Page".into() } else { format!("Page: {}", p.title) },
+                source: Source::Page { item_id: p.item_id },
+                order: p.position * 2,
+                role: "a",
+            })
+            .collect();
+        pictures.extend(read.embedded.iter().cloned());
+        let mut drawing: Vec<Drawing> = Vec::new();
+        let mut later = false;
+        for picture in &pictures {
+            let stored = self.link.images.values().any(|slot| slot.key == picture.key);
+            let failed = self.picture_errors.get(&picture.key).is_some_and(|(_, at)| now - at < PICTURE_RETRY_MS);
+            if stored || failed || drawing.iter().any(|d| d.picture.key == picture.key) {
+                continue;
+            }
+            if drawing.len() < DRAWS_PER_POLL && !late {
+                drawing.push(Drawing { picture: picture.clone(), text: String::new(), offset: None, pieces: 0 });
+            } else {
+                later = true;
+            }
+        }
+        let Some(read) = self.view_read() else { return };
+        read.pictures = pictures;
+        read.again |= later;
+        let steps: Vec<Step> = (0..drawing.len()).map(Step::ViewDraw).chain([Step::ViewPictures]).collect();
+        read.drawing = drawing;
+        self.push_steps(steps);
+    }
+
+    /// Draws the `i`th picture of this poll into an image slot. A page's HTML is read
+    /// first, a request (a piece of its item) per step.
+    fn draw_picture(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        let Some(job) = read.drawing.get(i) else { return Ok(()) };
+        let picture = job.picture.clone();
+        let offset = job.offset;
+        let drawn = match &picture.source {
+            Source::Page { item_id } => {
+                let mut args = json!({ "threadId": id, "itemId": item_id, "maxCharsPerItem": 50_000 });
+                if let Some(offset) = offset {
+                    args["textOffset"] = json!(offset);
+                }
+                let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
+                let item = result["items"].as_array().and_then(|items| items.iter().find(|it| it["itemId"] == item_id.as_str())).cloned().unwrap_or(Value::Null);
+                let Some(read) = self.view_read() else { return Ok(()) };
+                let Some(job) = read.drawing.get_mut(i) else { return Ok(()) };
+                job.text.push_str(str_of(&item["text"]));
+                job.pieces += 1;
+                match item["nextTextOffset"].as_u64().filter(|_| item["textTruncated"] == true) {
+                    Some(next) if job.pieces < PAGE_TEXT_PIECES => {
+                        job.offset = Some(next);
+                        self.push_steps(vec![Step::ViewDraw(i)]);
+                        return Ok(());
+                    }
+                    Some(_) => Err("the page is too large".to_string()),
+                    None => {
+                        let text = std::mem::take(&mut job.text);
+                        self.draw_page(&text)
+                    }
+                }
+            }
+            Source::File { path } => match self.painter.as_ref() {
+                Some(painter) => painter.picture(path),
+                None => Err("no browser to draw with".into()),
+            },
+        };
+        let stored = drawn.and_then(|bitmap| self.store_picture(&picture.key, &bitmap));
+        if let Err(error) = stored {
+            self.log(&format!("couldn't draw {} for the game: {error}", picture.label));
+            let at = self.now_ms();
+            self.picture_errors.insert(picture.key.clone(), (error, at));
+        }
+        Ok(())
+    }
+
+    /// Draws a page from its html_render item's text (the tool call, as JSON).
+    fn draw_page(&self, text: &str) -> Result<Bitmap, String> {
+        let call: Value = serde_json::from_str(text).map_err(|_| "the page's item couldn't be read".to_string())?;
+        let input = &call["input"];
+        let html = input["html"].as_str().filter(|h| !h.trim().is_empty()).ok_or("the page has no HTML")?;
+        let height = page_height(input["height"].as_u64().unwrap_or(400));
+        self.painter.as_ref().ok_or("no browser to draw with")?.page(html, height)
+    }
+
+    /// Puts a drawn picture in an image slot the game process hasn't been told about: an
+    /// empty one first, else the one shown longest ago.
+    fn store_picture(&mut self, key: &str, bitmap: &Bitmap) -> Result<(), String> {
+        let shown: HashSet<u32> = self.link.images_shown.iter().copied().collect();
+        let empty = (1..=IMAGE_COUNT).find(|n| !shown.contains(n) && !self.link.images.contains_key(n));
+        let oldest = || self.link.images.iter().filter(|(n, _)| !shown.contains(n)).min_by_key(|(_, slot)| slot.used).map(|(n, _)| *n);
+        let Some(n) = empty.or_else(oldest) else { return Err(IMAGES_OUT.into()) };
+        // Out of the map first: a slot half written holds no picture.
+        self.link.images.remove(&n);
+        self.slots.write_image(n, &tga(bitmap)).map_err(|e| format!("couldn't write the picture: {e}"))?;
+        self.link.images.insert(n, ImageSlot { key: key.to_string(), w: bitmap.width, h: bitmap.height, used: 0 });
+        self.save_state();
+        Ok(())
+    }
+
+    /// The view with its pictures among its messages: each one in an image slot shows as a
+    /// picture, and is named to the game process (so the slot keeps it until WoW quits);
+    /// one not drawn yet, or that couldn't be, shows as a line saying so.
+    fn place_pictures(&mut self) {
+        let now = self.now_ms();
+        let Some(read) = self.view_read() else { return };
+        let pictures = std::mem::take(&mut read.pictures);
+        read.drawing.clear();
+        let mut again = false;
+        let mut placed: Vec<(u64, Value)> = Vec::new();
+        for picture in pictures {
+            let slot = self.link.images.iter().find(|(_, slot)| slot.key == picture.key).map(|(n, slot)| (*n, slot.w, slot.h));
+            let label = plain(&picture.label, 120);
+            let item = match slot {
+                Some((n, w, h)) => {
+                    if let Some(slot) = self.link.images.get_mut(&n) {
+                        slot.used = now;
+                    }
+                    if !self.link.images_shown.contains(&n) {
+                        self.link.images_shown.push(n);
+                    }
+                    json!({ "r": picture.role, "x": format!("[{label}]"), "im": { "f": n, "w": w, "h": h } })
+                }
+                None => {
+                    let why = match self.picture_errors.get(&picture.key) {
+                        Some((error, _)) => format!("couldn't show it in the game: {}", plain(error, 160)),
+                        None => {
+                            again = true;
+                            "drawing it for the game…".to_string()
+                        }
+                    };
+                    json!({ "r": picture.role, "x": format!("|cff808080[{label}] ({why})|r") })
+                }
+            };
+            placed.push((picture.order, item));
+        }
+        if !placed.is_empty() {
+            self.save_state();
+        }
+        let Some(read) = self.view_read() else { return };
+        read.again |= again;
+        if let Some(built) = read.built.as_mut().filter(|_| !placed.is_empty()) {
+            let items = built["items"].as_array().cloned().unwrap_or_default();
+            let mut all: Vec<(u64, Value)> = read.positions.iter().map(|p| p * 2).zip(items).collect();
+            all.extend(placed);
+            all.sort_by_key(|(order, _)| *order);
+            built["items"] = json!(all.into_iter().map(|(_, item)| item).collect::<Vec<_>>());
+        }
+        self.ask_or_finish();
     }
 
     /// The question the open thread waits on: which request it is (it's read next).
@@ -1692,7 +2138,8 @@ impl Bridge {
             }
         }
         self.view_data = Some(view);
-        self.view_key = Some(read.key);
+        // Pictures not ready yet: read the view again next poll.
+        self.view_key = (!read.again).then_some(read.key);
     }
 
     /// The first question of a pending request, for the game: a short token, and each

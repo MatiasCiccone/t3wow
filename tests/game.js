@@ -18,6 +18,7 @@ inboxes = {}
 loads = {}
 alerts = {}
 printed = {}
+missingTextures = {}
 function GetTime() return clock end
 function time() return EPOCH + math.floor(clock - 1000) end
 function GetPhysicalScreenSize() return 1920, 1080 end
@@ -89,6 +90,16 @@ local function frame(kind, name)
   function f:SetEnabled(on) self.enabled = on end
   function f:GetFontString() return fontString() end
   function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
+  function f:SetPoint(...) self.point = { ... } end
+  function f:ClearAllPoints() self.point = nil end
+  function f:SetSize(w, h) self.width, self.height = w, h end
+  -- Textures: the file asked for, and its file id as the game gives it (none for a file
+  -- the game didn't find at startup, listed in missingTextures).
+  function f:SetTexture(path) self.texturePath = path end
+  function f:GetTextureFilePath()
+    if self.texturePath == nil or missingTextures[self.texturePath] then return nil end
+    return -4186
+  end
   frames[#frames + 1] = f
   if name then _G[name] = f end
   return setmetatable(f, { __index = function(_, key)

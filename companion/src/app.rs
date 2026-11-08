@@ -529,6 +529,11 @@ pub fn run(app: Arc<App>) {
     // companion was off): the game drops the previous one's threads.
     bridge.set_login(&key);
     log::line(&format!("T3 WoW companion {}: T3 at {origin}, WoW at {}", env!("CARGO_PKG_VERSION"), wow_dir.display()));
+    // Pages and images go to the game as pictures, drawn with the browser Windows has.
+    match crate::render::Edge::find(config_dir().join("render")) {
+        Some(edge) => bridge.set_painter(Some(Box::new(edge))),
+        None => log::line("No Microsoft Edge (or Chrome) to draw pictures with: pages and images show as text in the game"),
+    }
     let (capture_tx, capture_rx) = channel::<CaptureMessage>();
     #[cfg(windows)]
     crate::capture::spawn(wow_dir.clone(), capture_tx);

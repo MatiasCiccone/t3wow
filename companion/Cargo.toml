@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 base64 = "0.23"
 getrandom = "0.4"
+png = "0.18"
 regex = "1"
 # Ed25519 to check release signatures (already built for ureq's TLS).
 ring = { version = "0.17", default-features = false, features = ["alloc"] }
