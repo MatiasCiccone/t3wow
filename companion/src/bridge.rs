@@ -72,9 +72,22 @@ fn may_watch(thread: &Value) -> bool {
     thread["settled"] != true
         && !working(status)
         && !needs_you(status)
-        && thread["pullRequests"]
-            .as_array()
-            .is_some_and(|prs| prs.iter().any(|pr| !matches!(str_of(&pr["state"]), "merged" | "closed")))
+        && thread["pullRequests"].as_array().is_some_and(|prs| prs.iter().any(pull_request_open))
+}
+
+fn pull_request_open(pr: &Value) -> bool {
+    !matches!(str_of(&pr["state"]), "merged" | "closed")
+}
+
+/// A thread's linked pull requests in a few characters, for its row: the first still open
+/// (in a stack, the next to merge), else the last linked, and how many more there are.
+/// GitLab numbers its merge requests with "!", on any host.
+fn pull_request_label(thread: &Value) -> Option<String> {
+    let prs: Vec<&Value> = thread["pullRequests"].as_array()?.iter().filter(|pr| pr["number"].is_u64()).collect();
+    let shown = prs.iter().find(|pr| pull_request_open(pr)).or(prs.last())?;
+    let sign = if str_of(&shown["url"]).contains("/merge_requests/") { '!' } else { '#' };
+    let number = &shown["number"];
+    Some(if prs.len() > 1 { format!("{sign}{number} +{}", prs.len() - 1) } else { format!("{sign}{number}") })
 }
 
 /// Waiting on a question or an approval.
@@ -3142,6 +3155,9 @@ impl Bridge {
                 }
                 if let Some(launcher) = t["launcher"].as_str() {
                     entry["par"] = json!(launcher);
+                }
+                if let Some(label) = pull_request_label(t) {
+                    entry["pr"] = json!(label);
                 }
                 entry["at"] = json!(iso_seconds(str_of(&t["updatedAt"])));
                 let project = project_title.get(&format!("{env}:{}", str_of(&t["projectId"]))).map(String::as_str).unwrap_or("");

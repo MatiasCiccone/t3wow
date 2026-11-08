@@ -457,6 +457,31 @@ fn without_signals_the_games_own_slot_count_drives_where_updates_go() {
 }
 
 #[test]
+fn a_row_names_the_threads_pull_request_and_how_many_more() {
+    let mut rig = Rig::new(3_000_000);
+    let thread = |id: &str, prs: Value| {
+        json!({ "threadId": id, "projectId": "p1", "title": id, "status": "completed", "pullRequests": prs, "updatedAt": "2026-11-06T10:00:00Z" })
+    };
+    let github = |number: u64, state: &str| json!({ "number": number, "state": state, "url": format!("https://github.com/o/r/pull/{number}") });
+    let gitlab = json!({ "number": 12, "state": "open", "url": "https://code.example.com/o/r/-/merge_requests/12" });
+    rig.t3.threads.lock().unwrap().extend([
+        thread("one", json!([github(31, "merged")])),
+        thread("still-open", json!([github(41, "merged"), github(46, "open"), github(47, "open")])),
+        thread("all-merged", json!([github(41, "merged"), github(46, "merged")])),
+        thread("gitlab", json!([gitlab])),
+        thread("none", json!([])),
+    ]);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    let label = |id: &str| snapshot["threads"].as_array().unwrap().iter().find(|t| t["e"] == 1 && t["id"] == id).unwrap()["pr"].clone();
+    assert_eq!(label("one"), "#31");
+    assert_eq!(label("still-open"), "#46 +2");
+    assert_eq!(label("all-merged"), "#46 +1");
+    assert_eq!(label("gitlab"), "!12");
+    assert_eq!(label("none"), Value::Null);
+}
+
+#[test]
 fn the_list_follows_t3s_sidebar() {
     let mut rig = Rig::new(3_000_000);
     rig.t3.threads.lock().unwrap().extend([

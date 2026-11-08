@@ -581,6 +581,18 @@ return "ok"
 `);
 });
 
+test("a row shows its linked pull request, and a row reused for a thread with none doesn't", () => {
+  for (const db of [`{ client = "c1", seq = 0, queue = {} }`, `{ client = "c1", seq = 0, queue = {}, settings = { compact = true } }`]) {
+    run(`
+inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Linked", s = "completed", set = false, at = time(), p = "", pr = "#46 +1" } } })
+assert(showing("^#46 %+1$"), "no pull request on the row")
+inboxWith(ENVS, { threads = { { e = 1, id = "t2", t = "Unlinked", s = "completed", set = false, at = time(), p = "" } } })
+assert(not showing("#46"), "the row kept the last thread's pull request")
+return "ok"
+`, { db });
+  }
+});
+
 test("Search narrows the list to threads matching every word, opens groups on their matches, and Escape clears it", () => {
   run(`
 local function count(label)
