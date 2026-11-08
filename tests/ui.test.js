@@ -519,6 +519,24 @@ return "ok"
 `);
 });
 
+test("a thread watching a pull request shows as Waiting under Working, with nothing to stop", () => {
+  run(`
+local function count(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and f.text.text == label and f.shown then return tonumber(f.count.text) end
+  end
+end
+local thread = { e = 1, id = "t1", t = "Watching CI", s = "watching", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Watching CI", s = "completed", items = { { r = "a", x = "Watching CI." } } } })
+UI.Select(thread)
+assert(count("Working") == 1 and (count("Open") or 0) == 0, "Working " .. tostring(count("Working")) .. ", Open " .. tostring(count("Open")))
+assert(showing("^Waiting$"), "no Waiting pill")
+assert(not showing("Working…"), "says Working… with no run")
+assert(not find("Button", "Stop").enabled, "Stop is enabled with no run")
+return "ok"
+`);
+});
+
 test("Search narrows the list to threads matching every word, opens groups on their matches, and Escape clears it", () => {
   run(`
 local function count(label)
@@ -697,7 +715,8 @@ return "ok"
 });
 
 // Scroll frames that keep their offset and child height, with a 300 px view; the
-// conversation's one is the frame the copy box hides with.
+// conversation's one is the frame the copy box hides with. A child's top is at TOP (0
+// unless a test sets it).
 const SCROLLING = `
 local createFrame = CreateFrame
 function CreateFrame(kind, ...)
@@ -707,7 +726,9 @@ function CreateFrame(kind, ...)
     function f:SetScrollChild(child)
       self.child = child
       function child:SetHeight(h) self.h = h end
+      function child:GetTop() return TOP or 0 end
     end
+    function f:GetHeight() return 300 end
     function f:GetVerticalScrollRange() return math.max(0, (rawget(self.child, "h") or 0) - 300) end
     function f:SetVerticalScroll(v) self.offset = v end
     function f:GetVerticalScroll() return self.offset end
@@ -736,6 +757,40 @@ inboxWith(ENVS, { threads = { long, fresh }, view = { e = 1, id = "t2", t = "Fre
 messageScroll.child.h, messageScroll.offset = 5000, 4700
 UI.Refresh()
 assert(messageScroll.child.h < 300 and messageScroll.offset == 0, "empty thread kept " .. messageScroll.child.h .. "/" .. messageScroll.offset)
+return "ok"
+`, { before: SCROLLING });
+});
+
+test("a short thread measured at a long message's height settles back to its messages, not empty space", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Short", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Short", s = "completed",
+  items = { { r = "u", x = "Fix the label" }, { r = "a", x = "Done." } } } })
+UI.Select(thread)
+-- Where the game says the last message ends.
+TOP, BOTTOM = 1000, 1000
+for _, fs in ipairs(fontStrings) do fs.GetBottom = function() return BOTTOM end end
+-- Measured as it is drawn, a string still has the long message it held before.
+BOTTOM = -4000
+UI.Refresh()
+assert(messageScroll.offset > 4000, "not at the end it measured: " .. messageScroll.offset)
+-- A frame later the text is laid out: two short messages, which fit the view.
+BOTTOM = 880
+tick(0.25)
+assert(messageScroll.child.h < 300, "kept the stale height " .. messageScroll.child.h)
+assert(messageScroll.offset == 0, "scrolled past the messages to " .. messageScroll.offset)
+-- Read from the middle of a long conversation, a shorter one keeps the view within it...
+BOTTOM = -4000
+tick(0.25)
+messageScroll:SetVerticalScroll(1000)
+BOTTOM = 500
+tick(0.25)
+assert(messageScroll.offset == messageScroll.child.h - 300, "past the end at " .. messageScroll.offset)
+-- ...and a longer one leaves your place alone.
+messageScroll:SetVerticalScroll(100)
+BOTTOM = -2000
+tick(0.25)
+assert(messageScroll.offset == 100, "moved you to " .. messageScroll.offset)
 return "ok"
 `, { before: SCROLLING });
 });

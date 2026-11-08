@@ -30,6 +30,8 @@ struct FakeT3 {
     projects: Mutex<HashMap<String, Value>>,
     /// Each machine's "New thread mode" preference (left out when not set).
     thread_modes: Mutex<HashMap<String, &'static str>>,
+    /// Whether the threads' agents watch their pull requests.
+    watching: Mutex<bool>,
 }
 
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
@@ -63,6 +65,7 @@ impl FakeT3 {
             projects: Mutex::new(HashMap::new()),
             thread_modes: Mutex::new(HashMap::new()),
             item_texts: Mutex::new(HashMap::new()),
+            watching: Mutex::new(false),
         })
     }
 
@@ -117,6 +120,21 @@ impl T3 for FakeT3 {
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
             "t3_thread_launch" => json!({ "threadId": "new1" }),
+            "list_thread_pull_requests" => {
+                let prs = self.thread(&args["threadId"])["pullRequests"].clone();
+                let watching = *self.watching.lock().unwrap();
+                let prs: Vec<Value> = prs
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mut pr| {
+                        pr["watching"] = json!(watching);
+                        pr
+                    })
+                    .collect();
+                json!({ "pullRequests": prs })
+            }
             // As T3 answers: the interrupt is requested for a run under way; with none, it
             // says so (or names how the last run ended).
             "t3_thread_interrupt" => {
@@ -576,6 +594,50 @@ fn a_running_thread_with_a_question_needs_you_and_notifies() {
     rig.bridge.tick();
     let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
     assert!(latest.contains("id=\"t1\",t=\"Fix tests\",s=\"running\""), "{latest}");
+}
+
+#[test]
+fn a_thread_watching_its_pull_request_shows_as_watching_and_notifies_when_the_watch_ends() {
+    let mut rig = Rig::new(6_500_000);
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"] = json!([{ "number": 31, "state": "open" }]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("s=\"running\""), "{}", rig.slot(1));
+    // A running thread isn't asked: it shows as working anyway.
+    assert!(rig.t3.calls_to("list_thread_pull_requests").is_empty());
+
+    // The run ends with the agent watching the PR's checks: T3 says "completed".
+    *rig.t3.watching.lock().unwrap() = true;
+    rig.t3.set("completed", "2026-11-06T10:01:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("id=\"t1\",t=\"Fix tests\",s=\"watching\""), "{inbox}");
+    assert!(!inbox.contains("t=\"Fix tests\",s=\"watching\"}"), "notified while it still watches: {inbox}");
+    assert!(!inbox.contains("t=\"Fix tests\",s=\"completed\"}"), "notified while it still watches: {inbox}");
+
+    // Nothing changed: the next poll trusts the last answer.
+    let asked = rig.t3.calls_to("list_thread_pull_requests").len();
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("list_thread_pull_requests").len(), asked);
+
+    // The watch ends without the thread changing: asked again once the answer is old, it
+    // finished.
+    *rig.t3.watching.lock().unwrap() = false;
+    rig.advance(WATCH_RECHECK_MS);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("id=\"t1\",t=\"Fix tests\",s=\"completed\""), "{latest}");
+    assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "an alert: {latest}");
+
+    // Merged: nothing left to watch, so it isn't asked.
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"] = json!([{ "number": 31, "state": "merged" }]);
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    let asked = rig.t3.calls_to("list_thread_pull_requests").len();
+    rig.advance(WATCH_RECHECK_MS);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("list_thread_pull_requests").len(), asked);
 }
 
 #[test]

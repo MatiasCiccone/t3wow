@@ -23,11 +23,14 @@ local format, floor = string.format, math.floor
 local WIDTH, HEIGHT, LIST_WIDTH = 940, 580, 300
 local MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT = 720, 420, 2400, 1600
 local WORKING = { preparing = true, queued = true, starting = true, running = true }
+-- A thread whose agent watches a pull request (its checks, its reviews) after its run ended:
+-- T3's sidebar files it under Working as "Waiting", though there's no run to stop.
+local function inWorking(status) return WORKING[status] or status == "watching" end
 local STATUS = {
     preparing = { "Working", "ffd100" }, queued = { "Queued", "ffd100" }, starting = { "Working", "ffd100" },
     running = { "Working", "ffd100" }, completed = { "Finished", "40c040" }, failed = { "Failed", "ff4040" },
     waiting = { "Needs you", "ff8000" }, approval = { "Approve in T3", "ff8000" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
-    idle = { "Idle", "a0a0a0" }, rolled_back = { "Rolled back", "a0a0a0" },
+    idle = { "Idle", "a0a0a0" }, rolled_back = { "Rolled back", "a0a0a0" }, watching = { "Waiting", "ffd100" },
 }
 
 local inbox
@@ -505,7 +508,7 @@ local function renderList()
     -- others only while they're working or need you; T3's sidebar has no row for them.
     -- The same goes for an agent-launched thread ("ag") whose launcher isn't known:
     -- delegate_task leaves no sender to find it by.
-    local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open" end
+    local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (inWorking(t.s) and "working") or "open" end
     -- A search keeps the threads whose title, project or machine has every word typed,
     -- case aside. A launched thread whose launcher doesn't match, or isn't listed, stands on its own.
     local words = {}
@@ -530,7 +533,7 @@ local function renderList()
             local key = t.e .. ":" .. t.par
             launched[key] = launched[key] or {}
             table.insert(launched[key], t)
-        elseif searching or not (t.par or t.ag) or parent or t.set or WORKING[t.s] or t.s == "waiting" or t.s == "approval" then
+        elseif searching or not (t.par or t.ag) or parent or t.set or inWorking(t.s) or t.s == "waiting" or t.s == "approval" then
             table.insert(groups[groupOf(t)], t)
         end
     end
@@ -1362,15 +1365,57 @@ end
 -- click, so the wish is kept until they are drawn.
 local scrollToEnd = false
 -- The scroll child is as tall as what is laid out in it, measured from where the game put
--- the last piece; then, if asked, the conversation scrolls to its end.
-local function fit(stickToBottom)
+-- the last piece (nil while the game can't say yet).
+local function contentHeight()
     local top, bottom = messageChild:GetTop(), flow.last and flow.last:GetBottom()
     -- The space under the last piece counts: a bubble or the question's card reaches into it.
-    if top and bottom then messageChild:SetHeight(math.max(top - bottom + math.max(8, flow.gap or 0), 1))
-    elseif not flow.last then messageChild:SetHeight(math.max(flow.gap or 0, 1)) end
-    messageScroll:UpdateScrollChildRect()
-    if stickToBottom then messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange()) end
+    if top and bottom then return math.max(top - bottom + math.max(8, flow.gap or 0), 1) end
+    if not flow.last then return math.max(flow.gap or 0, 1) end
 end
+
+-- The child's height as last set, and the offsets the conversation can scroll through.
+-- Both are kept here: the game's own range can lag a frame behind a new height, and an
+-- offset set from a stale range scrolled a short thread past its end, into empty space.
+local childHeight = 1
+local function scrollRange() return math.max(0, childHeight - (messageScroll:GetHeight() or 0)) end
+
+-- Scrolls to the end, or keeps the offset within the conversation, with the scroll bar in step.
+local function applyScroll(toEnd)
+    local range = scrollRange()
+    local bar = messageScroll.ScrollBar
+    if type(bar) == "table" and bar.SetMinMaxValues then bar:SetMinMaxValues(0, range) end
+    local offset = messageScroll:GetVerticalScroll() or 0
+    if toEnd or offset > range then messageScroll:SetVerticalScroll(toEnd and range or math.min(offset, range)) end
+end
+
+local function setChildHeight(height)
+    childHeight = height
+    messageChild:SetHeight(height)
+    messageScroll:UpdateScrollChildRect()
+end
+
+-- Sizes the conversation to what is laid out, then, if asked, scrolls to its end.
+local function fit(stickToBottom)
+    local height = contentHeight()
+    if height then setChildHeight(height) end
+    applyScroll(stickToBottom)
+end
+
+-- Text is laid out after it is set, and again once a font that was still loading arrives,
+-- so the height measured while drawing can be a previous message's. Every frame the
+-- conversation is shown, it is measured again: a new height resizes it, and a view that
+-- was at the end stays there; one scrolled up keeps its place, within the conversation.
+local settle = CreateFrame("Frame", nil, messageScroll)
+settle:SetScript("OnUpdate", function()
+    local height = contentHeight()
+    if height and math.abs(height - childHeight) > 0.5 then
+        local atEnd = (messageScroll:GetVerticalScroll() or 0) >= scrollRange() - 8
+        setChildHeight(height)
+        applyScroll(atEnd)
+    elseif (messageScroll:GetVerticalScroll() or 0) > scrollRange() + 0.5 then
+        applyScroll(false)
+    end
+end)
 
 -- ---------------------------------------------------------------- questions from the agent
 -- A question the agent is waiting on shows at the end of the conversation: one button per
@@ -1609,7 +1654,7 @@ end
 function renderView()
     -- Stay at the end while new messages come in, unless you scrolled up to read.
     local stickToBottom = scrollToEnd
-        or messageScroll:GetVerticalScroll() >= messageScroll:GetVerticalScrollRange() - 8
+        or messageScroll:GetVerticalScroll() >= scrollRange() - 8
     for _, fs in ipairs(messageStrings) do
         fs:Hide()
         fs.hit:Hide()
@@ -1647,6 +1692,8 @@ function renderView()
     if not selected then
         viewTitle:SetText("Pick a thread")
         setViewMeta(nil, "")
+        flowStart(0)
+        fit(true)
         return
     end
     local view = inbox and inbox.view
@@ -1707,11 +1754,10 @@ function renderView()
     if WORKING[status] then
         placeMessage(messageString(count + 2), "|cffffd100Working…|r", false)
     end
-    -- Sized now from what the game has laid out, and again next frame, once text heights
-    -- have settled.
+    -- Sized now from what the game has laid out; `settle` sizes it again as text heights
+    -- settle.
     if stickToBottom then scrollToEnd = false end
     fit(stickToBottom)
-    C_Timer.After(0, function() fit(stickToBottom) end)
 end
 
 -- ---------------------------------------------------------------- composer

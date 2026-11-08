@@ -39,9 +39,34 @@ const UNLISTED_MISSES: u32 = 5;
 
 /// How long a working thread's pending-question count is trusted without a re-read.
 const PENDING_RECHECK_MS: i64 = 20_000;
+/// How long whether a thread watches its pull request is trusted without a re-read (a
+/// watch can end, the PR merged, without the thread changing).
+const WATCH_RECHECK_MS: i64 = 60_000;
 
 fn working(status: &str) -> bool {
     WORKING.contains(&status)
+}
+
+/// The status a thread gets while its agent watches a pull request after its run ended:
+/// T3's sidebar files it under Working as "Waiting", though its own status says it ended.
+const WATCHING: &str = "watching";
+
+/// Working, or watching a pull request: either way the thread isn't done yet.
+fn active(status: &str) -> bool {
+    working(status) || status == WATCHING
+}
+
+/// A thread that may be watching a pull request: open on the sidebar, its run ended
+/// without waiting on you, with a pull request not yet merged or closed. Only such threads
+/// are asked whether they watch one.
+fn may_watch(thread: &Value) -> bool {
+    let status = str_of(&thread["status"]);
+    thread["settled"] != true
+        && !working(status)
+        && !needs_you(status)
+        && thread["pullRequests"]
+            .as_array()
+            .is_some_and(|prs| prs.iter().any(|pr| !matches!(str_of(&pr["state"]), "merged" | "closed")))
 }
 
 /// Waiting on a question or an approval.
@@ -319,6 +344,9 @@ pub struct Bridge {
     /// What working threads wait on, keyed by thread: T3's list says "running" while an
     /// agent waits on a question or an approval, and only a thread read has the count.
     pending_counts: HashMap<String, Pending>,
+    /// Whether threads with an open pull request watch it, keyed by thread: only T3's
+    /// pull request list says so.
+    watches: HashMap<String, Watch>,
     /// The thread that launched each agent-launched thread (None: unknown), read once.
     launchers: HashMap<String, Option<String>>,
     /// Machines whose threads were listed at least once since the companion started.
@@ -517,6 +545,15 @@ const IMAGES_KEPT: usize = 40;
 /// Said in place of a picture once every image slot holds one this game process has seen.
 const IMAGES_OUT: &str = "no picture slots left in this WoW session: restart WoW to see more";
 
+/// Whether a thread watches its pull request, as last read.
+#[derive(Clone, Debug)]
+struct Watch {
+    /// The thread's `updatedAt` when read, and when that was.
+    updated: String,
+    read_at: i64,
+    watching: bool,
+}
+
 /// A working thread's pending requests, as last read.
 #[derive(Clone, Debug)]
 struct Pending {
@@ -601,11 +638,12 @@ enum Step {
     /// than T3's page takes a step per page).
     List(usize),
     /// One machine's lists, as read. Then, for it: each working thread's question check
-    /// (and what it waits on), each launcher, the status changes, each active thread that
+    /// (and what it waits on), whether each thread with an open PR watches it, each launcher, the status changes, each active thread that
     /// left the lists, and keeping the lists.
     Machine(String, ThreadLists),
     Question(usize),
     QuestionKind(usize, i64),
+    Watch(usize),
     Launcher(usize),
     Track,
     Unlisted(String, String),
@@ -769,6 +807,7 @@ impl Bridge {
             last_status: HashMap::new(),
             unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
+            watches: HashMap::new(),
             listed_envs: HashSet::new(),
             launchers: HashMap::new(),
             commands: VecDeque::new(),
@@ -890,6 +929,7 @@ impl Bridge {
         self.last_status.clear();
         self.unlisted_misses.clear();
         self.pending_counts.clear();
+        self.watches.clear();
         self.launchers.clear();
         self.listed_envs.clear();
         self.stopping.clear();
@@ -1267,6 +1307,7 @@ impl Bridge {
             Step::Machine(env, result) => self.take_lists(env, result),
             Step::Question(i) => self.check_question(i),
             Step::QuestionKind(i, read_at) => self.check_waiting_on(i, read_at),
+            Step::Watch(i) => self.check_watch(i),
             Step::Launcher(i) => self.find_launcher(i),
             Step::Track => {
                 self.track_listed();
@@ -1404,6 +1445,7 @@ impl Bridge {
         match result {
             Ok((threads, settled_total, more)) => {
                 let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
+                steps.extend((0..threads.len()).filter(|i| may_watch(&threads[*i])).map(Step::Watch));
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
                 steps.extend([Step::Track, Step::Keep]);
                 if let Some(run) = self.poll_run.as_mut() {
@@ -1503,6 +1545,47 @@ impl Bridge {
         Ok(())
     }
 
+    /// A thread whose run ended with a pull request still open may be watching it (its
+    /// checks, its reviews): then it shows as "watching", under Working as in T3's sidebar.
+    /// Read again only when the thread changed or the answer is old.
+    fn check_watch(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some((env, id, updated)) = self.listed_thread(i) else { return Ok(()) };
+        let key = format!("{env}:{id}");
+        let now = self.now_ms();
+        let known = match self.watches.get(&key) {
+            Some(w) if w.updated == updated && now - w.read_at < WATCH_RECHECK_MS => Some(w.watching),
+            // No time left in this poll: the last answer stands until the next one.
+            Some(w) if self.out_of_time() => Some(w.watching),
+            None if self.out_of_time() => Some(false),
+            _ => None,
+        };
+        let watching = match known {
+            Some(watching) => watching,
+            None => {
+                let args = with_args(json!({ "threadId": id }), &self.env_arg(&env));
+                match self.client.call("list_thread_pull_requests", args) {
+                    Ok(list) => {
+                        let watching = list["pullRequests"].as_array().is_some_and(|prs| prs.iter().any(|pr| pr["watching"] == true));
+                        self.watches.insert(key, Watch { updated, read_at: now, watching });
+                        watching
+                    }
+                    Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                    // Unreadable now: the last answer stands.
+                    Err(T3Error::Other(message)) => {
+                        self.log(&format!("pull request watch ({key}): {message}"));
+                        self.watches.get(&key).is_some_and(|w| w.watching)
+                    }
+                }
+            }
+        };
+        if watching {
+            if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
+                thread["status"] = json!(WATCHING);
+            }
+        }
+        Ok(())
+    }
+
     /// Notes which thread launched an agent-launched thread: the sender of its first message.
     fn find_launcher(&mut self, i: usize) -> Result<(), T3Error> {
         let Some((env, id, _)) = self.listed_thread(i) else { return Ok(()) };
@@ -1537,6 +1620,7 @@ impl Bridge {
         self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || listed.seen.contains(k));
         let ids: HashSet<String> = listed.threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
         self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !ids.contains(k));
+        self.watches.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         let gone: Vec<(String, String)> =
             self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !ids.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
         let mut steps = Vec::new();
@@ -1666,6 +1750,7 @@ impl Bridge {
         self.last_status.retain(|key, _| linked(env_of(key)));
         self.unlisted_misses.retain(|key, _| linked(env_of(key)));
         self.pending_counts.retain(|key, _| linked(env_of(key)));
+        self.watches.retain(|key, _| linked(env_of(key)));
         self.launchers.retain(|key, _| linked(env_of(key)));
         self.list_errors.retain(|env, _| linked(env));
         if self.view.as_ref().is_some_and(|v| !linked(&v.env)) {
@@ -1711,10 +1796,11 @@ impl Bridge {
             // asked straight away) notifies too; on the first list everything is old news.
             None => needs_you(&status) && self.listed_envs.contains(env),
             Some(before) if before == status => false,
-            // Stopped working: finished, failed, stopped, or now waits on you.
-            Some(before) if working(before) => !working(&status),
+            // Stopped working: finished, failed, stopped, or now waits on you. A run that
+            // ended watching its pull request isn't done yet: it notifies when that ends.
+            Some(before) if active(before) => !active(&status),
             // Answered and done before the next look (it never showed as working again).
-            Some(before) if needs_you(before) => !working(&status) && !needs_you(&status),
+            Some(before) if needs_you(before) => !active(&status) && !needs_you(&status),
             Some(_) => false,
         };
         if notify {
