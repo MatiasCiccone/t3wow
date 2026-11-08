@@ -386,20 +386,26 @@ fn the_list_follows_t3s_sidebar() {
     rig.t3.threads.lock().unwrap().extend([
         json!({ "threadId": "child", "projectId": "p1", "title": "Review", "status": "completed", "parentThreadId": "t1", "updatedAt": "2026-11-06T10:00:00Z" }),
         json!({ "threadId": "launched", "projectId": "p1", "title": "Test it", "status": "completed", "createdBy": "agent", "sender": "t1", "updatedAt": "2026-11-06T10:00:00Z" }),
+        // delegate_task's threads: an agent made them, but their first message names no sender.
+        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "updatedAt": "2026-11-06T10:00:00Z" }),
         json!({ "threadId": "nap", "projectId": "p1", "title": "Later", "status": "completed", "snoozed": true, "updatedAt": "2026-11-06T10:00:00Z" }),
     ]);
     rig.bridge.tick();
     let snapshot = rig.bridge.snapshot();
-    let ids: Vec<(String, bool, String)> = snapshot["threads"]
+    let ids: Vec<(String, bool, String, bool)> = snapshot["threads"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|t| t["e"] == 1)
-        .map(|t| (t["id"].as_str().unwrap().to_string(), t["sn"] == true, str_of(&t["par"]).to_string()))
+        .map(|t| (t["id"].as_str().unwrap().to_string(), t["sn"] == true, str_of(&t["par"]).to_string(), t["ag"] == true))
         .collect();
-    // Subagents stay out; a thread an agent launched comes under the thread that launched it.
-    let row = |id: &str, sn: bool, par: &str| (id.to_string(), sn, par.to_string());
-    assert_eq!(ids, vec![row("t1", false, ""), row("launched", false, "t1"), row("nap", true, "")]);
+    // Subagents stay out; a thread an agent launched comes under the thread that launched it,
+    // and says an agent made it, so the game knows it has no row of its own when no launcher is found.
+    let row = |id: &str, sn: bool, par: &str, ag: bool| (id.to_string(), sn, par.to_string(), ag);
+    assert_eq!(
+        ids,
+        vec![row("t1", false, "", false), row("launched", false, "t1", true), row("delegated", false, "", true), row("nap", true, "", false)]
+    );
 
     // The launcher is read once, not on every poll.
     let reads = rig.t3.calls_to("t3_thread_read").len();

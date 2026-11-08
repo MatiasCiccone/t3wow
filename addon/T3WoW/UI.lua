@@ -477,6 +477,8 @@ local function renderList()
     -- their launcher (settled while it's open, say) they stand on their own in theirs.
     -- With their launcher not listed at all, settled ones still show under Settled, and
     -- others only while they're working or need you; T3's sidebar has no row for them.
+    -- The same goes for an agent-launched thread ("ag") whose launcher isn't known:
+    -- delegate_task leaves no sender to find it by.
     local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open" end
     local threads = inbox and inbox.threads or {}
     local byId, launched = {}, {}
@@ -487,7 +489,7 @@ local function renderList()
             local key = t.e .. ":" .. t.par
             launched[key] = launched[key] or {}
             table.insert(launched[key], t)
-        elseif not t.par or parent or t.set or WORKING[t.s] or t.s == "waiting" or t.s == "approval" then
+        elseif not (t.par or t.ag) or parent or t.set or WORKING[t.s] or t.s == "waiting" or t.s == "approval" then
             table.insert(groups[groupOf(t)], t)
         end
     end
