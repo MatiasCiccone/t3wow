@@ -594,6 +594,9 @@ messageScroll:SetPoint("BOTTOMRIGHT", -26, 100)
 local messageStrings = {}
 local earlier = button(messageChild, "Show earlier messages", 180, function() ns.Link.Send({ t = "more" }) end, "ghost")
 local openCopy -- the copy box, made after the composer
+-- Pictures: pages an agent showed and images a message embeds, drawn by the companion
+-- into image slot files (img\NNNN.tga). A message item with `im` = { f = slot, w, h }.
+local Pictures = { used = 0, pool = {} }
 
 -- Each message has a button over it: clicking a message opens it in the copy box. Your
 -- messages sit in a bubble on the right; the agent's run the full width.
@@ -614,10 +617,13 @@ local function messageString(index)
         -- The hover tint sits behind the text, on the conversation itself.
         fs.hover = Skin.Box(messageChild, { shape = "control", fill = "hover", free = true, sub = -7 })
         fs.hover:Hide()
-        hit:SetScript("OnClick", function(self) openCopy(self.copyText) end)
+        hit:SetScript("OnClick", function(self)
+            if self.picture then return Pictures.Zoom(self.picture) end
+            openCopy(self.copyText)
+        end)
         hit:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:AddLine("Click to copy")
+            GameTooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
             GameTooltip:Show()
         end)
         hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -625,6 +631,7 @@ local function messageString(index)
         hit:HookScript("OnLeave", function() fs.hover:Hide() end)
         hit:HookScript("OnHide", function() fs.hover:Hide() end)
         hit:Hide()
+        hit.picture = false
         fs.hit = hit
         messageStrings[index] = fs
     end
@@ -1026,6 +1033,87 @@ local function placeMessage(fs, text, mine, segments)
     anchorMessage(fs, fs, 0, fs, 0, width)
 end
 
+-- ---------------------------------------------------------------- pictures
+do
+    local IMG = "Interface\\AddOns\\T3WoW\\img\\"
+    local function path(im) return format("%s%04d.tga", IMG, im.f) end
+
+    -- Screen pixels per UI unit of `region`: a picture fits the conversation pixel for pixel
+    -- when it can, and is scaled down to its width when it can't.
+    local function pixelsPerUnit(region)
+        local _, height = GetPhysicalScreenSize and GetPhysicalScreenSize()
+        local scale = region.GetEffectiveScale and region:GetEffectiveScale() or 1
+        if type(height) ~= "number" or height <= 0 or type(scale) ~= "number" or scale <= 0 then return 1 end
+        return height / 768 * scale
+    end
+
+    -- The size a picture `w` x `h` pixels is drawn at: `scale` times its own size (1 when
+    -- left out), at most `room` wide.
+    local function fit(im, room, region, scale)
+        local w, h = tonumber(im.w) or 0, tonumber(im.h) or 0
+        if w <= 0 or h <= 0 then return end
+        local width = math.min(room, (scale or 1) * w / pixelsPerUnit(region))
+        return width, width * h / w
+    end
+
+    function Pictures.Release()
+        for _, texture in ipairs(Pictures.pool) do texture:Hide() end
+        Pictures.used = 0
+    end
+
+    -- Draws a message that is a picture in the flow, yours against the right edge;
+    -- false when it can't be one (then the message's text is drawn instead).
+    function Pictures.Place(fs, im, mine)
+        if type(im) ~= "table" or type(im.f) ~= "number" then return false end
+        local full = messageWidth() - 8
+        local width, height = fit(im, full, messageChild)
+        if not width then return false end
+        local n = (Pictures.used or 0) + 1
+        Pictures.used = n
+        local texture = Pictures.pool[n]
+        if not texture then
+            texture = messageChild:CreateTexture(nil, "ARTWORK")
+            Pictures.pool[n] = texture
+        end
+        texture:SetTexture(path(im))
+        texture:SetSize(width, height)
+        fs:Hide()
+        fs.bubble:Hide()
+        place(texture, mine and (full + 4 - width) or 4, 18)
+        anchorMessage(fs, texture, 0, texture, 0, width)
+        return true
+    end
+
+    -- A picture enlarged over the screen, up to twice its own size; a click or Escape
+    -- closes it.
+    local zoom
+    function Pictures.Zoom(im)
+        if not zoom then
+            zoom = CreateFrame("Button", "T3WoWPictureZoom", UIParent)
+            zoom:SetAllPoints(UIParent)
+            zoom:SetFrameStrata("FULLSCREEN_DIALOG")
+            zoom:EnableMouse(true)
+            local shade = zoom:CreateTexture(nil, "BACKGROUND")
+            shade:SetAllPoints()
+            shade:SetColorTexture(0, 0, 0, 0.85)
+            zoom.picture = zoom:CreateTexture(nil, "ARTWORK")
+            zoom.picture:SetPoint("CENTER")
+            local help = zoom:CreateFontString(nil, "OVERLAY")
+            help:SetFontObject(Skin.fonts.small)
+            help:SetPoint("BOTTOM", 0, 24)
+            help:SetText("Click or press Escape to close.")
+            zoom:SetScript("OnClick", function(self) self:Hide() end)
+            tinsert(UISpecialFrames, "T3WoWPictureZoom")
+        end
+        local room = math.min(UIParent:GetWidth() * 0.92, (UIParent:GetHeight() * 0.88) * (tonumber(im.w) or 1) / math.max(1, tonumber(im.h) or 1))
+        local width, height = fit(im, room, zoom, 2)
+        if not width then return end
+        zoom.picture:SetTexture(path(im))
+        zoom.picture:SetSize(width, height)
+        zoom:Show()
+    end
+end
+
 local newPanel = CreateFrame("Frame", nil, right)
 newPanel:SetPoint("TOPLEFT", 18, -SIZE.header - 12)
 newPanel:SetPoint("BOTTOMRIGHT", -26, 100)
@@ -1349,6 +1437,7 @@ function renderView()
         fs.bubble:Hide()
     end
     Mono.Release()
+    Pictures.Release()
     hideAsk()
     earlier:Hide()
     if selected and selected.new then
@@ -1395,9 +1484,12 @@ function renderView()
     local count = #items
     for i, item in ipairs(items) do
         local fs = messageString(i)
-        placeMessage(fs, item.x, item.r == "u", item.g)
+        local picture = item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
+        if not picture then placeMessage(fs, item.x, item.r == "u", item.g) end
         -- Copying takes the message's text, not its segments: the code with its markdown.
         fs.hit.copyText = item.x
+        -- A picture enlarges instead.
+        fs.hit.picture = picture and item.im or false
         fs.hit:Show()
     end
     if echo and echo.id == selected.id then

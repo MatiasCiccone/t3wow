@@ -80,7 +80,7 @@ pub fn percent_encode(text: &str) -> String {
     out
 }
 
-fn percent_decode(text: &str) -> String {
+pub fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

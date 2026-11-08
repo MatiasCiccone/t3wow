@@ -39,9 +39,18 @@ return table.concat({ t.k, t.ack, t.envs[1].name, tostring(t.envs[2].ok), t.thre
   t.view.items[1].x, #t.view.items, t.events[1].s, t.settledTotal, t["end"], t["with space"], t.ns, t.nt }, "|")`);
   assert.equal(
     back,
-    [inbox.k, inbox.ack, inbox.envs[0].name, "false", inbox.threads[0].t, "true", inbox.view.items[0].x, 3, "completed",
+    [inbox.k, inbox.ack, inbox.envs[0].name, "false", inbox.threads[0].t, "true", inbox.view.items[0].x, 4, "completed",
       inbox.settledTotal, inbox.end, inbox["with space"], inbox.ns, inbox.nt].join("|"),
   );
+});
+
+test("a picture item names its image slot and size, and keeps a text for copying", () => {
+  const { im, x } = JSON.parse(fixture("inbox.json")).view.items[3];
+  const source = fixture("inbox.lua").replace("T3WoW_Inbox =", "local T3WoW_Inbox =");
+  const back = runLua(`${source}
+local item = T3WoW_Inbox.view.items[4]
+return table.concat({ item.im.f, item.im.w, item.im.h, item.x }, "~")`);
+  assert.equal(back, [im.f, im.w, im.h, x].join("~"));
 });
 
 test("a message's segments (prose, code, a table) load in the game intact", () => {

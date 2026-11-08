@@ -526,6 +526,62 @@ return "ok"
 `);
 });
 
+test("a picture draws from its image slot among the messages, and a click enlarges it instead of copying", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "u", x = "chart it" }, { r = "a", x = "[Page: Sales]", im = { f = 7, w = 728, h = 300 } }, { r = "a", x = "Done." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local SLOT = ROOT .. "img\\\\0007.tga"
+local function picture()
+  for _, f in ipairs(frames) do
+    local zoomed = T3WoWPictureZoom and T3WoWPictureZoom.picture
+    if f.kind == "Texture" and f.shown and f.texturePath == SLOT and f.point and f ~= zoomed then return f end
+  end
+end
+local tex = picture()
+assert(tex, "no picture from image slot 7")
+assert(not shownString("Page: Sales"), "its text shows too")
+assert(below(tex, shownString("chart it")), "not below the message before it")
+assert(below(shownString("Done%."), tex), "the next message isn't below it")
+assert(tex.width ~= 0 and math.abs(tex.height / tex.width - 300 / 728) < 0.001, "out of shape")
+-- A click enlarges it; a click closes it again.
+local hit
+for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "picture") then hit = f end end
+assert(hit and hit.picture.f == 7, "the picture can't be clicked")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(T3WoWPictureZoom.shown, "not enlarged")
+assert(T3WoWPictureZoom.picture.texturePath == SLOT, "another picture enlarged")
+for _, f in ipairs(frames) do assert(not (f.kind == "EditBox" and f.shown and f.text == "[Page: Sales]"), "copied instead") end
+T3WoWPictureZoom.scripts.OnClick(T3WoWPictureZoom, "LeftButton")
+assert(not T3WoWPictureZoom.shown, "didn't close")
+-- The same string as text again (another thread, a picture not drawn yet): it copies.
+items = { { r = "u", x = "chart it" }, { r = "a", x = "[Page: Sales] (drawing it for the game…)" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(not picture(), "the picture stayed")
+assert(shownString("drawing it"), "the text doesn't show")
+for _, f in ipairs(frames) do assert(not (f.kind == "Button" and f.shown and rawget(f, "picture")), "still enlarges") end
+return "ok"
+`);
+});
+
+test("the strip tells the companion the game can show pictures only when the image slots were there at startup", () => {
+  const frameWith = (before) =>
+    runGame(
+      `drawn = {}
+local json = ns.Codec.Json
+ns.Codec.Json = function(value) local out = json(value); drawn[#drawn + 1] = out; return out end
+Link.Init()
+Link.Render()
+return tostring(Link.Images()) .. " " .. drawn[#drawn]`,
+      { before },
+    );
+  const on = frameWith("");
+  assert.ok(on.startsWith("true ") && on.includes('"im":1'), on);
+  const off = frameWith(`missingTextures[ROOT .. "img\\\\here.tga"] = true`);
+  assert.ok(off.startsWith("false ") && !off.includes('"im"'), off);
+});
+
 test("clicking a message opens it highlighted in a read-only copy box, without game text codes", () => {
   run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }

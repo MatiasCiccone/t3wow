@@ -4,6 +4,9 @@
 //! that existed when the client started. So replies travel through a pool of
 //! load-on-demand "slot" addons (each loads once per UI session), and "a reply is ready"
 //! travels through pre-made font files: a blank one never loads, a real one does.
+//! Pictures travel the same way, through pre-made blank image files (`img/NNNN.tga`): the
+//! game loads one filled while it runs, as long as it never asked for it while blank, and
+//! keeps what it loaded until it quits, so each holds one picture per game process.
 
 use std::fs;
 use std::io;
@@ -12,6 +15,15 @@ use std::path::{Path, PathBuf};
 pub const SLOT_COUNT: u32 = 200;
 pub const SIGNAL_COUNT: u32 = 4000; // keep in step with addon/T3WoW/Link.lua
 pub const ADDON: &str = "T3WoW";
+/// Image slot files, each one picture per game process.
+pub const IMAGE_COUNT: u32 = 120;
+/// A blank file next to them that the game asks for at login: known (it existed when the
+/// game started) means the image slots are there too.
+pub const IMAGE_SENTINEL: &str = "here.tga";
+
+pub fn image_file(n: u32) -> String {
+    format!("{n:04}.tga")
+}
 
 pub fn slot_name(n: u32) -> String {
     format!("{ADDON}_S{n:03}")
@@ -215,11 +227,17 @@ impl Slots {
                 let _ = fs::remove_file(self.addon_dir.join("ctl").join(old));
             }
         }
+        let img = self.addon_dir.join("img");
         fs::create_dir_all(&sig)?;
         fs::create_dir_all(&probe)?;
+        fs::create_dir_all(&img)?;
         for n in 1..=SIGNAL_COUNT {
             put(sig.join(signal_file(n)), b"")?;
         }
+        for n in 1..=IMAGE_COUNT {
+            put(img.join(image_file(n)), b"")?;
+        }
+        put(img.join(IMAGE_SENTINEL), b"")?;
         let font = self.font.clone().unwrap_or_default();
         put(probe.join("empty.ttf"), b"")?;
         put(probe.join("valid.ttf"), &font)?;
@@ -306,6 +324,12 @@ pub trait SlotWriter: Send {
     fn clear_slots(&mut self);
     /// Makes the probe's flip files real (or blank again); returns the types changed.
     fn flip_probe(&mut self, real: bool) -> Vec<String>;
+    /// Puts a picture (a TGA) in image slot `n`.
+    fn write_image(&mut self, n: u32, tga: &[u8]) -> io::Result<()>;
+    /// Blanks image slot `n`, to give its disk space back.
+    fn blank_image(&mut self, n: u32);
+    /// Whether image slot `n` holds a picture (an empty or missing file holds none).
+    fn has_image(&self, n: u32) -> bool;
     /// The `## Version:` of the addon on disk, if known: the game compares it with the one
     /// it loaded, and says to restart WoW when the one on disk is newer.
     fn addon_version(&self) -> Option<String> {
@@ -361,6 +385,24 @@ impl SlotWriter for Slots {
             if fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) {
                 let _ = write_whole(&file, b"");
             }
+        }
+    }
+
+    fn write_image(&mut self, n: u32, tga: &[u8]) -> io::Result<()> {
+        if !(1..=IMAGE_COUNT).contains(&n) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("no image slot {n}")));
+        }
+        write_whole(&self.addon_dir.join("img").join(image_file(n)), tga)
+    }
+
+    fn has_image(&self, n: u32) -> bool {
+        fs::metadata(self.addon_dir.join("img").join(image_file(n))).is_ok_and(|m| m.len() > 0)
+    }
+
+    fn blank_image(&mut self, n: u32) {
+        let file = self.addon_dir.join("img").join(image_file(n));
+        if fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) {
+            let _ = write_whole(&file, b"");
         }
     }
 
@@ -511,6 +553,30 @@ mod tests {
         assert!(fs::read_to_string(dir.join("T3WoW/T3WoW.toc")).unwrap().contains("## Interface: 16001\r\n"));
         let slot_toc = fs::read_to_string(dir.join(slot_name(SLOT_COUNT)).join(format!("{}.toc", slot_name(SLOT_COUNT)))).unwrap();
         assert!(slot_toc.starts_with("## Interface: 16001\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_slots_start_blank_take_pictures_and_give_their_space_back() {
+        let dir = temp_dir("image-slots");
+        let mut slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        let file = |n: u32| dir.join("T3WoW/img").join(image_file(n));
+        for n in [1, IMAGE_COUNT] {
+            assert_eq!(fs::read(file(n)).unwrap(), b"", "slot {n} starts blank");
+        }
+        assert_eq!(fs::read(dir.join("T3WoW/img").join(IMAGE_SENTINEL)).unwrap(), b"", "the sentinel stays blank");
+        slots.write_image(3, b"tga bytes").unwrap();
+        assert_eq!(fs::read(file(3)).unwrap(), b"tga bytes");
+        assert!(slots.write_image(0, b"x").is_err() && slots.write_image(IMAGE_COUNT + 1, b"x").is_err());
+        // A repair leaves a picture alone (the game may have it loaded); a fresh install blanks it.
+        slots.repair().unwrap();
+        assert_eq!(fs::read(file(3)).unwrap(), b"tga bytes");
+        slots.blank_image(3);
+        assert_eq!(fs::read(file(3)).unwrap(), b"");
+        slots.write_image(4, b"tga bytes").unwrap();
+        slots.install().unwrap();
+        assert_eq!(fs::read(file(4)).unwrap(), b"");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -8,6 +8,9 @@
 --      never watch one file for long: while waiting we move to the next signal file every
 --      SIGNAL_PERIOD seconds, timed from the update that named the starting file. The
 --      companion runs on this PC, shares the clock, and raises the files around ours.
+--      Pictures come the same way: the companion draws them into blank image slot files
+--      (img/NNNN.tga) and names the slot in an update; the game loads one filled while it
+--      runs, as long as it never asked for it while blank (see checkImages).
 local _, ns = ...
 local Codec = ns.Codec
 local Link = {}
@@ -166,6 +169,36 @@ local function renderStrip(cells)
     strip:Show()
 end
 
+-- Whether the image slot files were there when the game started (it only finds files that
+-- existed then): a blank sentinel next to them has a file id if so, none if not. Asking for
+-- the sentinel is safe, since it stays blank; a slot itself is only asked for once an
+-- update names it, filled.
+local IMAGE_SENTINEL = ROOT .. "img\\here.tga"
+local imageCheck
+local function checkImages()
+    if state.images then return end
+    if not imageCheck then
+        local holder = CreateFrame("Frame", nil, UIParent)
+        holder:SetSize(1, 1)
+        holder:SetPoint("BOTTOMRIGHT")
+        holder:SetAlpha(0.01)
+        imageCheck = holder:CreateTexture(nil, "BACKGROUND")
+        imageCheck:SetAllPoints()
+        imageCheck:SetTexture(IMAGE_SENTINEL)
+        imageCheck.holder = holder
+    end
+    local known = imageCheck.GetTextureFilePath and imageCheck:GetTextureFilePath()
+    if known ~= nil and known ~= "" then
+        state.images = true
+        imageCheck.holder:Hide()
+        trace("image slots found: pictures on")
+        -- Tell the companion now, even with nothing to send.
+        state.syncUntil = math.max(state.syncUntil, GetTime() + SYNC_SECONDS)
+        Link.Render()
+    end
+end
+function Link.Images() return state.images == true end
+
 local frameSeq = 0
 function Link.Render()
     if not own then return strip:Hide() end
@@ -176,7 +209,7 @@ function Link.Render()
         state.queueSince = state.queueSince or GetTime()
     end
     local header = { k = own.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
-        p = (not signalling()) and 1 or nil, lid = db.login }
+        p = (not signalling()) and 1 or nil, lid = db.login, im = state.images and 1 or nil }
     -- An empty queue still sends a header-only sync frame.
     local commands = {}
     local payload = (#own.queue == 0) and Codec.Json(header) or nil
@@ -219,7 +252,7 @@ function Link.Fits(command)
     for key, value in pairs(command) do alone[key] = value end
     alone.s = (own and own.seq or 0) + 1
     local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1,
-        lid = db and db.login, q = { alone } }
+        lid = db and db.login, im = state.images and 1 or nil, q = { alone } }
     return #Codec.Json(header) <= Codec.MAX_PAYLOAD
 end
 
@@ -531,6 +564,9 @@ function Link.Init()
     db.trace = state.trace
     state.uiSession = format("%x%s", time(), randomHex(4))
     trace("UI session " .. state.uiSession .. " started")
+    checkImages()
+    -- The file id may come a moment later: look again.
+    if not state.images then C_Timer.After(1, checkImages) end
     Link.Send({ t = "hello", o = false })
 end
 

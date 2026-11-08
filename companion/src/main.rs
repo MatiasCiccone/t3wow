@@ -16,6 +16,7 @@ mod config;
 mod dialog;
 mod log;
 mod lua;
+mod render;
 mod slots;
 mod t3;
 #[cfg(windows)]

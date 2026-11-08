@@ -22,6 +22,19 @@ struct FakeT3 {
     messages: Mutex<HashMap<String, Vec<Value>>>,
     /// What the settled list holds, newest first.
     settled: Mutex<Vec<Value>>,
+    /// Each thread's activity (its messages when not set), and the full text of items read
+    /// by id, a piece at a time.
+    activity: Mutex<HashMap<String, Vec<Value>>>,
+    item_texts: Mutex<HashMap<String, String>>,
+}
+
+/// An item's text cut to `max` chars from `offset`, as T3 cuts it.
+fn cut_text(item: &mut Value, max: usize, offset: usize) {
+    let text: Vec<char> = str_of(&item["text"]).chars().collect();
+    let end = (offset + max).min(text.len());
+    item["text"] = json!(text[offset.min(end)..end].iter().collect::<String>());
+    item["textTruncated"] = json!(end < text.len());
+    item["nextTextOffset"] = if end < text.len() { json!(end) } else { Value::Null };
 }
 
 impl FakeT3 {
@@ -42,6 +55,8 @@ impl FakeT3 {
             unlisted: Mutex::new(Vec::new()),
             messages: Mutex::new(HashMap::new()),
             settled: Mutex::new(Vec::new()),
+            activity: Mutex::new(HashMap::new()),
+            item_texts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -119,10 +134,28 @@ impl T3 for FakeT3 {
                 let next = (cursor + page.len() < total).then_some(cursor + page.len());
                 json!({ "threads": page, "nextCursor": next, "total": total })
             }
+            "t3_thread_read" if args["itemId"].is_string() => {
+                let id = str_of(&args["itemId"]).to_string();
+                let text = self.item_texts.lock().unwrap().get(&id).cloned().unwrap_or_default();
+                let mut item = json!({ "position": 1, "itemId": id, "type": "dynamic_tool", "status": "completed", "text": text });
+                cut_text(&mut item, args["maxCharsPerItem"].as_u64().unwrap_or(50_000) as usize, args["textOffset"].as_u64().unwrap_or(0) as usize);
+                json!({ "thread": self.thread(&args["threadId"]), "items": [item], "hasMore": false })
+            }
             "t3_thread_read" if args["view"].is_string() => {
-                // Messages after afterPosition, a page at a time.
+                // Messages (or activity) after afterPosition, a page at a time.
                 let id = str_of(&args["threadId"]).to_string();
-                let all = self.messages.lock().unwrap().get(&id).cloned().unwrap_or_else(|| {
+                let activity = if args["view"] == "activity" { self.activity.lock().unwrap().get(&id).cloned() } else { None };
+                let max = args["maxCharsPerItem"].as_u64().unwrap_or(50_000) as usize;
+                let cut = |items: Vec<Value>| -> Vec<Value> {
+                    items
+                        .into_iter()
+                        .map(|mut it| {
+                            cut_text(&mut it, max, 0);
+                            it
+                        })
+                        .collect()
+                };
+                let all = activity.map(cut).or_else(|| self.messages.lock().unwrap().get(&id).cloned()).unwrap_or_else(|| {
                     vec![
                         json!({ "position": 0, "type": "user_message", "text": "hi", "senderThreadId": self.thread(&args["threadId"])["sender"] }),
                         json!({ "position": 1, "type": "assistant_message", "text": "**done**" }),
@@ -170,6 +203,9 @@ struct Written {
     failing: Option<String>,
     /// The addon version "on disk".
     addon_version: Option<String>,
+    /// What each image slot holds, and the slots blanked.
+    images: BTreeMap<u32, Vec<u8>>,
+    blanked: Vec<u32>,
 }
 
 struct FakeSlots(Arc<Mutex<Written>>);
@@ -199,6 +235,22 @@ impl SlotWriter for FakeSlots {
     }
     fn flip_probe(&mut self, _real: bool) -> Vec<String> {
         Vec::new()
+    }
+    fn write_image(&mut self, n: u32, tga: &[u8]) -> std::io::Result<()> {
+        let mut written = self.0.lock().unwrap();
+        if let Some(error) = &written.failing {
+            return Err(std::io::Error::other(error.clone()));
+        }
+        written.images.insert(n, tga.to_vec());
+        Ok(())
+    }
+    fn blank_image(&mut self, n: u32) {
+        let mut written = self.0.lock().unwrap();
+        written.images.remove(&n);
+        written.blanked.push(n);
+    }
+    fn has_image(&self, n: u32) -> bool {
+        self.0.lock().unwrap().images.contains_key(&n)
     }
     fn addon_version(&self) -> Option<String> {
         self.0.lock().unwrap().addon_version.clone()
@@ -1525,4 +1577,222 @@ fn a_command_drawn_under_the_previous_sign_ins_stamp_comes_back_refused() {
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 6, "t": "send", "id": "t1", "m": "old addon" }] }));
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 2);
+}
+
+/// Draws nothing: records what it was asked, and answers a 7x3 picture for a page (a page
+/// whose HTML says BROKEN fails) and a 5x2 one for a file.
+#[derive(Clone, Default)]
+struct FakePainter(Arc<Mutex<Vec<String>>>);
+
+impl crate::render::Painter for FakePainter {
+    fn page(&self, html: &str, height: u32) -> Result<crate::render::Bitmap, String> {
+        self.0.lock().unwrap().push(format!("page {height} {html}"));
+        if html.contains("BROKEN") {
+            return Err("the browser drew nothing".into());
+        }
+        Ok(crate::render::Bitmap { width: 7, height: 3, rgba: vec![9; 7 * 3 * 4] })
+    }
+    fn picture(&self, path: &std::path::Path) -> Result<crate::render::Bitmap, String> {
+        self.0.lock().unwrap().push(format!("picture {}", path.display()));
+        Ok(crate::render::Bitmap { width: 5, height: 2, rgba: vec![9; 5 * 2 * 4] })
+    }
+}
+
+impl FakePainter {
+    fn calls(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// An html_render call as T3's activity shows it.
+fn page_call(title: &str, height: u64, html: &str) -> String {
+    serde_json::to_string_pretty(&json!({
+        "toolName": "mcp__t3-code__html_render",
+        "input": { "title": title, "height": height, "html": html },
+        "output": { "message": "Shown to the reader above your reply." },
+    }))
+    .unwrap()
+}
+
+/// A rig whose game can show pictures, with thread t1 open: a user message (0), a page the
+/// agent showed (1) and the agent's reply (2).
+fn picture_rig(start_ms: i64, html: &str) -> (Rig, FakePainter) {
+    let mut rig = Rig::new(start_ms);
+    let painter = FakePainter::default();
+    rig.bridge.set_painter(Some(Box::new(painter.clone())));
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["chart it", "Here it is."]));
+    let page = json!({ "position": 1, "itemId": "item-page", "type": "dynamic_tool", "status": "completed", "text": page_call("Sales", 880, html) });
+    let activity = vec![
+        json!({ "position": 0, "itemId": "m0", "type": "user_message", "status": "completed", "text": "chart it" }),
+        page,
+        json!({ "position": 2, "itemId": "m2", "type": "assistant_message", "status": "completed", "text": "Here it is." }),
+    ];
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    rig.t3.item_texts.lock().unwrap().insert("item-page".into(), page_call("Sales", 880, html));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "im": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    (rig, painter)
+}
+
+fn view_items(rig: &Rig) -> Vec<Value> {
+    rig.bridge.snapshot()["view"]["items"].as_array().cloned().unwrap_or_default()
+}
+
+#[test]
+fn a_page_an_agent_showed_reaches_the_game_as_a_picture_where_t3_shows_it() {
+    let (mut rig, painter) = picture_rig(30_000_000, "<p>chart</p>");
+    rig.bridge.tick();
+    assert_eq!(painter.calls(), vec!["page 880 <p>chart</p>".to_string()]);
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert_eq!(items[0]["x"], "chart it");
+    assert_eq!(items[1], json!({ "r": "a", "x": "[Page: Sales]", "im": { "f": 1, "w": 7, "h": 3 } }));
+    assert_eq!(items[2]["x"], "Here it is.");
+    let tga = rig.written.lock().unwrap().images.get(&1).cloned().unwrap();
+    assert_eq!(tga.len(), 18 + 7 * 3 * 4, "a 32-bit TGA");
+    assert_eq!(rig.bridge.link.images_shown, vec![1], "named to the game: kept until WoW quits");
+    // It went out in the update.
+    rig.advance(2_000);
+    rig.bridge.tick();
+    let sent = rig.written.lock().unwrap().slots.values().any(|lua| lua.contains("im={f=1,w=7,h=3}"));
+    assert!(sent, "the update names the slot");
+
+    // Nothing new: the page isn't drawn or read again, and the activity is read on from
+    // where the last read stopped.
+    let reads_before = rig.t3.calls_to("t3_thread_read").len();
+    rig.t3.set("running", "2026-11-06T10:00:05Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(painter.calls().len(), 1);
+    let reads: Vec<Value> = rig.t3.calls_to("t3_thread_read").into_iter().skip(reads_before).collect();
+    assert!(reads.iter().all(|a| !a["itemId"].is_string()), "{reads:?}");
+    let scan = reads.iter().find(|a| a["view"] == "activity").unwrap();
+    assert_eq!(scan["afterPosition"], 2);
+    assert_eq!(view_items(&rig)[1]["im"]["f"], 1);
+}
+
+#[test]
+fn without_an_addon_that_shows_pictures_nothing_more_is_read_or_drawn() {
+    let mut rig = Rig::new(31_000_000);
+    let painter = FakePainter::default();
+    rig.bridge.set_painter(Some(Box::new(painter.clone())));
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["chart it", "Here it is."]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_read").iter().all(|a| a["view"] != "activity"));
+    assert!(painter.calls().is_empty());
+    assert_eq!(view_items(&rig).len(), 2);
+}
+
+#[test]
+fn a_long_page_is_read_a_piece_at_a_time() {
+    let html = format!("<p>{}</p>", "x".repeat(120_000));
+    let (mut rig, painter) = picture_rig(32_000_000, &html);
+    rig.bridge.tick();
+    let offsets: Vec<Value> = rig.t3.calls_to("t3_thread_read").iter().filter(|a| a["itemId"] == "item-page").map(|a| a["textOffset"].clone()).collect();
+    assert_eq!(offsets, vec![Value::Null, json!(50_000), json!(100_000)]);
+    assert_eq!(painter.calls(), vec![format!("page 880 {html}")]);
+    assert_eq!(view_items(&rig)[1]["im"]["f"], 1);
+}
+
+#[test]
+fn a_page_that_cant_be_drawn_says_why_and_is_tried_again_later() {
+    let (mut rig, painter) = picture_rig(33_000_000, "<p>BROKEN</p>");
+    rig.bridge.tick();
+    let item = view_items(&rig)[1].clone();
+    assert!(item.get("im").is_none());
+    assert_eq!(item["x"], "|cff808080[Page: Sales] (couldn't show it in the game: the browser drew nothing)|r");
+    rig.t3.set("running", "2026-11-06T10:00:05Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(painter.calls().len(), 1, "not tried again at once");
+    rig.t3.set("running", "2026-11-06T10:10:05Z");
+    rig.advance(PICTURE_RETRY_MS);
+    rig.bridge.tick();
+    assert_eq!(painter.calls().len(), 2, "tried again later");
+}
+
+#[test]
+fn image_slots_the_game_has_seen_keep_their_picture_until_wow_restarts() {
+    let (mut rig, painter) = picture_rig(34_000_000, "<p>chart</p>");
+    // Every slot holds a picture this game process was told about.
+    for n in 1..=IMAGE_COUNT {
+        rig.bridge.link.images.insert(n, ImageSlot { key: format!("old{n}"), w: 1, h: 1, used: n as i64 });
+        rig.bridge.link.images_shown.push(n);
+    }
+    rig.bridge.tick();
+    assert!(rig.written.lock().unwrap().images.is_empty(), "none written over");
+    assert!(painter.calls().len() == 1);
+    assert_eq!(view_items(&rig)[1]["x"], format!("|cff808080[Page: Sales] (couldn't show it in the game: {IMAGES_OUT})|r"));
+
+    // WoW restarts: every slot can be written again, and the oldest give their space back.
+    rig.bridge.on_capture(CaptureMessage::Wow(Some("456@2".into())));
+    assert!(rig.bridge.link.images_shown.is_empty());
+    assert_eq!(rig.written.lock().unwrap().blanked.len(), IMAGE_COUNT as usize - IMAGES_KEPT);
+    assert_eq!(rig.bridge.link.images.len(), IMAGES_KEPT);
+    rig.bridge.picture_errors.clear();
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "im": 1, "q": [{ "s": 3, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(painter.calls().len(), 2);
+    let slot = view_items(&rig)[1]["im"]["f"].as_u64().unwrap() as u32;
+    assert!(slot <= IMAGE_COUNT - IMAGES_KEPT as u32, "an emptied slot: {slot}");
+}
+
+#[test]
+fn an_image_a_message_embeds_from_a_file_follows_that_message() {
+    let dir = std::env::temp_dir().join(format!("t3wow-embed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("chart one.png");
+    std::fs::write(&file, b"png bytes").unwrap();
+    let mut rig = Rig::new(35_000_000);
+    let painter = FakePainter::default();
+    rig.bridge.set_painter(Some(Box::new(painter.clone())));
+    let text = format!("Saved it:\n\n![the chart]({})\n\n![gone](C:\\nowhere\\x.png)", file.display());
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["chart it", &text, "thanks"]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "im": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(painter.calls(), vec![format!("picture {}", file.display())]);
+    let items = view_items(&rig);
+    let texts: Vec<String> = items.iter().map(|i| i["x"].as_str().unwrap_or("").to_string()).collect();
+    assert_eq!(texts.len(), 4, "{texts:?}");
+    assert!(texts[1].starts_with("Saved it:"));
+    assert_eq!(items[2], json!({ "r": "a", "x": "[Image: the chart]", "im": { "f": 1, "w": 5, "h": 2 } }));
+    assert_eq!(texts[3], "thanks");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pages_and_embedded_files_are_found_in_t3s_text() {
+    assert!(is_page_item(&page_call("x", 100, "<p>")));
+    assert!(is_page_item(r#"{"toolName":"t3-code.html_render","input":{"#));
+    assert!(!is_page_item(r#"{"toolName":"mcp__t3-code__html_preview","input":{"#));
+    assert!(!is_page_item("I used html_render"));
+    assert_eq!(page_title(&page_call("Q3 \"sales\"", 100, "<p>")), "Q3 \"sales\"");
+    assert_eq!(page_title(r#"{"toolName":"html_render","input":{"height":3"#), "");
+    let found = embedded_files(r#"a ![one](C:\a b\one.png) b ![](file:///D:/two%20x.jpg "t") ![web](https://x/y.png) ![rel](pics/z.png) `![code](C:/c.png)`"#);
+    assert_eq!(
+        found,
+        vec![
+            ("one".to_string(), PathBuf::from(r"C:\a b\one.png")),
+            (String::new(), PathBuf::from("D:/two x.jpg")),
+            ("code".to_string(), PathBuf::from("C:/c.png")),
+        ]
+    );
+}
+
+#[test]
+fn a_picture_whose_file_is_gone_is_forgotten_at_start() {
+    let dir = std::env::temp_dir().join(format!("t3wow-state-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("state.json");
+    let mut link = LinkState::default();
+    for n in [1, 2] {
+        link.images.insert(n, ImageSlot { key: format!("page{n}"), w: 7, h: 3, used: 1 });
+    }
+    std::fs::write(&state, serde_json::to_string(&link).unwrap()).unwrap();
+    // Only slot 2's file still holds its picture (a reinstall blanked the rest).
+    let written = Arc::new(Mutex::new(Written::default()));
+    written.lock().unwrap().images.insert(2, b"tga".to_vec());
+    let bridge = Bridge::new(FakeT3::new(), Box::new(FakeSlots(written)), Some(state), Box::new(|_| {}), Box::new(|| 0));
+    assert_eq!(bridge.link.images.keys().copied().collect::<Vec<_>>(), vec![2]);
+    let _ = std::fs::remove_dir_all(&dir);
 }
