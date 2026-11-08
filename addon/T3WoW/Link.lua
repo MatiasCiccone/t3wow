@@ -341,13 +341,19 @@ local function receive(inbox)
         end
     end
     -- Each update names where the next wait starts (ns) and when (nt). Slots are written a
-    -- few ahead, so an older update can arrive after a newer one: only move forward.
+    -- few ahead, so an older update can arrive after a newer one: only move forward. Only
+    -- this UI session's (or an older companion's, which sends no u): one left in a slot by
+    -- an earlier session can come from an earlier game process, whose companion counted
+    -- signal files far past where it counts now. Until then, slots load on the timer.
     local adopted = type(inbox.ns) == "number" and type(inbox.nt) == "number" and inbox.nt > state.adoptedAt
+        and (inbox.u == nil or inbox.u == state.uiSession)
     if adopted then
         state.signalBase, state.signalTime, state.adoptedAt = inbox.ns, inbox.nt, inbox.nt
     end
     trace(format("  update from %s: wait %s @%s (%s), %d event(s)", date("%H:%M:%S", inbox.now or 0), tostring(inbox.ns),
-        inbox.nt and date("%H:%M:%S", inbox.nt) or "?", adopted and "taken" or "older, ignored", #(inbox.events or {})))
+        inbox.nt and date("%H:%M:%S", inbox.nt) or "?",
+        adopted and "taken" or (inbox.u ~= nil and inbox.u ~= state.uiSession) and "another UI session's, ignored"
+            or "older, ignored", #(inbox.events or {})))
     -- The companion ran out of signal files for this game process: load slots on a timer.
     if type(inbox.sigoff) == "string" and inbox.u == state.uiSession and state.signals ~= "off" then
         state.signals, state.signalCheck = "off", inbox.sigoff
