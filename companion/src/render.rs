@@ -139,8 +139,8 @@ pub fn decode_png(bytes: &[u8]) -> Result<Bitmap, String> {
     let pixels = &buffer[..info.buffer_size()];
     let rgba = match info.color_type {
         png::ColorType::Rgba => pixels.to_vec(),
-        png::ColorType::Rgb => pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => pixels.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgb => pixels.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => pixels.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return Err("unexpected indexed PNG".into()),
     };
@@ -158,7 +158,7 @@ pub fn tga(bitmap: &Bitmap) -> Vec<u8> {
     out.extend_from_slice(&w.to_le_bytes());
     out.extend_from_slice(&h.to_le_bytes());
     out.extend_from_slice(&[32, 0x28]);
-    out.extend(bitmap.rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]));
+    out.extend(bitmap.rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0], p[3]]));
     out
 }
 
