@@ -52,3 +52,27 @@ assert(trace:find("retrying"), trace)
 return "ok"
 `);
 });
+
+test("a slot left from another UI session doesn't set the wait; the next update for this session does", () => {
+  runGame(`
+real[PROBE_VALID] = true
+Link.Init()
+-- Left over from a game session hours ago: that companion process had counted far ahead.
+inboxes.T3WoW_S001 = { k = "c1", u = "earlier", ack = 1, ns = 191, nt = time() - 3 * 3600 }
+tick(6)
+assert(loads[1] == "T3WoW_S001", tostring(loads[1]))
+assert(Link.Status().signals == "on", "signals " .. tostring(Link.Status().signals))
+assert(Link.Status().nextSignal == nil, "watching " .. tostring(Link.Status().nextSignal))
+assert(table.concat(Link.Trace(), " | "):find("another UI session.s, ignored"), table.concat(Link.Trace(), " | "))
+
+-- Still on the timer, so the companion's first update for this session comes in and sets it.
+local slot = string.format("T3WoW_S%03d", Link.Status().nextSlot)
+inboxes[slot] = { k = "c1", u = Link.Session(), ack = 0, ns = 7, nt = time() }
+local before, count = clock, #loads
+while #loads == count and clock - before < 120 do tick(1) end
+assert(loads[#loads] == slot, tostring(loads[#loads]) .. " not " .. slot)
+local watched = Link.Status().nextSignal
+assert(watched ~= nil and watched >= 7 and watched < 12, "watching " .. tostring(watched))
+return "ok"
+`);
+});

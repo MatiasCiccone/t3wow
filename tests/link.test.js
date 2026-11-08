@@ -66,10 +66,12 @@ Link.Init()
 inboxes.T3WoW_S001 = { k = "c1", u = "an earlier session", ack = 1, ns = 50, nt = time(), sigoff = "out" }
 tick(6)
 assert(Link.Status().signals == "on", "an earlier session's sigoff counts: " .. Link.Status().signals)
-inboxes.T3WoW_S002 = { k = "c1", u = Link.state.uiSession, ack = 1, ns = 52, nt = time(), sigoff = "out" }
-for n = 49, 51 do real[sigPath(n)] = true end
-tick(5)
-assert(loads[2] == "T3WoW_S002", tostring(loads[2]))
+-- Nor is its wait: this session's update comes on the timer.
+local slot = string.format("T3WoW_S%03d", Link.Status().nextSlot)
+inboxes[slot] = { k = "c1", u = Link.state.uiSession, ack = 1, ns = 52, nt = time(), sigoff = "out" }
+local count = #loads
+tick(30)
+assert(#loads > count and loads[count + 1] == slot, tostring(loads[count + 1]) .. " not " .. slot)
 assert(Link.Status().signals == "off", Link.Status().signals)
 return "ok"
 `);
@@ -129,7 +131,7 @@ test("a test font that never loads turns signals off after a dozen tries", () =>
   runGame(`
 Link.Init()
 tick(120)
-assert(Link.Status().signals == "off", Link.Status().signals)
+assert(Link.Status().signals == "off", Link.Status().signals .. " | " .. table.concat(Link.Trace(), " | "))
 assert(Link.Status().signalCheck:find("never loaded"), Link.Status().signalCheck)
 return "ok"
 `);
@@ -144,7 +146,7 @@ tick(6)
 assert(Link.Status().signals == "on", Link.Status().signals)
 Link.state.fontStrings = 19999
 tick(5)
-assert(Link.Status().signals == "off", Link.Status().signals)
+assert(Link.Status().signals == "off", Link.Status().signals .. " | " .. table.concat(Link.Trace(), " | "))
 assert(Link.Status().signalCheck:find("font checks"), Link.Status().signalCheck)
 return "ok"
 `);
