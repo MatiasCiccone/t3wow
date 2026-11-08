@@ -296,6 +296,9 @@ pub struct Bridge {
     /// Per machine: its sidebar threads, its projects and how many threads it has settled.
     threads: BTreeMap<String, Vec<Value>>,
     projects: BTreeMap<String, Vec<Value>>,
+    /// Per machine: whether its new threads start in a new worktree by default (T3's
+    /// "New thread mode" preference), for projects that don't set their own.
+    new_worktrees: BTreeMap<String, bool>,
     settled_totals: BTreeMap<String, u64>,
     /// Per machine: which of its three lists have more threads than were listed.
     list_more: BTreeMap<String, [bool; LIST_COUNT]>,
@@ -667,6 +670,7 @@ impl Bridge {
             local_env_id: None,
             threads: BTreeMap::new(),
             projects: BTreeMap::new(),
+            new_worktrees: BTreeMap::new(),
             settled_totals: BTreeMap::new(),
             list_more: BTreeMap::new(),
             list_limits: LIST_LIMITS,
@@ -794,6 +798,7 @@ impl Bridge {
         self.pending_ask = None;
         self.threads.clear();
         self.projects.clear();
+        self.new_worktrees.clear();
         self.settled_totals.clear();
         self.list_more.clear();
         self.last_status.clear();
@@ -1022,6 +1027,11 @@ impl Bridge {
                     match command["p"].as_str() {
                         Some(project) => args["projectId"] = json!(project),
                         None => args["scratch"] = json!(true),
+                    }
+                    // A new worktree branches from what the project's checkout has checked
+                    // out; without one, the thread runs in that checkout (T3's default).
+                    if command["p"].is_string() && command["w"] == true {
+                        args["workspaceStrategy"] = json!({ "type": "worktree", "baseRef": "HEAD" });
                     }
                     let launched = self.client.call("t3_thread_launch", with_args(args, &env_arg))?;
                     let new_id = launched["threadId"].as_str().or(launched["thread"]["threadId"].as_str()).map(str::to_string);
@@ -1524,7 +1534,11 @@ impl Bridge {
     /// machine), then the machines as T3 links them now; each one's projects come next.
     fn read_machines(&mut self, links: Value) -> Result<(), T3Error> {
         let name = match self.client.call("t3_environment_read", json!({})) {
-            Ok(read) => read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string),
+            Ok(read) => {
+                let local = self.local_env_id.clone().unwrap_or_default();
+                self.new_worktrees.insert(local, read["preferences"]["defaultThreadEnvMode"] == "worktree");
+                read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string)
+            }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
             Err(T3Error::Other(_)) => None,
         };
@@ -1552,6 +1566,7 @@ impl Bridge {
         }
         self.threads.retain(|env, _| linked(env));
         self.projects.retain(|env, _| linked(env));
+        self.new_worktrees.retain(|env, _| linked(env));
         self.settled_totals.retain(|env, _| linked(env));
         self.list_more.retain(|env, _| linked(env));
         self.listed_envs.retain(|env| linked(env));
@@ -1578,6 +1593,16 @@ impl Bridge {
                 self.projects.insert(env.to_string(), page["projects"].as_array().cloned().unwrap_or_default());
             }
             Err(error) => self.log(&format!("projects ({}): {error}", if env.is_empty() { "local" } else { env })),
+        }
+        // A linked machine's preference, read with its projects (the server's own comes with its name).
+        let env_arg = self.env_arg(env);
+        if !env_arg.is_empty() && !self.out_of_time() {
+            match self.client.call("t3_environment_read", Value::Object(env_arg)) {
+                Ok(read) => {
+                    self.new_worktrees.insert(env.to_string(), read["preferences"]["defaultThreadEnvMode"] == "worktree");
+                }
+                Err(error) => self.log(&format!("preferences ({env}): {error}")),
+            }
         }
     }
 
@@ -2232,8 +2257,18 @@ impl Bridge {
         threads.sort_by_key(|t| std::cmp::Reverse(t["at"].as_i64().unwrap_or(0)));
         let mut projects = Vec::new();
         for (env, list) in self.projects.iter().filter(|(env, _)| env_index(env) > 0) {
+            let machine_worktree = self.new_worktrees.get(env).copied().unwrap_or(false);
             for p in list.iter().filter(|p| !p["archivedAt"].is_string() && !p["deletedAt"].is_string()) {
-                projects.push(json!({ "e": env_index(env), "id": str_of(&p["id"]), "t": plain(str_of(&p["title"]), 40) }));
+                let mut entry = json!({ "e": env_index(env), "id": str_of(&p["id"]), "t": plain(str_of(&p["title"]), 40) });
+                // Where New Thread starts it by default: the project's own mode, else the machine's.
+                let worktree = match p["defaultThreadEnvMode"].as_str() {
+                    Some(mode) => mode == "worktree",
+                    None => machine_worktree,
+                };
+                if worktree {
+                    entry["w"] = json!(true);
+                }
+                projects.push(entry);
             }
         }
         let view = self.view_data.as_ref().map(|data| {

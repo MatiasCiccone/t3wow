@@ -31,7 +31,8 @@ local STATUS = {
 }
 
 local inbox
--- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil }.
+-- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil,
+-- worktree = true to start it in a new worktree }.
 -- Machines and projects are kept by id: their places in the lists change between updates.
 local selected
 local collapsed = { settled = true, snoozed = true }
@@ -1165,11 +1166,38 @@ local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
     isSelected = function(id) return composing() and selected.project == id end,
     pick = function(id)
         if not composing() then return end
-        selected.project = id
+        -- A project picked again keeps the workspace chosen for it; another starts at its default.
+        if selected.project ~= id then
+            selected.project, selected.worktree = id, false
+            for _, p in ipairs(UI.ProjectsFor(envIndexById(selected.env))) do
+                if p.id == id then selected.worktree = p.w == true end
+            end
+        end
         UI.Refresh()
     end,
 })
 projectMenu:SetPoint("LEFT", projectLabel, "LEFT", 70, 0)
+-- Where a project's thread runs, as T3 asks: a new worktree (from the checkout's current
+-- branch) or the project's checkout itself. A scratch thread has neither, so it's hidden.
+local workspaceLabel = newPanel:CreateFontString(nil, "OVERLAY")
+workspaceLabel:SetFontObject(Skin.fonts.strong)
+workspaceLabel:SetPoint("TOPLEFT", projectLabel, "BOTTOMLEFT", 0, -22)
+workspaceLabel:SetText("Workspace")
+local WORKSPACE_NAME = { worktree = "New worktree", checkout = "Current checkout" }
+local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 240, {
+    entries = function()
+        return { { text = WORKSPACE_NAME.checkout, value = "checkout" }, { text = WORKSPACE_NAME.worktree, value = "worktree" } }
+    end,
+    isSelected = function(mode)
+        return composing() and (selected.worktree and "worktree" or "checkout") == mode
+    end,
+    pick = function(mode)
+        if not composing() then return end
+        selected.worktree = mode == "worktree"
+        UI.Refresh()
+    end,
+})
+workspaceMenu:SetPoint("LEFT", workspaceLabel, "LEFT", 70, 0)
 
 -- The New Thread composer's project, if it is still listed.
 local function selectedProject()
@@ -1461,6 +1489,9 @@ function renderView()
         envMenu:SetLabel(e and e.name or (noMachines and "|cffff4040none linked|r" or "|cffff4040no longer linked: pick another|r"))
         projectMenu:SetLabel(project and project.t
             or (selected.project and "|cffff4040gone: pick another|r" or "No project (scratch)"))
+        workspaceLabel:SetShown(selected.project ~= nil)
+        workspaceMenu:SetShown(selected.project ~= nil)
+        workspaceMenu:SetLabel(WORKSPACE_NAME[selected.worktree and "worktree" or "checkout"])
         return
     end
     newPanel:Hide()
@@ -1659,7 +1690,8 @@ local function sendCurrent()
         UI.Notice("That project is gone: pick another with Project.")
         return
     end
-    local command = selected.new and { t = "new", e = selected.env, p = selected.project, m = text }
+    local command = selected.new
+        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = text }
         or { t = "send", e = selected.env, id = selected.id, m = text }
     if not ns.Link.Fits(command) then
         UI.Notice("That message is too long to send from the game: shorten it.")
