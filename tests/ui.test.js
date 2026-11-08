@@ -593,6 +593,74 @@ return "ok"
   }
 });
 
+test("a row's pull request is colored by its state, and only the number is", () => {
+  run(`
+local function rowWith(ps)
+  inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Linked", s = "completed", set = false, at = time(), p = "", pr = "#46 +1", ps = ps } } })
+end
+rowWith("merged")
+assert(showing("^|cffa371f7#46|r %+1$"), "merged isn't purple")
+rowWith("open")
+assert(showing("^|cff40c040#46|r %+1$"), "open isn't green")
+rowWith("closed")
+assert(showing("^|cffff4040#46|r %+1$"), "closed isn't red")
+-- A state this version doesn't know, or an older companion that sends none.
+rowWith("something-new")
+assert(showing("^#46 %+1$"), "an unknown state was colored")
+rowWith(nil)
+assert(showing("^#46 %+1$"), "no state was colored")
+return "ok"
+`);
+});
+
+test("the thread panel's header lists every pull request, and clicking one asks the companion to open it", () => {
+  run(`
+local function links()
+  local found = {}
+  for _, f in ipairs(frames) do
+    -- A row has a .pr too, its font string; a header link's is the pull request.
+    local pr = rawget(f, "pr")
+    if f.kind == "Button" and f.shown and pr and rawget(pr, "n") then found[#found + 1] = f end
+  end
+  return found
+end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "", pr = "#46 +1", ps = "open" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+assert(#links() == 0, "links before the read")
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", br = "feature/show-branch", items = { { r = "a", x = "Hi" } }, prs = {
+  { n = "#41", s = "merged", u = "https://github.com/o/r/pull/41" },
+  { n = "#46", s = "open", u = "https://github.com/o/r/pull/46" },
+  { n = "#47", s = "open" },
+} }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(#links() == 3, "not every pull request: " .. #links())
+assert(showing("^|cffa371f7#41|r$"), "#41 isn't shown merged")
+assert(showing("^|cff40c040#46|r$"), "#46 isn't shown open")
+assert(showing("%· feature/show%-branch$"), "the branch went")
+local function linkTo(number)
+  for _, f in ipairs(links()) do if f.pr.n == number then return f end end
+end
+linkTo("#46").scripts.OnClick(linkTo("#46"), "LeftButton")
+assert(sent().t == "pr" and sent().id == "t1" and sent().u == "https://github.com/o/r/pull/46", "didn't ask to open it")
+assert(linkTo("#47").enabled == false, "one with no web page can be clicked")
+-- The text beside them is anchored to these, so these can't be anchored to it.
+local last = linkTo("#47").point
+assert(last[1] == "TOPRIGHT" and last[2].text == "Thread" and last[3] == "BOTTOMRIGHT", "not level under the title")
+assert(linkTo("#46").point[2] == linkTo("#47"), "not chained from the right")
+
+-- Merged since: the fewer that are left go, and their text with them.
+view.prs = { { n = "#50", s = "closed", u = "https://github.com/o/r/pull/50" } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(#links() == 1 and showing("^|cffff4040#50|r$"), "the header didn't follow")
+assert(not showing("#41") and not showing("#47"), "a stale pull request stayed")
+view.prs = nil
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(#links() == 0 and not showing("#50"), "a thread with none kept the last one's")
+return "ok"
+`);
+});
+
 test("Search narrows the list to threads matching every word, opens groups on their matches, and Escape clears it", () => {
   run(`
 local function count(label)

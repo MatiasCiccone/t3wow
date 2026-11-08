@@ -32,6 +32,13 @@ local STATUS = {
     waiting = { "Needs you", "ff8000" }, approval = { "Approve in T3", "ff8000" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
     idle = { "Idle", "a0a0a0" }, rolled_back = { "Rolled back", "a0a0a0" }, watching = { "Waiting", "ffd100" },
 }
+-- A linked pull request's state, in the colors GitHub gives them. Another state keeps the
+-- text's own color.
+local PullRequests = { STATE = { open = { "Open", "40c040" }, merged = { "Merged", "a371f7" }, closed = { "Closed", "ff4040" } } }
+function PullRequests.Colored(number, state)
+    local s = PullRequests.STATE[state]
+    return s and format("|cff%s%s|r", s[2], number) or number
+end
 
 local inbox
 -- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil,
@@ -612,7 +619,8 @@ local function renderList()
                 local r = row(rowIndex)
                 r.thread = t
                 layoutRow(r, compact, t.pr ~= nil)
-                r.pr:SetText(t.pr or "")
+                local prNumber, prMore = (t.pr or ""):match("^(%S+)(.*)$")
+                r.pr:SetText(prNumber and (PullRequests.Colored(prNumber, t.ps) .. prMore) or "")
                 r.title:SetText(t.t ~= "" and t.t or "Untitled")
                 local e = env(t.e)
                 r.sub:SetText(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
@@ -714,8 +722,66 @@ do
     headerLine:SetPoint("TOPRIGHT", 0, -SIZE.header)
 end
 
--- What the header says under the title: a status (as a pill) and the rest, or just text.
-local function setViewMeta(status, text)
+-- The open thread's pull requests, at the right of the line under the title. Each opens in
+-- the browser: the game can't, so the companion does.
+do
+    local links = {}
+    local function linkAt(index)
+        local link = links[index]
+        if not link then
+            link = CreateFrame("Button", nil, right)
+            link:SetHeight(16)
+            link.label = link:CreateFontString(nil, "OVERLAY")
+            link.label:SetFontObject(Skin.fonts.small)
+            link.label:SetPoint("CENTER")
+            link:SetScript("OnClick", function(self)
+                ns.Link.Send({ t = "pr", e = selected.env, id = selected.id, u = self.pr.u })
+                UI.Notice("Opening " .. self.pr.n .. " in your browser…")
+            end)
+            link:SetScript("OnEnter", function(self)
+                local state = PullRequests.STATE[self.pr.s]
+                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+                GameTooltip:AddLine(state and (self.pr.n .. " · " .. state[1]) or self.pr.n, 1, 1, 1)
+                if self.pr.u then GameTooltip:AddLine("Click to open in your browser", 0.7, 0.7, 0.7) end
+                GameTooltip:Show()
+            end)
+            link:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            links[index] = link
+        end
+        return link
+    end
+
+    -- Laid out from the right edge, level with the status pill, so what's before them is
+    -- what gets cut short. Returns the leftmost, or nil when there are none. Off the title,
+    -- not the text beside them: that text is anchored to these, and the game refuses a loop.
+    function PullRequests.Place(prs)
+        local leftmost
+        for i = #prs, 1, -1 do
+            local link = linkAt(i)
+            link.pr = prs[i]
+            link.label:SetText(PullRequests.Colored(prs[i].n, prs[i].s))
+            link:SetEnabled(prs[i].u ~= nil)
+            link:SetWidth((link.label:GetStringWidth() or 0) + 2)
+            link:ClearAllPoints()
+            if leftmost then
+                link:SetPoint("RIGHT", leftmost, "LEFT", -6, 0)
+            else
+                link:SetPoint("TOPRIGHT", viewTitle, "BOTTOMRIGHT", 0, -6)
+            end
+            link:Show()
+            leftmost = link
+        end
+        for i = #prs + 1, #links do
+            links[i]:Hide()
+            links[i].label:SetText("")
+        end
+        return leftmost
+    end
+end
+
+-- What the header says under the title: a status (as a pill) and the rest, or just text;
+-- prs is the thread's pull requests, if it has any.
+local function setViewMeta(status, text, prs)
     viewMeta:ClearAllPoints()
     if status then
         local s = STATUS[status] or { status, "a0a0a0" }
@@ -726,7 +792,12 @@ local function setViewMeta(status, text)
         viewPill:SetShown(false)
         viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -8)
     end
-    viewMeta:SetPoint("RIGHT", right, "RIGHT", -18, 0)
+    local leftmost = PullRequests.Place(prs or {})
+    if leftmost then
+        viewMeta:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
+    else
+        viewMeta:SetPoint("RIGHT", right, "RIGHT", -18, 0)
+    end
     viewMeta:SetText(text or "")
 end
 
@@ -1852,7 +1923,7 @@ function renderView()
     if view and view.br and view.br ~= "" then
         meta = meta .. " · " .. view.br
     end
-    setViewMeta(status, meta)
+    setViewMeta(status, meta, view and view.prs)
     if not view then
         flowStart(0)
         placeMessage(messageString(1), "|cff" .. Skin.Hex("dim") .. "Loading…|r", false)

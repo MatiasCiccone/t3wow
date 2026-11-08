@@ -479,6 +479,46 @@ fn a_row_names_the_threads_pull_request_and_how_many_more() {
     assert_eq!(label("all-merged"), "#46 +1");
     assert_eq!(label("gitlab"), "!12");
     assert_eq!(label("none"), Value::Null);
+    let state = |id: &str| snapshot["threads"].as_array().unwrap().iter().find(|t| t["e"] == 1 && t["id"] == id).unwrap()["ps"].clone();
+    assert_eq!(state("still-open"), "open", "the state of the one named");
+    assert_eq!(state("all-merged"), "merged");
+    assert_eq!(state("none"), Value::Null);
+}
+
+#[test]
+fn the_open_thread_lists_its_pull_requests_and_the_game_can_open_only_those() {
+    let mut rig = Rig::new(3_100_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    let merged = "https://github.com/o/r/pull/41";
+    let open = "https://code.example.com/o/r/-/merge_requests/46";
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"] = json!([
+        { "number": 41, "state": "merged", "url": merged },
+        { "number": 46, "state": "open", "url": open },
+        { "number": 47, "state": "open", "url": "file:///C:/Windows/System32/calc.exe" },
+    ]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(
+        rig.bridge.snapshot()["view"]["prs"],
+        json!([{ "n": "#41", "s": "merged", "u": merged }, { "n": "!46", "s": "open", "u": open }, { "n": "#47", "s": "open" }]),
+        "every one, in T3's order, with a link only when it's a web page"
+    );
+
+    // A merge shows without the thread itself changing.
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"][1]["state"] = json!("merged");
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["view"]["prs"][1]["s"], "merged");
+
+    let open_command = |s: u32, url: &str| json!({ "s": s, "t": "pr", "id": "t1", "u": url });
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        open_command(3, open),
+        open_command(4, "https://evil.example.com/"),
+        open_command(5, "file:///C:/Windows/System32/calc.exe"),
+    ] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(rig.opened(), vec![open.to_string()], "only what T3 linked, and only a web page");
 }
 
 #[test]

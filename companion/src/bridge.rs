@@ -79,15 +79,45 @@ fn pull_request_open(pr: &Value) -> bool {
     !matches!(str_of(&pr["state"]), "merged" | "closed")
 }
 
+/// The pull requests linked to a thread that have a number to show.
+fn numbered_pull_requests(thread: &Value) -> Vec<&Value> {
+    thread["pullRequests"].as_array().map_or_else(Vec::new, |prs| prs.iter().filter(|pr| pr["number"].is_u64()).collect())
+}
+
+/// GitLab numbers its merge requests with "!", on any host.
+fn pull_request_number(pr: &Value) -> String {
+    let sign = if str_of(&pr["url"]).contains("/merge_requests/") { '!' } else { '#' };
+    format!("{sign}{}", pr["number"])
+}
+
 /// A thread's linked pull requests in a few characters, for its row: the first still open
 /// (in a stack, the next to merge), else the last linked, and how many more there are.
-/// GitLab numbers its merge requests with "!", on any host.
-fn pull_request_label(thread: &Value) -> Option<String> {
-    let prs: Vec<&Value> = thread["pullRequests"].as_array()?.iter().filter(|pr| pr["number"].is_u64()).collect();
+/// With the state of the one named, which colors it.
+fn pull_request_label(thread: &Value) -> Option<(String, String)> {
+    let prs = numbered_pull_requests(thread);
     let shown = prs.iter().find(|pr| pull_request_open(pr)).or(prs.last())?;
-    let sign = if str_of(&shown["url"]).contains("/merge_requests/") { '!' } else { '#' };
-    let number = &shown["number"];
-    Some(if prs.len() > 1 { format!("{sign}{number} +{}", prs.len() - 1) } else { format!("{sign}{number}") })
+    let number = pull_request_number(shown);
+    let label = if prs.len() > 1 { format!("{number} +{}", prs.len() - 1) } else { number };
+    Some((label, str_of(&shown["state"]).to_string()))
+}
+
+/// Only a web page goes to the browser: T3's record could hold anything Windows would run.
+fn is_web_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+/// Every pull request linked to a thread, for the open thread's header.
+fn pull_request_links(thread: &Value) -> Vec<Value> {
+    numbered_pull_requests(thread)
+        .into_iter()
+        .map(|pr| {
+            let mut link = json!({ "n": pull_request_number(pr), "s": str_of(&pr["state"]) });
+            if is_web_url(str_of(&pr["url"])) {
+                link["u"] = pr["url"].clone();
+            }
+            link
+        })
+        .collect()
 }
 
 /// Waiting on a question or an approval.
@@ -1510,6 +1540,17 @@ impl Bridge {
                     };
                     (self.opener)(&link);
                     self.note("Opened in T3.");
+                }
+                // Any addon can draw commands: only what T3 has linked to this thread opens.
+                "pr" => {
+                    let url = str_of(&command["u"]);
+                    let linked = self.threads.get(&env).is_some_and(|list| {
+                        list.iter().filter(|t| t["threadId"] == id.as_str()).any(|t| numbered_pull_requests(t).iter().any(|pr| pr["url"] == url))
+                    });
+                    if !linked || !is_web_url(url) {
+                        return Err(T3Error::Other("that pull request isn't linked to this thread".into()));
+                    }
+                    (self.opener)(url);
                 }
                 "probe" => {
                     let changed = self.slots.flip_probe(true);
@@ -3156,8 +3197,9 @@ impl Bridge {
                 if let Some(launcher) = t["launcher"].as_str() {
                     entry["par"] = json!(launcher);
                 }
-                if let Some(label) = pull_request_label(t) {
+                if let Some((label, state)) = pull_request_label(t) {
                     entry["pr"] = json!(label);
+                    entry["ps"] = json!(state);
                 }
                 entry["at"] = json!(iso_seconds(str_of(&t["updatedAt"])));
                 let project = project_title.get(&format!("{env}:{}", str_of(&t["projectId"]))).map(String::as_str).unwrap_or("");
@@ -3184,6 +3226,12 @@ impl Bridge {
         }
         let view = self.view_data.as_ref().map(|data| {
             let mut data = data.clone();
+            // From the list, read every poll: a merge needn't touch the thread, so the view
+            // wouldn't be read again for it.
+            let links = self.threads.get(str_of(&data["e"])).and_then(|list| list.iter().find(|t| t["threadId"] == data["id"])).map(pull_request_links);
+            if let Some(links) = links.filter(|l| !l.is_empty()) {
+                data["prs"] = json!(links);
+            }
             data["e"] = json!(env_index(str_of(&data["e"])));
             data
         });
