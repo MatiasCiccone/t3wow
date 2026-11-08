@@ -261,6 +261,24 @@ return "ok"
 `);
 });
 
+test("the thread panel's header names the branch the open thread is on", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+-- Until the companion reads the thread there's no branch to show.
+assert(not showing("feature/"), "a branch before the read")
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", br = "feature/show-branch", items = { { r = "a", x = "Hi" } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(showing("%· feature/show%-branch$"), "no branch after the machine and age")
+-- A scratch thread, or an older companion, sends none.
+view.br = nil
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(not showing("feature/"), "the branch stayed")
+return "ok"
+`);
+});
+
 test("a message T3 refused comes back to the box and its '(sending)' line goes", () => {
   run(`
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
