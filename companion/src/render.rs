@@ -22,6 +22,9 @@ const PAGE_HEIGHTS: (u32, u32) = (80, 2000);
 const MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
 /// Edge gets this long to draw a page (scripts get a few seconds of their own clock).
 const DRAW_TIMEOUT: Duration = Duration::from_secs(25);
+/// How long the launcher may be gone with no browser on the profile and no picture
+/// before the draw counts as failed.
+const BROWSER_START_GRACE: Duration = Duration::from_secs(5);
 
 /// T3's base sheet for html_render pages (dark appearance), as T3 adds it to every page:
 /// its theme variables, the 8px gutter, the page background and the font.
@@ -178,6 +181,16 @@ impl Edge {
         std::fs::create_dir_all(&self.work).map_err(|e| format!("no folder to draw in: {e}"))?;
         let page = self.work.join("page.html");
         let shot = self.work.join("page.png");
+        let profile = self.work.join("profile");
+        let deadline = Instant::now() + DRAW_TIMEOUT;
+        // A browser still drawing the last picture holds the profile: one started now
+        // would hand it this page and quit without drawing anything.
+        while !profile_free(&profile) {
+            if Instant::now() >= deadline {
+                return Err("the browser is still busy with the last picture".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let _ = std::fs::remove_file(&shot);
         std::fs::write(&page, html).map_err(|e| format!("couldn't write the page: {e}"))?;
         let mut command = std::process::Command::new(&self.exe);
@@ -193,7 +206,7 @@ impl Edge {
                 "--mute-audio",
                 "--virtual-time-budget=4000",
             ])
-            .arg(format!("--user-data-dir={}", self.work.join("profile").display()))
+            .arg(format!("--user-data-dir={}", profile.display()))
             .arg(format!("--window-size={width},{height}"))
             .arg(format!("--screenshot={}", shot.display()))
             .arg(file_url(&page))
@@ -206,17 +219,29 @@ impl Edge {
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = command.spawn().map_err(|e| format!("couldn't start {}: {e}", self.exe.display()))?;
-        let deadline = Instant::now() + DRAW_TIMEOUT;
+        // Started from Explorer (the tray app), Edge's launcher hands the page to a browser
+        // of its own and quits at once, before anything is drawn. The picture is done when
+        // the launcher has quit and no browser holds the profile any more.
+        let mut idle_since: Option<Instant> = None;
         loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("the browser took too long to draw the page".into());
+            let launcher_done = !matches!(child.try_wait(), Ok(None));
+            if launcher_done && profile_free(&profile) {
+                if shot.exists() {
+                    break;
                 }
+                // The browser it handed off to may not have taken the profile yet.
+                if idle_since.get_or_insert_with(Instant::now).elapsed() >= BROWSER_START_GRACE {
+                    return Err("the browser drew nothing".into());
+                }
+            } else {
+                idle_since = None;
             }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the browser took too long to draw the page".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
         let png = std::fs::read(&shot).map_err(|_| "the browser drew nothing".to_string())?;
         decode_png(&png)
@@ -241,6 +266,16 @@ impl Painter for Edge {
             STANDARD.encode(&bytes)
         );
         self.draw(&html, w, h)
+    }
+}
+
+/// Whether no browser is running on the profile. A running Edge holds `lockfile` there open
+/// without letting it be deleted, and deletes it when it quits; one left by a browser that
+/// crashed is deleted here.
+fn profile_free(profile: &Path) -> bool {
+    match std::fs::remove_file(profile.join("lockfile")) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
@@ -368,6 +403,22 @@ mod tests {
         let red = at(&picture, 300, 150);
         assert!(red[0] > 190 && red[1] < 45 && red[2] < 45, "{red:?}");
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_profile_is_busy_while_a_browser_holds_its_lockfile() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let profile = std::env::temp_dir().join(format!("t3wow-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&profile).unwrap();
+        assert!(profile_free(&profile), "no lockfile");
+        let held = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(profile.join("lockfile")).unwrap();
+        assert!(!profile_free(&profile), "a browser holds it");
+        drop(held);
+        assert!(profile.join("lockfile").exists());
+        assert!(profile_free(&profile), "left by a browser that crashed");
+        assert!(!profile.join("lockfile").exists());
+        let _ = std::fs::remove_dir_all(&profile);
     }
 
     #[test]
