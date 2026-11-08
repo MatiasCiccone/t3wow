@@ -1614,6 +1614,20 @@ return "ok"
 `);
 });
 
+test("a thread on a model the menu doesn't list shows its name when known, else its id", () => {
+  run(SELECTOR_HELPERS + `
+local function view(cfg) return { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = cfg } end
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view({ pv = "codex", m = "gpt-6-sol", mt = "GPT-6 Sol", rm = "auto" }) })
+UI.Select({ e = 1, id = "t1" })
+assert(shown("T3WoWModelMenu") == "GPT-6 Sol", shown("T3WoWModelMenu"))
+assert(menuTexts("T3WoWModelMenu") == "GPT-6 Sol|Claude|Claude Opus|Claude Haiku|Grok|Grok Build", menuTexts("T3WoWModelMenu"))
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view({ pv = "codex", m = "brand-new", rm = "auto" }) })
+assert(shown("T3WoWModelMenu") == "brand-new", shown("T3WoWModelMenu"))
+return "ok"
+`);
+});
+
 test("an open thread shows what it runs on: model and effort change, its permissions don't", () => {
   run(SELECTOR_HELPERS + `
 local function view(cfg) return { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = cfg } end
