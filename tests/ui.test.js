@@ -893,6 +893,35 @@ return "ok"
 `);
 });
 
+test("a picture that couldn't be loaded is a small card saying so, with nothing to click", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "u", x = "look" }, { r = "u", x = "[Pasted image] (couldn't be loaded)", lost = 1 }, { r = "a", x = "Seen." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local ICON = ROOT .. "Media\\\\image-off"
+local function icon()
+  for _, f in ipairs(frames) do
+    if f.kind == "Texture" and f.shown and f.texturePath == ICON then return f end
+  end
+end
+assert(shownString("Image couldn't be loaded"), "doesn't say so")
+assert(not shownString("Pasted image"), "its fallback text shows too")
+assert(icon(), "no placeholder icon")
+assert(below(icon(), shownString("look")), "not below the message before it")
+assert(below(shownString("Seen%."), icon()), "the next message isn't below it")
+for _, f in ipairs(frames) do
+  assert(not (f.kind == "Button" and f.shown and rawget(f, "copyText") and f.copyText:find("Pasted image")), "it can be clicked")
+end
+-- The next thing drawn in that place doesn't keep it.
+items = { { r = "a", x = "Seen." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(not shownString("Image couldn't be loaded"), "the words stayed")
+assert(not icon(), "the icon stayed")
+return "ok"
+`);
+});
+
 test("a picture draws from its image slot among the messages, and a click enlarges it instead of copying", () => {
   run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }

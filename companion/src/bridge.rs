@@ -672,6 +672,8 @@ const PICTURE_RETRY_MS: i64 = 300_000;
 const PAGE_TEXT_PIECES: usize = 16;
 /// Pictures kept on disk when a new game process starts (the rest give their space back).
 const IMAGES_KEPT: usize = 40;
+/// How the key of an image sent from the game starts: nothing can draw one again.
+const SENT_KEY: &str = "sent:";
 /// Said in place of a picture once every image slot holds one this game process has seen.
 const IMAGES_OUT: &str = "no picture slots left in this WoW session: restart WoW to see more";
 
@@ -965,8 +967,9 @@ impl Bridge {
             .and_then(|text| serde_json::from_str::<LinkState>(&text).ok())
             .unwrap_or_default();
         // A picture whose file is gone or blank (a reinstall, a cleanup) is no picture: the
-        // game would show a blank slot as a placeholder.
-        link.images.retain(|n, _| slots.has_image(*n));
+        // game would show a blank slot as a placeholder. An image you sent stays listed, so
+        // its message can say it couldn't be loaded (place_pictures).
+        link.images.retain(|n, slot| slot.key.starts_with(SENT_KEY) || slots.has_image(*n));
         let started_ms = now();
         Bridge {
             client,
@@ -1637,7 +1640,7 @@ impl Bridge {
         if message.is_empty() {
             return Vec::new();
         }
-        let prefix = format!("sent:{env}:{id}:{message}:");
+        let prefix = format!("{SENT_KEY}{env}:{id}:{message}:");
         if !self.link.images.values().any(|slot| slot.key.starts_with(&prefix)) {
             let said = str_of(&item["text"]).trim();
             let cut_short = item["textTruncated"] == true;
@@ -2759,6 +2762,11 @@ impl Bridge {
         let mut drawing: Vec<Drawing> = Vec::new();
         let mut later = false;
         for picture in &pictures {
+            // A page or a file emptied since it was drawn (a reinstall) is drawn again.
+            let held = self.link.images.iter().find(|(_, slot)| slot.key == picture.key).map(|(n, _)| *n);
+            if let Some(n) = held.filter(|n| !matches!(picture.source, Source::Sent) && !self.slots.has_image(*n)) {
+                self.link.images.remove(&n);
+            }
             let stored = self.link.images.values().any(|slot| slot.key == picture.key);
             let failed = self.picture_errors.get(&picture.key).is_some_and(|(_, at)| now - at < PICTURE_RETRY_MS);
             if stored || failed || drawing.iter().any(|d| d.picture.key == picture.key) {
@@ -2892,6 +2900,11 @@ impl Bridge {
             let slot = self.link.images.iter().find(|(_, slot)| slot.key == picture.key).map(|(n, slot)| (*n, slot.w, slot.h));
             let label = plain(&picture.label, 120);
             let item = match slot {
+                // Its file was emptied (a reinstall): naming it would show the game's
+                // placeholder for a blank file until WoW quits.
+                Some((n, _, _)) if !self.slots.has_image(n) => {
+                    json!({ "r": picture.role, "x": format!("|cff808080[{label}] (couldn't be loaded)|r"), "lost": 1 })
+                }
                 Some((n, w, h)) => {
                     if let Some(slot) = self.link.images.get_mut(&n) {
                         slot.used = now;
@@ -2936,7 +2949,7 @@ impl Bridge {
             all.extend(placed);
             all.sort_by_key(|(order, _)| *order);
             // A message that is only its images is just the pictures, with no empty bubble.
-            let pictures: HashSet<u64> = all.iter().filter(|(_, item)| item["im"].is_object()).map(|(order, _)| *order).collect();
+            let pictures: HashSet<u64> = all.iter().filter(|(_, item)| item["im"].is_object() || item["lost"] == 1).map(|(order, _)| *order).collect();
             all.retain(|(order, item)| !(item["r"] == "u" && str_of(&item["x"]).trim().is_empty() && pictures.contains(&(order + 1))));
             built["items"] = json!(all.into_iter().map(|(_, item)| item).collect::<Vec<_>>());
         }
@@ -3390,8 +3403,11 @@ impl Bridge {
     }
 
     /// Sends the current state again, as if the game had never had it (after Reinstall
-    /// blanked the slot and signal files).
+    /// blanked the slot and signal files). The open thread is read again, as what was built
+    /// for it, or is being built, may name image files that are blank now.
     pub fn republish(&mut self) {
+        self.view_data = None;
+        self.view_changed();
         self.last_published_hash = None;
         self.last_urgent_hash = None;
         self.last_publish_at = 0;
