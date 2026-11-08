@@ -160,6 +160,53 @@ return "ok"
 `);
 });
 
+test(`New Thread asks for a new worktree or the current checkout, starting at the project's default`, () => {
+  run(`
+local projects = { { e = 1, id = "pa", t = "alpha", w = true }, { e = 1, id = "pb", t = "beta" } }
+inboxWith(ENVS, { projects = projects })
+click("New Thread")
+-- A scratch thread has no checkout: no workspace to pick.
+assert(not T3WoWWorkspaceMenu:IsShown(), "workspace shown for scratch")
+-- A project whose default is a new worktree starts there.
+pick("T3WoWProjectMenu", "alpha")
+assert(T3WoWWorkspaceMenu:IsShown(), "workspace hidden for a project")
+assert(shown("T3WoWWorkspaceMenu") == "New worktree", shown("T3WoWWorkspaceMenu"))
+assert(menuTexts("T3WoWWorkspaceMenu") == "Current checkout|New worktree", menuTexts("T3WoWWorkspaceMenu"))
+assert(menuEntries("T3WoWWorkspaceMenu")[2].checked, "New worktree isn't checked")
+typeText("in a worktree")
+click("Start")
+assert(sent().t == "new" and sent().p == "pa" and sent().w == true, "w=" .. tostring(sent().w))
+-- One that runs in its checkout by default: nothing asks for a worktree.
+click("New Thread")
+pick("T3WoWProjectMenu", "beta")
+assert(shown("T3WoWWorkspaceMenu") == "Current checkout", shown("T3WoWWorkspaceMenu"))
+typeText("in the checkout")
+click("Start")
+assert(sent().t == "new" and sent().p == "pb" and sent().w == nil, "w=" .. tostring(sent().w))
+-- Picked by hand, and kept while the same project is picked again.
+click("New Thread")
+pick("T3WoWProjectMenu", "beta")
+pick("T3WoWWorkspaceMenu", "New worktree")
+pick("T3WoWProjectMenu", "beta")
+assert(shown("T3WoWWorkspaceMenu") == "New worktree", shown("T3WoWWorkspaceMenu"))
+-- Another project goes back to its own default.
+pick("T3WoWProjectMenu", "alpha")
+pick("T3WoWWorkspaceMenu", "Current checkout")
+typeText("alpha, in its checkout")
+click("Start")
+assert(sent().p == "pa" and sent().w == nil, "w=" .. tostring(sent().w))
+-- Back to scratch: the workspace goes, and a worktree picked before isn't asked for.
+click("New Thread")
+pick("T3WoWProjectMenu", "alpha")
+pick("T3WoWProjectMenu", "No project (scratch)")
+assert(not T3WoWWorkspaceMenu:IsShown(), "workspace shown for scratch")
+typeText("scratch")
+click("Start")
+assert(sent().t == "new" and sent().p == nil and sent().w == nil, "w=" .. tostring(sent().w))
+return "ok"
+`);
+});
+
 test(`New Thread with no machines or no projects says so`, () => {
   run(`
 inboxWith({})

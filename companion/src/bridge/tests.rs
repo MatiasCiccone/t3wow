@@ -26,6 +26,10 @@ struct FakeT3 {
     /// by id, a piece at a time.
     activity: Mutex<HashMap<String, Vec<Value>>>,
     item_texts: Mutex<HashMap<String, String>>,
+    /// Each machine's projects ("local" for the server's own; one app project when not set).
+    projects: Mutex<HashMap<String, Value>>,
+    /// Each machine's "New thread mode" preference (left out when not set).
+    thread_modes: Mutex<HashMap<String, &'static str>>,
 }
 
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
@@ -56,6 +60,8 @@ impl FakeT3 {
             messages: Mutex::new(HashMap::new()),
             settled: Mutex::new(Vec::new()),
             activity: Mutex::new(HashMap::new()),
+            projects: Mutex::new(HashMap::new()),
+            thread_modes: Mutex::new(HashMap::new()),
             item_texts: Mutex::new(HashMap::new()),
         })
     }
@@ -104,6 +110,10 @@ impl T3 for FakeT3 {
                 let links = if env_id == "local" { self.links.lock().unwrap().clone() } else { json!([]) };
                 json!({ "environmentId": env_id, "links": links })
             }
+            "t3_environment_read" if !self.thread_modes.lock().unwrap().is_empty() => {
+                let env = args["environmentId"].as_str().unwrap_or("local");
+                json!({ "label": env, "preferences": { "defaultThreadEnvMode": self.thread_modes.lock().unwrap().get(env) } })
+            }
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
             "t3_thread_launch" => json!({ "threadId": "new1" }),
@@ -118,7 +128,11 @@ impl T3 for FakeT3 {
                 };
                 json!({ "threadId": args["threadId"], "runId": null, "status": answer })
             }
-            "t3_project_list" => json!({ "projects": [{ "id": "p1", "title": "app" }] }),
+            "t3_project_list" => {
+                let env = args["environmentId"].as_str().unwrap_or("local");
+                let projects = self.projects.lock().unwrap().get(env).cloned();
+                json!({ "projects": projects.unwrap_or_else(|| json!([{ "id": "p1", "title": "app" }])) })
+            }
             "t3_thread_list" => {
                 let mut threads = if args["settled"] == true { self.settled.lock().unwrap().clone() } else { self.threads.lock().unwrap().clone() };
                 // Like T3, the list has no pending-question count: only a thread read does.
@@ -1214,6 +1228,53 @@ fn the_game_learns_which_commands_failed_and_which_thread_a_start_opened() {
     assert_eq!(rig.bridge.snapshot()["out"].as_array().unwrap().len(), 1);
     rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [{ "s": 6, "t": "hello", "o": false }] }));
     assert!(rig.bridge.snapshot()["out"].is_null());
+}
+
+#[test]
+fn new_thread_starts_in_a_new_worktree_or_the_checkout_and_defaults_as_t3_does() {
+    let mut rig = Rig::new(27_000_000);
+    rig.t3.thread_modes.lock().unwrap().extend([("local".to_string(), "worktree"), ("mac".to_string(), "local")]);
+    let projects = json!([
+        { "id": "p1", "title": "app" },
+        { "id": "p2", "title": "lib", "defaultThreadEnvMode": "local" },
+        { "id": "p3", "title": "tool", "defaultThreadEnvMode": "worktree" },
+    ]);
+    rig.t3.projects.lock().unwrap().extend([("local".to_string(), projects.clone()), ("mac".to_string(), projects)]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+
+    // A project's own mode wins; otherwise its machine's preference sets the default.
+    let defaults: Vec<(i64, String, bool)> = rig.bridge.snapshot()["projects"].as_array().unwrap().iter()
+        .map(|p| (p["e"].as_i64().unwrap(), str_of(&p["id"]).to_string(), p["w"] == true))
+        .collect();
+    assert_eq!(defaults, vec![
+        (1, "p1".into(), true), (1, "p2".into(), false), (1, "p3".into(), true),
+        (2, "p1".into(), false), (2, "p2".into(), false), (2, "p3".into(), true),
+    ]);
+    // A preference changed in T3 sets the default once the machines are read again.
+    rig.t3.thread_modes.lock().unwrap().insert("mac".to_string(), "worktree");
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let mac_app = rig.bridge.snapshot()["projects"].as_array().unwrap().iter().find(|p| p["e"] == 2 && p["id"] == "p1").cloned().unwrap();
+    assert_eq!(mac_app["w"], true, "{mac_app}");
+
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "e": "mac", "p": "p1", "w": true, "m": "In a worktree" },
+        { "s": 3, "t": "new", "e": "mac", "p": "p3", "m": "In the checkout" },
+        { "s": 4, "t": "new", "e": "mac", "w": true, "m": "Scratch" },
+    ] }));
+    rig.bridge.tick();
+    let launches = rig.t3.calls_to("t3_thread_launch");
+    assert_eq!(launches.len(), 3);
+    assert_eq!(launches[0]["workspaceStrategy"], json!({ "type": "worktree", "baseRef": "HEAD" }));
+    assert_eq!(launches[0]["projectId"], "p1");
+    assert_eq!(launches[0]["environmentId"], "mac");
+    // Without "w", T3's own default: the project's checkout.
+    assert!(launches[1]["workspaceStrategy"].is_null(), "{}", launches[1]);
+    // A scratch thread has no checkout to branch from.
+    assert!(launches[2]["workspaceStrategy"].is_null() && launches[2]["scratch"] == true, "{}", launches[2]);
 }
 
 /// Every command kind the window sends, one frame's worth (the answer names the question
