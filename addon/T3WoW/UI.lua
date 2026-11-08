@@ -1427,6 +1427,8 @@ local askStrings, askButtons = {}, {}
 local askState = { k = nil, picks = {} }
 local setPlaceholder -- set with the composer below
 local renderView -- defined below; the option buttons redraw through it
+-- While the resize grip is held, `Sizing.from` holds where the drag started (see resizing).
+local Sizing = {}
 
 local function pendingAsk()
     local view = inbox and inbox.view
@@ -1653,6 +1655,8 @@ local function renderAsk(view)
 end
 
 function renderView()
+    -- The conversation is hidden while the window is resized, and drawn when you let go.
+    if Sizing.from then return end
     -- Stay at the end while new messages come in, unless you scrolled up to read.
     local stickToBottom = scrollToEnd
         or messageScroll:GetVerticalScroll() >= scrollRange() - 8
@@ -2774,12 +2778,10 @@ Skin.OnApply(function()
     UI.Refresh()
 end)
 
--- While the grip is held, `Sizing.from` holds where the drag started. The window follows
--- the cursor itself rather than through StartSizing: from a window placed by its center,
--- StartSizing jumped past the cursor on the first click. And laying the conversation out
--- again at every new size made dragging stutter, so the conversation is hidden while you
--- drag and laid out once, when you let go.
-local Sizing = {}
+-- The window follows the cursor itself rather than through StartSizing: from a window
+-- placed by its center, StartSizing jumped past the cursor on the first click. And laying
+-- the conversation out again at every new size made dragging stutter, so the conversation
+-- is hidden while you drag and laid out once, when you let go.
 
 frame:SetScript("OnSizeChanged", function()
     if Sizing.from then
