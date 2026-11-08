@@ -77,4 +77,17 @@ strokes("grip.tga", 2.2, [[[27, 11], [11, 27]], [[27, 19], [19, 27]]]);
 // A magnifying glass: a ring (a 48-sided polygon) and its handle.
 const ring = Array.from({ length: 49 }, (_, i) => [13.5 + 7.5 * Math.cos((i * Math.PI) / 24), 13.5 + 7.5 * Math.sin((i * Math.PI) / 24)]);
 strokes("search.tga", 2.6, [ring, [[19, 19], [25.5, 25.5]]]);
+// The four permission modes: a padlock, a pencil, a sparkle and a shield struck through.
+const shackle = Array.from({ length: 25 }, (_, i) => [16 + 4.5 * Math.cos(Math.PI + (i * Math.PI) / 24), 11 + 4.5 * Math.sin(Math.PI + (i * Math.PI) / 24)]);
+strokes("lock.tga", 2.4, [[[8.5, 15], [23.5, 15], [23.5, 26.5], [8.5, 26.5], [8.5, 15]], [[11.5, 15], ...shackle, [20.5, 15]]]);
+strokes("pencil.tga", 2.4, [[[6, 26], [7.5, 20], [21, 6.5], [25.5, 11], [12, 24.5], [6, 26]], [[18, 9.5], [22.5, 14]]]);
+strokes("sparkle.tga", 2.2, [
+  [[14, 6], [16.5, 14.5], [25, 17], [16.5, 19.5], [14, 28], [11.5, 19.5], [3, 17], [11.5, 14.5], [14, 6]],
+  [[25, 4.5], [25, 11.5]],
+  [[21.5, 8], [28.5, 8]],
+]);
+strokes("shield-off.tga", 2.4, [
+  [[16, 4.5], [25.5, 8], [25.5, 15.5], [23.5, 21], [16, 27.5], [8.5, 21], [6.5, 15.5], [6.5, 8], [16, 4.5]],
+  [[5, 5], [27, 27]],
+]);
 console.log("skin textures written to addon/T3WoW/Media");

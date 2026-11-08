@@ -141,6 +141,66 @@ fn hash_of(value: &Value) -> u64 {
     hasher.finish()
 }
 
+/// Which of a model's options is its effort (T3 has "effort" and "reasoningEffort").
+fn is_effort(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("effort")
+}
+
+/// A machine's providers as the game lists them: the ones it can run, with their models and
+/// each model's efforts. Disabled providers still come with models; T3 says so in `constraints`.
+fn compact_providers(capabilities: &Value) -> Vec<Value> {
+    let mut providers = Vec::new();
+    for provider in capabilities["providers"].as_array().into_iter().flatten() {
+        if provider["constraints"].as_array().is_some_and(|c| !c.is_empty()) {
+            continue;
+        }
+        let mut models = Vec::new();
+        for model in provider["models"].as_array().into_iter().flatten() {
+            let id = str_of(&model["id"]);
+            if id.is_empty() {
+                continue;
+            }
+            let name = model["label"].as_str().unwrap_or(id);
+            let mut entry = json!({ "id": id, "t": plain(name, 40) });
+            if let Some(effort) = model["options"].as_array().into_iter().flatten().find(|o| is_effort(str_of(&o["id"]))) {
+                entry["o"] = effort["id"].clone();
+                entry["ef"] = effort["values"].clone();
+            }
+            models.push(entry);
+        }
+        if models.is_empty() {
+            continue;
+        }
+        let id = str_of(&provider["providerInstanceId"]);
+        let name = provider["displayName"].as_str().unwrap_or(id);
+        let mut entry = json!({ "id": id, "t": plain(name, 40), "m": models });
+        // Left out when the provider takes every mode.
+        if provider["runtimeModes"].is_array() {
+            entry["rm"] = provider["runtimeModes"].clone();
+        }
+        providers.push(entry);
+    }
+    providers
+}
+
+/// What the open thread runs on, for the game: T3's read of its settings, else what the
+/// thread's own read says (which has no effort). None when neither names a model.
+fn thread_settings(thread: &Value, config: Option<&Value>) -> Option<Value> {
+    let selection = config.map(|c| &c["modelSelection"]).filter(|s| s["model"].is_string());
+    let model = selection.map_or(str_of(&thread["model"]), |s| str_of(&s["model"]));
+    if model.is_empty() {
+        return None;
+    }
+    let provider = selection.map_or(str_of(&thread["providerInstanceId"]), |s| str_of(&s["instanceId"]));
+    let mode = config.and_then(|c| c["runtimeMode"].as_str()).unwrap_or(str_of(&thread["runtimeMode"]));
+    let mut cfg = json!({ "pv": provider, "m": model, "rm": mode });
+    let options = selection.and_then(|s| s["options"].as_array());
+    if let Some(effort) = options.into_iter().flatten().find(|o| is_effort(str_of(&o["id"]))) {
+        cfg["ef"] = effort["value"].clone();
+    }
+    Some(cfg)
+}
+
 fn str_of(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
@@ -334,6 +394,8 @@ pub struct Bridge {
     /// Per machine: whether its new threads start in a new worktree by default (T3's
     /// "New thread mode" preference), for projects that don't set their own.
     new_worktrees: BTreeMap<String, bool>,
+    /// What each machine offers for the model and effort selectors.
+    catalogs: BTreeMap<String, Catalog>,
     settled_totals: BTreeMap<String, u64>,
     /// Per machine: which of its three lists have more threads than were listed.
     list_more: BTreeMap<String, [bool; LIST_COUNT]>,
@@ -652,6 +714,10 @@ type ThreadLists = Result<(Vec<Value>, u64, [bool; LIST_COUNT]), T3Error>;
 
 /// A whole poll gets this long; past it, optional reads wait for the next one.
 const POLL_DEADLINE_MS: i64 = 20_000;
+/// How long what a machine offers (its providers and models) is kept before it's read again.
+const CATALOG_TTL_MS: i64 = 300_000;
+/// The permission modes a thread can start in, as T3 names them.
+const RUNTIME_MODES: [&str; 4] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
 /// Command outcomes stay in the updates this long (the game takes each once), at most this many.
 const OUTCOME_KEEP_MS: i64 = 60_000;
 const OUTCOMES_KEPT: usize = 8;
@@ -680,11 +746,23 @@ struct PollRun {
     reading: Option<ViewRead>,
 }
 
+/// What one machine offers for the selectors.
+#[derive(Default)]
+struct Catalog {
+    read_at: i64,
+    /// `compact_providers`.
+    providers: Vec<Value>,
+    /// The permissions a new thread gets when none is picked.
+    mode: Option<String>,
+}
+
 enum Step {
     /// The linked machines, then the server's own name (then each machine's projects).
     Machines,
     ServerName(Value),
     Projects(String),
+    /// What a machine offers for the model and effort selectors.
+    Catalog(String),
     /// A page of one of the three thread lists, every machine's at once (a list longer
     /// than T3's page takes a step per page).
     List(usize),
@@ -701,6 +779,7 @@ enum Step {
     Keep,
     /// The open thread: its head, its messages a page at a time, its question.
     View,
+    ViewConfig,
     ViewPage,
     ViewAsk,
     ViewAskRead(String),
@@ -729,6 +808,8 @@ struct ViewRead {
     /// `view_gen` when the read began: a command that changed the view since drops it.
     gen: u64,
     thread: Value,
+    /// Its model selection and modes (T3's read of a thread has no effort), when T3 gave them.
+    config: Option<Value>,
     /// When the head was read (a full read's time).
     began: i64,
     /// Reading on from this cache (same thread, safe to); None: a full read.
@@ -846,6 +927,7 @@ impl Bridge {
             threads: BTreeMap::new(),
             projects: BTreeMap::new(),
             new_worktrees: BTreeMap::new(),
+            catalogs: BTreeMap::new(),
             settled_totals: BTreeMap::new(),
             list_more: BTreeMap::new(),
             list_limits: LIST_LIMITS,
@@ -986,6 +1068,7 @@ impl Bridge {
         self.threads.clear();
         self.projects.clear();
         self.new_worktrees.clear();
+        self.catalogs.clear();
         self.settled_totals.clear();
         self.list_more.clear();
         self.last_status.clear();
@@ -1262,6 +1345,17 @@ impl Bridge {
                     if command["p"].is_string() && command["w"] == true {
                         args["workspaceStrategy"] = json!({ "type": "worktree", "baseRef": "HEAD" });
                     }
+                    if let Some(selection) = self.model_selection(&env, &command, Vec::new())? {
+                        args["modelSelection"] = selection;
+                    }
+                    // Starting without a picked mode would run at T3's default, usually the
+                    // most access the sign-in has: a mode it can't name doesn't get that.
+                    if let Some(mode) = command["rm"].as_str() {
+                        if !RUNTIME_MODES.contains(&mode) {
+                            return Err(T3Error::Other(format!("unknown permission mode \"{}\"", plain(mode, 20))));
+                        }
+                        args["runtimeMode"] = json!(mode);
+                    }
                     let attachments = if with_images { self.upload_draft(&draft)? } else { Vec::new() };
                     if !attachments.is_empty() {
                         args["attachments"] = json!(attachments);
@@ -1280,6 +1374,19 @@ impl Bridge {
                         self.view = Some(View { env: env.clone(), id: new_id.clone(), depth: 1 });
                         started = Some(new_id);
                     }
+                    self.view_changed();
+                }
+                // The model and effort of a thread that exists. T3 replaces the options it's
+                // given, so the ones the game doesn't show (fast mode, say) are sent back. Its
+                // permissions can't change from here: T3's tools keep a thread's modes.
+                "model" if !id.is_empty() && !str_of(&command["md"]).is_empty() => {
+                    let current = self.client.call("t3_thread_configure", with_args(json!({ "threadId": id }), &env_arg))?;
+                    let selection = &current["modelSelection"];
+                    let same = selection["model"] == command["md"] && selection["instanceId"] == command["pv"];
+                    let kept = if same { selection["options"].as_array().cloned().unwrap_or_default() } else { Vec::new() };
+                    let chosen = self.model_selection(&env, &command, kept)?;
+                    self.client.call("t3_thread_configure", with_args(json!({ "threadId": id, "modelSelection": chosen }), &env_arg))?;
+                    self.note("Model changed.");
                     self.view_changed();
                 }
                 "settle" | "unsettle" if !id.is_empty() => {
@@ -1511,6 +1618,10 @@ impl Bridge {
                 self.refresh_projects(&env);
                 Ok(())
             }
+            Step::Catalog(env) => {
+                self.refresh_catalog(&env);
+                Ok(())
+            }
             Step::List(n) => {
                 self.read_lists(n);
                 Ok(())
@@ -1530,6 +1641,7 @@ impl Bridge {
                 Ok(())
             }
             Step::View => self.refresh_view(),
+            Step::ViewConfig => self.read_view_config(),
             Step::ViewPage => self.read_view_page(),
             Step::ViewAsk => self.read_view_ask(),
             Step::ViewAskRead(request_id) => self.read_view_request(request_id),
@@ -1938,7 +2050,14 @@ impl Bridge {
         }
         self.envs = envs;
         self.forget_unlinked();
-        let steps = self.envs.iter().filter(|e| e.ok).map(|e| Step::Projects(e.id.clone())).collect();
+        let now = self.now_ms();
+        let mut steps = Vec::new();
+        for env in self.envs.iter().filter(|e| e.ok) {
+            steps.push(Step::Projects(env.id.clone()));
+            if self.catalogs.get(&env.id).is_none_or(|c| now - c.read_at >= CATALOG_TTL_MS) {
+                steps.push(Step::Catalog(env.id.clone()));
+            }
+        }
         self.push_steps(steps);
         Ok(())
     }
@@ -1955,6 +2074,7 @@ impl Bridge {
         self.threads.retain(|env, _| linked(env));
         self.projects.retain(|env, _| linked(env));
         self.new_worktrees.retain(|env, _| linked(env));
+        self.catalogs.retain(|env, _| linked(env));
         self.settled_totals.retain(|env, _| linked(env));
         self.list_more.retain(|env, _| linked(env));
         self.listed_envs.retain(|env| linked(env));
@@ -1993,6 +2113,54 @@ impl Bridge {
                 Err(error) => self.log(&format!("preferences ({env}): {error}")),
             }
         }
+    }
+
+    /// What a machine offers. A failed read keeps the last one, and waits as long as a good
+    /// one would: an older T3 that lacks the tool shouldn't be asked every minute.
+    fn refresh_catalog(&mut self, env: &str) {
+        if self.out_of_time() {
+            return;
+        }
+        let read_at = self.now_ms();
+        match self.client.call("orchestrator_capabilities", Value::Object(self.env_arg(env))) {
+            Ok(capabilities) => {
+                let mode = capabilities["runtimeMode"].as_str().map(str::to_string);
+                self.catalogs.insert(env.to_string(), Catalog { read_at, providers: compact_providers(&capabilities), mode });
+            }
+            Err(error) => {
+                self.log(&format!("models ({}): {error}", if env.is_empty() { "local" } else { env }));
+                self.catalogs.entry(env.to_string()).or_default().read_at = read_at;
+            }
+        }
+    }
+
+    /// The model a command picked, as T3 takes it (none picked: None), with `kept` options and
+    /// its effort. T3 stores whatever effort it's given, so one it doesn't offer stops here.
+    fn model_selection(&self, env: &str, command: &Value, mut kept: Vec<Value>) -> Result<Option<Value>, T3Error> {
+        let model = str_of(&command["md"]);
+        if model.is_empty() {
+            return Ok(None);
+        }
+        let provider = str_of(&command["pv"]);
+        let effort = str_of(&command["ef"]);
+        if !effort.is_empty() {
+            let listed = self
+                .catalogs
+                .get(env)
+                .and_then(|c| c.providers.iter().find(|p| p["id"] == provider))
+                .and_then(|p| p["m"].as_array()?.iter().find(|m| m["id"] == model));
+            let option = listed
+                .filter(|m| m["ef"].as_array().is_some_and(|values| values.iter().any(|v| v == effort)))
+                .map(|m| str_of(&m["o"]).to_string())
+                .ok_or_else(|| T3Error::Other(format!("{model} has no effort \"{}\"", plain(effort, 20))))?;
+            kept.retain(|o| o["id"] != option.as_str());
+            kept.push(json!({ "id": option, "value": effort }));
+        }
+        let mut selection = json!({ "instanceId": provider, "model": model });
+        if !kept.is_empty() {
+            selection["options"] = json!(kept);
+        }
+        Ok(Some(selection))
     }
 
     fn track_status(&mut self, env: &str, thread: &Value) {
@@ -2100,6 +2268,7 @@ impl Bridge {
                 key,
                 gen,
                 thread,
+                config: None,
                 began: now,
                 cache,
                 messages: Vec::new(),
@@ -2117,7 +2286,27 @@ impl Bridge {
                 again: false,
             });
         }
-        self.push_steps(vec![Step::ViewPage]);
+        self.push_steps(vec![Step::ViewConfig, Step::ViewPage]);
+        Ok(())
+    }
+
+    /// What the open thread runs on, for the selectors. The conversation doesn't wait on it:
+    /// a T3 that doesn't answer leaves the view with what the thread's read says.
+    fn read_view_config(&mut self) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let args = json!({ "threadId": read.view.id });
+        let env = read.view.env.clone();
+        let config = match self.client.call("t3_thread_configure", with_args(args, &self.env_arg(&env))) {
+            Ok(config) => Some(config),
+            Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+            Err(T3Error::Other(error)) => {
+                self.log(&format!("thread settings: {error}"));
+                None
+            }
+        };
+        if let Some(read) = self.view_read() {
+            read.config = config;
+        }
         Ok(())
     }
 
@@ -2260,6 +2449,10 @@ impl Bridge {
         let branch = plain(str_of(&thread["branch"]), 80);
         if !branch.is_empty() {
             built["br"] = json!(branch);
+        }
+        // What it runs on and with what permissions, for the selectors over the box.
+        if let Some(cfg) = thread_settings(thread, read.config.as_ref()) {
+            built["cfg"] = cfg;
         }
         read.built = Some(built);
         read.positions = positions;
@@ -2793,7 +2986,19 @@ impl Bridge {
         // The T3 sign-in this is from: the game drops what it had from another one.
         out.insert("lid".into(), json!(self.link.login));
         out.insert("ack".into(), json!(client_key.as_ref().and_then(|k| self.link.acked.get(k)).copied().unwrap_or(0)));
-        out.insert("envs".into(), json!(self.envs.iter().map(|e| json!({ "id": e.id, "name": plain(&e.name, 40), "ok": e.ok })).collect::<Vec<_>>()));
+        let envs: Vec<Value> = self
+            .envs
+            .iter()
+            .map(|e| {
+                let mut entry = json!({ "id": e.id, "name": plain(&e.name, 40), "ok": e.ok });
+                // The permissions a new thread on it gets when none is picked.
+                if let Some(mode) = self.catalogs.get(&e.id).and_then(|c| c.mode.as_ref()) {
+                    entry["dm"] = json!(mode);
+                }
+                entry
+            })
+            .collect();
+        out.insert("envs".into(), json!(envs));
         out.insert("threads".into(), json!(threads));
         out.insert("settledTotal".into(), json!(self.settled_totals.values().sum::<u64>()));
         // The groups with more threads than listed that Show more can still raise (left
@@ -2809,6 +3014,20 @@ impl Bridge {
             out.insert("more".into(), Value::Object(more));
         }
         out.insert("projects".into(), json!(projects));
+        // This companion takes a model, effort and permissions from the game, and what each
+        // machine offers.
+        out.insert("sel".into(), json!(true));
+        let mut models: Vec<Value> = Vec::new();
+        for (env, catalog) in self.catalogs.iter().filter(|(env, _)| env_index(env) > 0) {
+            for provider in &catalog.providers {
+                let mut entry = provider.clone();
+                entry["e"] = json!(env_index(env));
+                models.push(entry);
+            }
+        }
+        if !models.is_empty() {
+            out.insert("models".into(), json!(models));
+        }
         out.insert("view".into(), view.unwrap_or(Value::Null));
         out.insert("notes".into(), json!(self.notes));
         out.insert("events".into(), json!(self.events));
