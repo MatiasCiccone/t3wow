@@ -885,3 +885,28 @@ return tostring(#printed) .. " " .. printed[1]
 `, { ui: true, theme: false, before: `printed = {}; function print(text) printed[#printed + 1] = text end` });
   assert.match(out, /^1 .*restart WoW to load it/);
 });
+
+test("a notification plays T3 Code's sound for its outcome, and the whisper sound until the game has found it", () => {
+  const out = runGame(`
+played = {}
+local function alert(status) UI.Alert({ id = "t9", e = "local", s = status, t = "Other thread" }) end
+alert("completed")
+alert("failed")
+alert("approval")
+alert("waiting")
+soundsFound = false
+alert("completed")
+T3WoWDB.settings.sound = false
+alert("completed")
+return table.concat(played, " ")
+`, { ui: true, before: `
+soundsFound = true
+SOUNDKIT = { TELL_MESSAGE = 3081 }
+function PlaySoundFile(path, channel) played[#played + 1] = path:match("Media.(.+)$") .. "@" .. channel; return soundsFound end
+function PlaySound(kit) played[#played + 1] = "kit" .. kit end` });
+  assert.equal(out, [
+    "notification-completion.mp3@SFX", "notification-completion.mp3@SFX",
+    "notification-input.mp3@SFX", "notification-input.mp3@SFX",
+    "notification-completion.mp3@SFX", "kit3081",
+  ].join(" "));
+});

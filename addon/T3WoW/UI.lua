@@ -2002,6 +2002,17 @@ local function showToast(event)
     toast:Show()
 end
 
+-- T3 Code's own two sounds (Media\notification-*.mp3, see Media\Sounds.txt), so a
+-- notification sounds like the app and not like a whisper: one for a thread that needs you,
+-- one for the rest. The game only finds a file added while it ran after a restart; until
+-- then the whisper sound stands in.
+local SOUND = "Interface\\AddOns\\T3WoW\\Media\\notification-%s.mp3"
+local function playSound(status)
+    local which = EVENT_SETTING[status] == "onWaiting" and "input" or "completion"
+    if PlaySoundFile and PlaySoundFile(format(SOUND, which), "SFX") then return end
+    if SOUNDKIT and SOUNDKIT.TELL_MESSAGE then PlaySound(SOUNDKIT.TELL_MESSAGE) end
+end
+
 -- Returns what happened, for /t3 status.
 function UI.Alert(event)
     local s = settings()
@@ -2014,7 +2025,7 @@ function UI.Alert(event)
     if s.chat then
         print(format("|cff8f8fffT3|r %s: |cff%s%s|r", event.t ~= "" and event.t or "Thread", status[2], status[1]))
     end
-    if s.sound and SOUNDKIT and SOUNDKIT.TELL_MESSAGE then PlaySound(SOUNDKIT.TELL_MESSAGE) end
+    if s.sound then playSound(event.s) end
     if s.toasts then showToast(event) end
     return s.toasts and "shown" or "chat line only (notifications off in Settings)"
 end

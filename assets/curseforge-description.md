@@ -18,7 +18,7 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Send answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
 
-**Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and a sound. Click it to open the thread, or right-click to dismiss it.
+**Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it.
 
 ![Two notifications: one thread needs you, another finished](https://media.forgecdn.net/attachments/2159/876/notifications-png.png)
 
