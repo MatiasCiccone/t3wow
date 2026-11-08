@@ -36,8 +36,7 @@ const UNLISTED_VIEW_TTL_MS: i64 = 20_000;
 const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart WoW for updates within a second";
 /// Why, when the signal files are gone from the addon folder (something replaced or
 /// cleaned it): the game can't be told an update is ready until they're back.
-const SIGNALS_LOST: &str =
-    "the addon folder lost its signal files (something replaced or cleaned it): choose Reinstall addon in the T3 WoW tray menu, then restart WoW";
+const SIGNALS_LOST: &str = "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or choose Repair addon files in its tray menu)";
 
 /// Failed reads in a row before an active thread off the lists stops being watched.
 const UNLISTED_MISSES: u32 = 5;
@@ -307,7 +306,7 @@ pub struct BridgeStatus {
     pub slot: u32,
     /// This game process used up its signal files: updates come on a timer until WoW restarts.
     pub signals_out: bool,
-    /// The signal files are gone from the addon folder: Reinstall addon, then restart WoW.
+    /// The signal files went missing from the addon folder: restart WoW once they're back.
     pub signals_lost: bool,
     /// Writing the game's update files keeps failing.
     pub write_problem: Option<String>,

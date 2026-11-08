@@ -336,6 +336,9 @@ pub struct Config {
     /// How often to look for a new release while running; none means every 6 hours.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_interval")]
     pub update_check_every: Option<UpdateInterval>,
+    /// The tray's "Put back missing addon files automatically"; none means on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub put_back_files: Option<bool>,
     /// When the last update check started (epoch milliseconds), so a timed check counts
     /// from it across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,6 +530,11 @@ impl Config {
 
     pub fn trust(&self) -> Trust {
         self.game_commands.unwrap_or_default()
+    }
+
+    /// Whether the companion puts back addon files it finds gone, by itself.
+    pub fn put_back_files(&self) -> bool {
+        self.put_back_files.unwrap_or(true)
     }
 
     pub fn update_checks(&self) -> UpdateChecks {

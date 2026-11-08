@@ -308,6 +308,27 @@ impl Slots {
         Ok(Repair { addon, created })
     }
 
+    /// Whether the addon's toc or the files the companion makes (signal, probe and image
+    /// files, slot addons) are gone: something replaced or cleaned the folder. Looks at a
+    /// few of them only, so it can run often; `repair` puts back the rest.
+    pub fn missing_files(&self) -> bool {
+        let sig = self.addon_dir.join("sig");
+        let img = self.addon_dir.join("img");
+        let slot_toc = |n: u32| self.addons_dir.join(slot_name(n)).join(format!("{}.toc", slot_name(n)));
+        [
+            self.addon_dir.join(format!("{ADDON}.toc")),
+            sig.join(signal_file(1)),
+            sig.join(signal_file(SIGNAL_COUNT)),
+            self.addon_dir.join("ctl").join("probe").join("valid.ttf"),
+            img.join(IMAGE_SENTINEL),
+            img.join(image_file(IMAGE_COUNT)),
+            slot_toc(1),
+            slot_toc(SLOT_COUNT),
+        ]
+        .iter()
+        .any(|path| !path.exists())
+    }
+
     pub fn uninstall(&self) -> io::Result<()> {
         let _ = fs::remove_dir_all(&self.addon_dir);
         for entry in fs::read_dir(&self.addons_dir)?.flatten() {
@@ -489,6 +510,30 @@ mod tests {
         // The game is told the version it would load now.
         assert_eq!(slots.addon_version(), Some(shipped_version()));
         assert!(fs::read_to_string(&toc).unwrap().contains("## Interface: 16001"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_replaced_by_a_plain_copy_of_the_addon_counts_as_missing_files_until_repaired() {
+        let dir = temp_dir("missing");
+        let slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        assert!(!slots.missing_files());
+
+        // Copied over from the repo: the Lua files are there, sig, ctl and img are not.
+        for made in ["sig", "ctl", "img"] {
+            fs::remove_dir_all(dir.join("T3WoW").join(made)).unwrap();
+        }
+        assert!(slots.missing_files());
+        let slot = dir.join(slot_name(5)).join("Inbox.lua");
+        fs::write(&slot, "T3WoW_Inbox = {}").unwrap();
+
+        let repair = slots.repair().unwrap();
+        assert_eq!(repair.addon, None);
+        assert_eq!(repair.created, SIGNAL_COUNT + IMAGE_COUNT + 1 + 7);
+        assert!(!slots.missing_files());
+        // Only what was gone: a slot's update stays.
+        assert_eq!(fs::read_to_string(&slot).unwrap(), "T3WoW_Inbox = {}");
         let _ = fs::remove_dir_all(&dir);
     }
 
