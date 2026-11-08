@@ -431,6 +431,41 @@ return "ok"
 `);
 });
 
+test("An agent-launched thread with no known launcher keeps out of Open, as in T3's sidebar", () => {
+  run(`
+local function count(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and f.text.text == label and f.shown then return tonumber(f.count.text) end
+  end
+end
+local function listed(title)
+  for _, f in ipairs(frames) do
+    if type(f.thread) == "table" and f.thread.t == title and f.shown then return true end
+  end
+  return false
+end
+local now = time()
+inboxWith(ENVS, { threads = {
+  { e = 1, id = "u1", t = "Mine", s = "completed", set = false, at = now, p = "" },
+  -- delegate_task leaves no sender on the first message: the companion knows only that an agent made it.
+  { e = 1, id = "a1", t = "Delegated, done", s = "completed", set = false, ag = true, at = now, p = "" },
+  { e = 1, id = "a2", t = "Delegated, running", s = "running", set = false, ag = true, at = now, p = "" },
+  { e = 1, id = "a3", t = "Delegated, asking", s = "waiting", set = false, ag = true, at = now, p = "" },
+  { e = 1, id = "a4", t = "Delegated, settled", s = "completed", set = true, ag = true, at = now, p = "" },
+  -- Its launcher is known and listed: it sits under it.
+  { e = 1, id = "a5", t = "Launched by Mine", s = "completed", set = false, ag = true, par = "u1", at = now, p = "" },
+} })
+-- Open: Mine (its launched thread under it doesn't count) and the one that needs you.
+assert(count("Open") == 2, "Open counts " .. tostring(count("Open")))
+assert(listed("Mine") and listed("Launched by Mine"), "Mine or its launched thread missing")
+assert(not listed("Delegated, done"), "a finished delegated thread shows in Open")
+assert(listed("Delegated, running") and count("Working") == 1, "a working delegated thread missing")
+assert(listed("Delegated, asking"), "a delegated thread that needs you is missing")
+assert(count("Settled") == 1, "Settled counts " .. tostring(count("Settled")))
+return "ok"
+`);
+});
+
 test("Stop shows Stopping… until the run has stopped, and clears on every other outcome too", () => {
   run(`
 local running = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }

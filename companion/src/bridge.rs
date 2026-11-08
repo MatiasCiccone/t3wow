@@ -2215,6 +2215,11 @@ impl Bridge {
                 if t["snoozed"] == true {
                     entry["sn"] = json!(true);
                 }
+                // An agent made it: with no launcher found (delegate_task leaves no sender),
+                // the game keeps it out of Open while it's idle, as T3's sidebar does.
+                if t["createdBy"] == "agent" {
+                    entry["ag"] = json!(true);
+                }
                 if let Some(launcher) = t["launcher"].as_str() {
                     entry["par"] = json!(launcher);
                 }
