@@ -1528,6 +1528,29 @@ return "ok"
 `);
 });
 
+test("the companion hears when you start and stop typing in the message box", () => {
+  run(`${CTRL_V}
+inboxWith(ENVS, { pi = true, threads = { THREAD } })
+UI.Select({ e = 2, id = "t1" })
+T3WoWFrame:Show()
+local box = composer()
+box.scripts.OnEditFocusGained(box)
+assert(sent().t == "ui" and sent().o == true and sent().f == true, "typing not told")
+box.scripts.OnEditFocusLost(box)
+assert(sent().t == "ui" and sent().o == true and sent().f == false, "stopping not told")
+-- Opening the window says whether the box has the keyboard.
+rawset(box, "HasFocus", function() return false end)
+T3WoWFrame.scripts.OnShow(T3WoWFrame)
+assert(sent().t == "ui" and sent().o == true and sent().f == false, "opening didn't say")
+-- A window closing says so itself: no second update for the box losing the keyboard.
+local before = #queue()
+T3WoWFrame.shown = false
+box.scripts.OnEditFocusLost(box)
+assert(#queue() == before, "told twice")
+return "ok"
+`);
+});
+
 test("Ctrl+V asks for an image only from a companion that pastes, and a refused paste says why", () => {
   run(`${CTRL_V}
 -- An older companion: Ctrl+V only pastes text, as before.

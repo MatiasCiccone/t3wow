@@ -2,7 +2,7 @@
 //! "paste" from the game is only taken right after you pressed Ctrl+V in WoW, which no
 //! addon can fake: the game gives addons no way to press keys.
 //!
-//! While the T3 WoW window is open in the game and WoW is the window in front, a thread
+//! While you're typing in T3 WoW's message box and WoW is the window in front, a thread
 //! looks at two keys (Ctrl and V) about 60 times a second and counts each Ctrl+V. It
 //! doesn't look at any other key, and doesn't look at all otherwise.
 
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// The WoW client's process id (0: none found), from the screen capture.
 static WOW_PID: AtomicU32 = AtomicU32::new(0);
-/// The T3 WoW window is open in the game.
+/// You're typing in T3 WoW's message box.
 static ARMED: AtomicBool = AtomicBool::new(false);
 /// Ctrl+V presses seen in WoW, and when the last one was (epoch ms).
 static PRESSES: AtomicU64 = AtomicU64::new(0);
@@ -21,9 +21,9 @@ pub fn watch_process(pid: u32) {
     WOW_PID.store(pid, Ordering::Relaxed);
 }
 
-/// Look at keys only while the T3 WoW window is open in the game.
-pub fn arm(open: bool) {
-    ARMED.store(open, Ordering::Relaxed);
+/// Look at keys only while you're typing in T3 WoW's message box.
+pub fn arm(typing: bool) {
+    ARMED.store(typing, Ordering::Relaxed);
 }
 
 /// How many Ctrl+V presses were seen in WoW, and when the last one was (epoch ms).
@@ -54,6 +54,12 @@ impl Chord {
     }
 }
 
+/// Whether Ctrl+V is held. The keys aren't read at all unless WoW is in front.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ctrl_v_held(in_front: bool, v: impl Fn() -> bool, ctrl: impl Fn() -> bool) -> bool {
+    in_front && v() && ctrl()
+}
+
 /// Starts the thread that counts Ctrl+V presses (once, however often it is called).
 #[cfg(windows)]
 pub fn spawn() {
@@ -74,7 +80,9 @@ fn start() {
                 let pid = WOW_PID.load(Ordering::Relaxed);
                 if !ARMED.load(Ordering::Relaxed) || pid == 0 {
                     chord = Chord::default();
-                    std::thread::sleep(Duration::from_millis(200));
+                    // Short, so a Ctrl+V right after clicking in the box isn't missed. Reads
+                    // no keys: this only waits to be armed.
+                    std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
                 let in_front = unsafe {
@@ -84,7 +92,7 @@ fn start() {
                 };
                 // The high bit: held down now.
                 let held = |key: u16| unsafe { GetAsyncKeyState(key as i32) } as u16 & 0x8000 != 0;
-                if chord.look(held(VK_V) && held(VK_CONTROL), in_front) {
+                if chord.look(ctrl_v_held(in_front, || held(VK_V), || held(VK_CONTROL)), in_front) {
                     LAST_AT.store(crate::config::now_ms(), Ordering::SeqCst);
                     PRESSES.fetch_add(1, Ordering::SeqCst);
                 }
@@ -102,6 +110,19 @@ mod tests {
     fn presses_in(looks: &[(bool, bool)]) -> Vec<bool> {
         let mut chord = Chord::default();
         looks.iter().map(|&(down, front)| chord.look(down, front)).collect()
+    }
+
+    #[test]
+    fn the_keys_are_not_read_at_all_with_another_window_in_front() {
+        let reads = std::cell::Cell::new(0);
+        let read = |down: bool| {
+            reads.set(reads.get() + 1);
+            down
+        };
+        assert!(!ctrl_v_held(false, || read(true), || read(true)));
+        assert_eq!(reads.get(), 0, "read a key with WoW in the background");
+        assert!(ctrl_v_held(true, || read(true), || read(true)));
+        assert!(!ctrl_v_held(true, || read(false), || read(true)));
     }
 
     #[test]
