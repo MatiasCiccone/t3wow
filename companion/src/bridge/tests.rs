@@ -37,6 +37,8 @@ struct FakeT3 {
     /// What each thread runs on (`t3_thread_configure`), and what the machines offer.
     configs: Mutex<HashMap<String, Value>>,
     capabilities: Mutex<Value>,
+    /// A thread's latest runs, as a read of it lists them.
+    runs: Mutex<Value>,
 }
 
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
@@ -74,6 +76,7 @@ impl FakeT3 {
             uploads: Mutex::new(Vec::new()),
             configs: Mutex::new(HashMap::new()),
             capabilities: Mutex::new(json!({})),
+            runs: Mutex::new(json!([])),
         })
     }
 
@@ -231,7 +234,7 @@ impl T3 for FakeT3 {
                     "nextPosition": page.last().map(|m| m["position"].clone()),
                 })
             }
-            "t3_thread_read" => json!({ "thread": self.thread(&args["threadId"]), "items": [], "hasMore": false }),
+            "t3_thread_read" => json!({ "thread": self.thread(&args["threadId"]), "recentRuns": *self.runs.lock().unwrap(), "items": [], "hasMore": false }),
             // One pending question, in the shape T3 returns (see the probe in the commit log).
             "t3_pending_request" => match args["action"].as_str() {
                 Some("list") if !*self.questions.lock().unwrap() => json!({ "requestIds": [] }),
@@ -2624,6 +2627,52 @@ fn changing_a_threads_effort_keeps_its_other_options_and_a_new_model_starts_clea
 }
 
 #[test]
+fn a_thread_moved_to_another_provider_takes_that_providers_effort_option_and_none_of_the_old_ones() {
+    let mut rig = rig_with_catalog(46_500_000);
+    rig.t3.configs.lock().unwrap().insert("t1".into(), json!({
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus", "options": [{ "id": "effort", "value": "low" }, { "id": "fastMode", "value": true }] },
+        "runtimeMode": "auto",
+    }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "model", "e": "mac", "id": "t1", "pv": "codex", "md": "gpt-luna", "ef": "low" }] }));
+    rig.bridge.tick();
+    let sets: Vec<Value> = rig.t3.calls_to("t3_thread_configure").into_iter().filter(|a| a["modelSelection"].is_object()).collect();
+    assert_eq!(sets[0]["modelSelection"], json!({ "instanceId": "codex", "model": "gpt-luna", "options": [{ "id": "reasoningEffort", "value": "low" }] }));
+}
+
+#[test]
+fn the_first_message_on_a_new_provider_has_the_handoff_line_and_a_new_model_on_the_same_one_doesnt() {
+    let mut rig = rig_with_catalog(46_700_000);
+    let message = |position: u64, kind: &str, run: &str| json!({ "position": position, "type": kind, "text": format!("m{position}"), "runId": run });
+    let run = |id: &str, provider: &str, model: &str| json!({ "runId": id, "providerInstanceId": provider, "model": model });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![
+        message(0, "user_message", "r1"), message(1, "assistant_message", "r1"),
+        // Another model on the same provider: no line.
+        message(2, "user_message", "r2"), message(3, "assistant_message", "r2"),
+        // Another provider, with a model the machine doesn't list.
+        message(4, "user_message", "r3"), message(5, "assistant_message", "r3"),
+        // And back: named as the machine names it.
+        message(6, "user_message", "r4"),
+        // A run T3 didn't list: passed over, no line.
+        message(7, "assistant_message", "gone"),
+    ]);
+    *rig.t3.runs.lock().unwrap() = json!([
+        run("r4", "claudeAgent", "claude-opus"), run("r3", "codex", "unlisted-model"),
+        run("r2", "claudeAgent", "claude-haiku"), run("r1", "claudeAgent", "claude-opus"),
+    ]);
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(8);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "open", "e": "local", "id": "t1" }] }));
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let view = rig.bridge.snapshot()["view"].clone();
+    let lines: Vec<(&str, &Value)> = view["items"].as_array().unwrap().iter().map(|i| (str_of(&i["x"]), &i["ho"])).filter(|(_, ho)| !ho.is_null()).collect();
+    assert_eq!(lines, vec![
+        ("m4", &json!("Claude Haiku > unlisted-model")),
+        ("m6", &json!("unlisted-model > Claude Opus")),
+    ], "{view}");
+    assert!(rig.t3.calls_to("t3_thread_read").iter().any(|a| a["runLimit"] == 50), "a long thread's runs wouldn't be listed");
+}
+
+#[test]
 fn a_refused_model_change_comes_back_with_its_reason_and_an_unknown_effort_never_reaches_t3() {
     let mut rig = rig_with_catalog(47_000_000);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus", "ef": "nonsense" }] }));
@@ -2662,9 +2711,11 @@ fn the_trays_read_only_refuses_a_model_change_and_no_new_threads_refuses_only_st
 fn the_selectors_work_on_the_signed_in_t3() {
     let target = crate::t3::target().expect("no T3 to talk to");
     let client = Arc::new(crate::t3::McpClient::new(&target.origin, target.token.as_deref().expect("not signed in")));
+    // T3 treats the same command from the same client as a retry: each run is a client of its own.
+    let key = format!("probe-{}", crate::config::now_ms());
     let mut rig = Rig::new(49_000_000);
     rig.bridge.set_client(client.clone());
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
     let settle = |rig: &mut Rig, until: &dyn Fn(&Value) -> bool| -> Value {
         for _ in 0..60 {
             rig.advance(61_000);
@@ -2683,7 +2734,7 @@ fn the_selectors_work_on_the_signed_in_t3() {
     assert!(snapshot["models"].as_array().unwrap().iter().any(|p| p["id"] == "claudeAgent"), "{}", snapshot["models"]);
     println!("default permissions: {}", snapshot["envs"][0]["dm"]);
 
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 2, "q": [
         { "s": 2, "t": "new", "m": "Reply with just OK.", "pv": "claudeAgent", "md": haiku, "ef": "low", "rm": "approval-required" },
     ] }));
     let snapshot = settle(&mut rig, &|s| s["out"].is_array());
@@ -2695,13 +2746,48 @@ fn the_selectors_work_on_the_signed_in_t3() {
     let opened = settle(&mut rig, &|s| s["view"]["cfg"]["ef"] == "low");
     println!("view: {}", opened["view"]["cfg"]);
 
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 3, "q": [
         { "s": 3, "t": "model", "id": id, "pv": "claudeAgent", "md": haiku, "ef": "medium" },
     ] }));
     let changed = settle(&mut rig, &|s| s["view"]["cfg"]["ef"] == "medium");
     println!("changed: {}", changed["view"]["cfg"]);
     let after = read(&client);
+
+    // Another provider, once its run has ended; the next turn runs there.
+    let finished = |least: u64| -> Value {
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let head = client.call("t3_thread_read", json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 })).unwrap();
+            if head["thread"]["runCount"].as_u64().unwrap_or(0) >= least && !working(str_of(&head["thread"]["status"])) {
+                return head;
+            }
+        }
+        panic!("the run never ended");
+    };
+    finished(1);
+    let codex = changed["models"].as_array().unwrap().iter().find(|p| p["id"] == "codex").expect("codex isn't enabled").clone();
+    let other = str_of(&codex["m"][0]["id"]).to_string();
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 4, "q": [
+        { "s": 4, "t": "model", "id": id, "pv": "codex", "md": other },
+    ] }));
+    let moved = settle(&mut rig, &|s| s["view"]["cfg"]["pv"] == "codex");
+    println!("moved: {}", moved["view"]["cfg"]);
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 5, "q": [{ "s": 5, "t": "send", "id": id, "m": "Reply with just OK." }] }));
+    rig.bridge.tick();
+    let second = finished(2);
+    println!("runs: {}", second["recentRuns"]);
+    println!("status: {}", second["thread"]["status"]);
+    let drawn = settle(&mut rig, &|s| s["view"]["items"].as_array().is_some_and(|items| items.iter().any(|i| i["ho"].is_string())));
+    let line = drawn["view"]["items"].as_array().unwrap().iter().find(|i| i["ho"].is_string()).unwrap().clone();
+    println!("handoff over {}: {}", line["r"], line["ho"]);
     client.call("t3_thread_organize", json!({ "action": "archive", "threadId": id })).unwrap();
+
+    let last = second["recentRuns"].as_array().unwrap().iter().max_by_key(|r| r["ordinal"].as_u64()).unwrap().clone();
+    assert_eq!(last["providerInstanceId"], "codex", "{last}");
+    assert_eq!(last["model"], other.as_str(), "{last}");
+    assert_eq!(last["status"], "completed", "{last}");
+    assert_eq!(line["r"], "u", "the first message on the new provider is yours");
+    assert_eq!(line["ho"], format!("Claude Haiku 5.5 > {}", str_of(&codex["m"][0]["t"])));
 
     assert_eq!(started["modelSelection"]["model"], haiku);
     assert_eq!(started["modelSelection"]["options"], json!([{ "id": "effort", "value": "low" }]));
