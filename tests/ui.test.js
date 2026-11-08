@@ -1291,3 +1291,55 @@ assert(showing("A message takes 8 images at most"))
 return "ok"
 `);
 });
+
+test("clicking the resize grip without moving keeps the size, and the conversation hides only while you drag", () => {
+  run(`
+local window = T3WoWFrame
+-- The window as the game places it: 940 x 580, its top-left corner at (100, 900).
+local left, top = 100, 900
+window.width, window.height = 940, 580
+function window:GetWidth() return self.width end
+function window:GetHeight() return self.height end
+function window:GetLeft() return left end
+function window:GetTop() return top end
+function window:GetEffectiveScale() return 1 end
+function window:GetPoint() return unpack(self.point) end
+function UIParent:GetWidth() return 1920 end
+-- Like the game, a new size runs OnSizeChanged; the conversation's width shows when it was laid out.
+function window:SetSize(w, h)
+  self.width, self.height = w, h
+  self.scripts.OnSizeChanged(self, w, h)
+end
+local laidOutAt
+function messageScroll.child:SetWidth(w) laidOutAt = w end
+local cursorX, cursorY, held = 1032, 330, true
+function GetCursorPosition() return cursorX, cursorY end
+function IsMouseButtonDown() return held end
+local grip
+for _, f in ipairs(frames) do
+  if rawget(f, "glyph") and f.scripts.OnMouseDown then grip = f end
+end
+assert(grip, "no grip")
+grip.scripts.OnMouseDown(grip, "LeftButton")
+tick(0.25)
+assert(window.width == 940 and window.height == 580, "a click resized to " .. window.width .. "x" .. window.height)
+assert(window.point[1] == "TOPLEFT" and window.point[4] == 100 and window.point[5] == 900, "the top-left corner moved")
+assert(not messageScroll.shown, "the conversation shows while dragging")
+-- Dragged 60 right and 40 down; then past the smallest size.
+cursorX, cursorY = 1092, 290
+tick(0.25)
+assert(window.width == 1000 and window.height == 620, "dragged to " .. window.width .. "x" .. window.height)
+assert(laidOutAt == nil, "the conversation was laid out mid-drag, at " .. tostring(laidOutAt))
+cursorX, cursorY = 0, 2000
+tick(0.25)
+assert(window.width == 720 and window.height == 420, "under the smallest size: " .. window.width .. "x" .. window.height)
+cursorX, cursorY = 1092, 290
+tick(0.25)
+held = false
+grip.scripts.OnMouseUp(grip, "LeftButton")
+assert(messageScroll.shown, "the conversation stays hidden after the drag")
+assert(laidOutAt == 1000 - 300 - 46, "not laid out at the new width: " .. tostring(laidOutAt))
+assert(T3WoWDB.window.w == 1000 and T3WoWDB.window.h == 620 and T3WoWDB.window.point == "TOPLEFT", "the size wasn't saved")
+return "ok"
+`, { before: SCROLLING, db: "{}" });
+});

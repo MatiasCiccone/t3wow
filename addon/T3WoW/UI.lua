@@ -2774,25 +2774,73 @@ Skin.OnApply(function()
     UI.Refresh()
 end)
 
+-- While the grip is held, `Sizing.from` holds where the drag started. The window follows
+-- the cursor itself rather than through StartSizing: from a window placed by its center,
+-- StartSizing jumped past the cursor on the first click. And laying the conversation out
+-- again at every new size made dragging stutter, so the conversation is hidden while you
+-- drag and laid out once, when you let go.
+local Sizing = {}
+
 frame:SetScript("OnSizeChanged", function()
+    if Sizing.from then
+        input:SetWidth(messageWidth() - 24)
+        return
+    end
     applyWidth()
     if frame:IsShown() then renderView() end
 end)
 
+local function cursorPosition()
+    local scale = frame:GetEffectiveScale()
+    local x, y = GetCursorPosition()
+    return x / scale, y / scale
+end
+
+function Sizing.Stop()
+    if not Sizing.from then return end
+    Sizing.from = nil
+    Sizing.grip:SetScript("OnUpdate", nil)
+    saveLayout()
+    applyWidth()
+    if frame:IsShown() then UI.Refresh() end -- shows the conversation again
+end
+
+-- Every frame of the drag: the bottom-right corner goes where the cursor moved, within the
+-- size bounds and the screen (so being kept on screen never shoves the window).
+function Sizing.Follow()
+    if not IsMouseButtonDown("LeftButton") then return Sizing.Stop() end
+    local from = Sizing.from
+    local x, y = cursorPosition()
+    local maxWidth = math.max(MIN_WIDTH, math.min(MAX_WIDTH, UIParent:GetWidth() - frame:GetLeft()))
+    local maxHeight = math.max(MIN_HEIGHT, math.min(MAX_HEIGHT, frame:GetTop()))
+    local width = math.floor(math.min(maxWidth, math.max(MIN_WIDTH, from.w + x - from.x)) + 0.5)
+    local height = math.floor(math.min(maxHeight, math.max(MIN_HEIGHT, from.h + from.y - y)) + 0.5)
+    if width ~= from.lastW or height ~= from.lastH then
+        from.lastW, from.lastH = width, height
+        frame:SetSize(width, height)
+    end
+end
+
 local grip = CreateFrame("Button", nil, frame)
+Sizing.grip = grip
 grip:SetSize(16, 16)
 grip:SetPoint("BOTTOMRIGHT", -2, 2)
 grip:SetFrameLevel(frame:GetFrameLevel() + 10)
 grip.glyph = Skin.Glyph(grip, "grip", 16, "dim")
 grip.glyph:SetAllPoints()
-grip:SetScript("OnMouseDown", function(_, mouse)
-    if mouse == "LeftButton" then frame:StartSizing("BOTTOMRIGHT") end
+grip:SetScript("OnMouseDown", function(self, mouse)
+    if mouse ~= "LeftButton" then return end
+    -- Pin the top-left corner where it is, so only the bottom-right one moves.
+    local left, top = frame:GetLeft(), frame:GetTop()
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+    local x, y = cursorPosition()
+    Sizing.from = { x = x, y = y, w = frame:GetWidth(), h = frame:GetHeight() }
+    messageScroll:Hide()
+    self:SetScript("OnUpdate", Sizing.Follow)
 end)
-grip:SetScript("OnMouseUp", function()
-    frame:StopMovingOrSizing()
-    saveLayout()
-    UI.Refresh()
-end)
+grip:SetScript("OnMouseUp", Sizing.Stop)
+grip:SetScript("OnHide", Sizing.Stop)
 grip:SetScript("OnEnter", function(self)
     Skin.SetGlyphColor(self.glyph, "text")
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
