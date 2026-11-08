@@ -1,6 +1,6 @@
 [package]
 name = "t3wow"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 # tray-icon and muda need 1.90 (std's File::lock, used for the config and update locks, 1.89).
 rust-version = "1.90"
