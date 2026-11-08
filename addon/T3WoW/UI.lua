@@ -694,13 +694,16 @@ do
         Mono.used = {}
     end
 
-    -- Widths are measured on a string that is never seen, with no width of its own.
+    -- Widths are measured on a string that is never seen, with no width of its own. A
+    -- font object brings its text color with it, alpha and all, so the color is cleared
+    -- after each one: the game showed the last measured text otherwise.
     local meter = messageChild:CreateFontString(nil, "OVERLAY")
     meter:SetAlpha(0)
     meter:SetWordWrap(false)
     meter:SetPoint("TOPLEFT")
     local function measure(font, text)
         meter:SetFontObject(font)
+        meter:SetTextColor(0, 0, 0, 0)
         meter:SetText(text)
         return meter:GetStringWidth() or 0
     end
