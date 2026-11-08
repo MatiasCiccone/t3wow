@@ -2535,6 +2535,26 @@ fn rig_with_catalog(start_ms: i64) -> Rig {
 }
 
 #[test]
+fn known_models_go_by_one_style_of_name_and_new_ones_by_what_t3_calls_them() {
+    let listed = |model: Value| {
+        let capabilities = json!({ "providers": [{ "providerInstanceId": "p", "constraints": [], "models": [model] }] });
+        str_of(&compact_providers(&capabilities)[0]["m"][0]["t"]).to_string()
+    };
+    assert_eq!(listed(json!({ "id": "gpt-6.1-sol" })), "GPT-6.1 Sol", "T3 gives it no label");
+    assert_eq!(listed(json!({ "id": "claude-opus-5-5", "label": "something else" })), "Claude Opus 5.5");
+    assert_eq!(listed(json!({ "id": "brand-new", "label": "Brand New 1" })), "Brand New 1", "not ours: T3's label");
+    assert_eq!(listed(json!({ "id": "brand-new" })), "brand-new", "no label either: its id");
+
+    // A thread on a model the short list leaves out, and the handoff line's name for one.
+    let thread = |model: &str| json!({ "model": model, "providerInstanceId": "codex", "runtimeMode": "auto" });
+    assert_eq!(thread_settings(&thread("gpt-6-sol"), None).unwrap()["mt"], "GPT-6 Sol");
+    assert!(thread_settings(&thread("brand-new"), None).unwrap()["mt"].is_null());
+    let rig = Rig::new(40_000_000);
+    assert_eq!(rig.bridge.model_name("e", &json!("codex"), &json!("gpt-6-sol")), "GPT-6 Sol");
+    assert_eq!(rig.bridge.model_name("e", &json!("codex"), &json!("brand-new")), "brand-new");
+}
+
+#[test]
 fn the_game_hears_what_each_machine_offers_and_a_new_threads_default_permissions() {
     let rig = rig_with_catalog(40_000_000);
     let snapshot = rig.bridge.snapshot();

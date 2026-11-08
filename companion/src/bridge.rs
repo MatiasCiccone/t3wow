@@ -160,8 +160,7 @@ fn compact_providers(capabilities: &Value) -> Vec<Value> {
             if id.is_empty() {
                 continue;
             }
-            let name = model["label"].as_str().unwrap_or(id);
-            let mut entry = json!({ "id": id, "t": plain(name, 40) });
+            let mut entry = json!({ "id": id, "t": plain(model_text(id, model["label"].as_str()), 40) });
             if let Some(effort) = model["options"].as_array().into_iter().flatten().find(|o| is_effort(str_of(&o["id"]))) {
                 entry["o"] = effort["id"].clone();
                 entry["ef"] = effort["values"].clone();
@@ -183,6 +182,27 @@ fn compact_providers(capabilities: &Value) -> Vec<Value> {
     providers
 }
 
+/// What the game calls the models it knows. T3 labels only some of them (GPT-6.1 Terra has a
+/// label, gpt-6.1-sol doesn't), which reads unevenly side by side.
+const MODEL_NAMES: [(&str, &str); 10] = [
+    ("gpt-6.1-sol", "GPT-6.1 Sol"),
+    ("gpt-6.1-terra", "GPT-6.1 Terra"),
+    ("gpt-6-sol", "GPT-6 Sol"),
+    ("gpt-6-astra", "GPT-6 Astra"),
+    ("gpt-6-luna", "GPT-6 Luna"),
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+    ("claude-fable-5-1", "Claude Fable 5.1"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5"),
+];
+
+/// A model's name for the game: ours if we know it, else T3's label, else its id, so a model
+/// that's new to this version still shows.
+fn model_text<'a>(id: &'a str, label: Option<&'a str>) -> &'a str {
+    MODEL_NAMES.iter().find(|(known, _)| *known == id).map(|(_, name)| *name).or(label).unwrap_or(id)
+}
+
 /// What the open thread runs on, for the game: T3's read of its settings, else what the
 /// thread's own read says (which has no effort). None when neither names a model.
 fn thread_settings(thread: &Value, config: Option<&Value>) -> Option<Value> {
@@ -194,6 +214,11 @@ fn thread_settings(thread: &Value, config: Option<&Value>) -> Option<Value> {
     let provider = selection.map_or(str_of(&thread["providerInstanceId"]), |s| str_of(&s["instanceId"]));
     let mode = config.and_then(|c| c["runtimeMode"].as_str()).unwrap_or(str_of(&thread["runtimeMode"]));
     let mut cfg = json!({ "pv": provider, "m": model, "rm": mode });
+    // A model off the machine's short list still has its name, where one is known.
+    let name = model_text(model, None);
+    if name != model {
+        cfg["mt"] = json!(name);
+    }
     let options = selection.and_then(|s| s["options"].as_array());
     if let Some(effort) = options.into_iter().flatten().find(|o| is_effort(str_of(&o["id"]))) {
         cfg["ef"] = effort["value"].clone();
@@ -2245,7 +2270,7 @@ impl Bridge {
             .get(env)
             .and_then(|c| c.providers.iter().find(|p| p["id"] == *provider))
             .and_then(|p| p["m"].as_array()?.iter().find(|m| m["id"] == *model));
-        listed.map_or_else(|| plain(str_of(model), 40), |m| str_of(&m["t"]).to_string())
+        listed.map_or_else(|| plain(model_text(str_of(model), None), 40), |m| str_of(&m["t"]).to_string())
     }
 
     /// Where a thread moved to another provider, by the position of the first message on it:

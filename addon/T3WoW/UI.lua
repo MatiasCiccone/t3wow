@@ -2164,7 +2164,7 @@ do
             end
             -- T3 lists its usual models only; the one a thread is on stays shown.
             if not c.new and not listed and c.m then
-                table.insert(list, 1, { text = c.m:gsub("|", "||"), value = { pv = c.pv, m = c.m } })
+                table.insert(list, 1, { text = c.mt or c.m:gsub("|", "||"), value = { pv = c.pv, m = c.m } })
             end
             if #list == 0 then list[1] = { text = "No models on this machine", note = true } end
             return list
@@ -2361,7 +2361,7 @@ do
         -- The model takes what room the box has beside the two that keep their size.
         modelMenu:SetWidth(math.min(220, math.max(110, inputBg:GetWidth() - EFFORT_WIDTH - PERMISSION_WIDTH - 28)))
         modelMenu:SetShown(c.m ~= nil or #providersOn(selected.env) > 0)
-        modelMenu:SetLabel(model and model.t or (c.m and c.m:gsub("|", "||")) or "Default model")
+        modelMenu:SetLabel(model and model.t or c.mt or (c.m and c.m:gsub("|", "||")) or "Default model")
         effortMenu:SetShown(model ~= nil and type(model.ef) == "table" and #model.ef > 0)
         effortMenu:SetLabel(c.ef and effortName(c.ef) or "Default")
         local changeable = c.new or not blockedReason("model")
