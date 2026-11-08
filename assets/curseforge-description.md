@@ -2,29 +2,25 @@
 
 T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply to your coding agents without alt-tabbing.
 
-![An agent's question in the T3 WoW window](https://media.forgecdn.net/attachments/2159/877/question-png.png)
+## Requires the T3 WoW companion
+
+**This addon doesn't work on its own.** It needs the T3 WoW companion, t3wow.exe, running on the same Windows PC while you play. Addons can't talk to other programs, so the companion carries everything between the game and T3 Code. Without it, the window only says "Waiting for the companion…".
+
+**Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow-releases/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
 
 ## What it does
 
 **Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar: Open, Working, Snoozed and Settled. Each title shows the machine and project under it. Threads an agent started appear indented under the thread that started them, as in T3. **Search**, over the list, narrows it as you type to threads whose title, project or machine matches; Enter opens the first one.
 
-![The T3 WoW window with the thread list and a conversation](https://media.forgecdn.net/attachments/2159/857/window-png.png)
-
 **Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
 
 **Start threads.** **New Thread** asks for the machine, the project, and whether the thread runs in a new worktree or the current checkout, then starts a thread with your message as its task and opens it.
-
-![Choosing the machine and project for a new thread](https://media.forgecdn.net/attachments/2159/886/new-thread-png.png)
 
 **Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Send answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
 
 **Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it.
 
-![Two notifications: one thread needs you, another finished](https://media.forgecdn.net/attachments/2159/876/notifications-png.png)
-
 **Approvals.** You can approve a command or an edit only in T3. By design, T3 doesn't take approvals from anywhere else. A thread waiting for one shows **Approve in T3**, and its **Open in T3** button opens T3 on that thread. **Stop** cancels the run from the game.
-
-![A thread waiting for approval, with the Open in T3 button](https://media.forgecdn.net/attachments/2159/873/approval-png.png)
 
 ## Themes
 
@@ -49,13 +45,9 @@ Right-click the minimap button, type /t3 settings, or press **Settings** in the 
 - **Clicking an approval opens T3** is off by default. While it's off, clicking an approval's notification opens the thread in the game, so a stray click while playing doesn't switch you out of the game.
 - Show or hide the minimap button.
 
-![The settings panel](https://media.forgecdn.net/attachments/2159/856/settings-png.png)
-
 ## Opening it
 
 Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybindings → AddOns → T3 WoW. If another addon has loaded LibDBIcon, the button registers through it, so button collectors group it with your other buttons.
-
-![The T3 WoW minimap button among other addon buttons](https://media.forgecdn.net/attachments/2159/874/minimap-png.png)
 
 ## What you need
 
