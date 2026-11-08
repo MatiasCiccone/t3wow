@@ -184,6 +184,8 @@ pub fn run(app: Arc<App>) -> ! {
     let connect_remote = MenuItem::new("Connect to T3 on another machine…", true, None);
     let _ = server_menu.append_items(&[&this_pc, &PredefinedMenuItem::separator(), &connect_remote]);
     let wow_folder = MenuItem::new("Choose WoW folder…", true, None);
+    let repair = MenuItem::new("Repair addon files", true, None);
+    let put_back = CheckMenuItem::new("Put back missing addon files automatically", true, Config::load().put_back_files(), None);
     let reinstall = MenuItem::new("Reinstall addon", true, None);
     let interface = MenuItem::new("Match WoW's interface version…", true, None);
     // What the game may make T3 do: any addon can draw the strip the companion reads.
@@ -217,6 +219,8 @@ pub fn run(app: Arc<App>) -> ! {
         &sign_in,
         &server_menu,
         &wow_folder,
+        &repair,
+        &put_back,
         &reinstall,
         &interface,
         &trust_menu,
@@ -316,6 +320,12 @@ pub fn run(app: Arc<App>) -> ! {
                     open_path(&log::path());
                 } else if id == *reinstall.id() {
                     app.send(Control::Reinstall);
+                } else if id == *repair.id() {
+                    app.send(Control::Repair);
+                } else if id == *put_back.id() {
+                    // A check item ticks itself when chosen: it now shows what was asked for.
+                    app.set_put_back_files(put_back.is_checked());
+                    put_back.set_checked(Config::load().put_back_files());
                 } else if id == *interface.id() {
                     match_interface(&app);
                 } else if let Some(&(trust, _)) = trust_items.iter().find(|(_, item)| *item.id() == id) {

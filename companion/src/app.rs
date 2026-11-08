@@ -33,6 +33,8 @@ pub enum Control {
     SignedIn,
     SignedOut,
     Reinstall,
+    /// The tray's "Repair addon files": put back only what's missing.
+    Repair,
     /// The tray's "Commands from the game" changed (it is saved already).
     Trust(Trust),
 }
@@ -174,6 +176,15 @@ impl App {
         Config::update(|c| c.game_commands = Some(trust));
         self.send(Control::Trust(trust));
         self.notify(Notice::new(Level::Info, format!("Commands from the game: {}", trust.label()), trust.description()));
+    }
+
+    pub fn set_put_back_files(&self, on: bool) {
+        Config::update(|c| c.put_back_files = Some(on));
+        self.notify(if on {
+            Notice::new(Level::Info, "Put back missing addon files: on", "When something removes T3 WoW's files from the AddOns folder, T3 WoW puts them back by itself.")
+        } else {
+            Notice::new(Level::Info, "Put back missing addon files: off", "T3 WoW leaves the AddOns folder as it is. Choose Repair addon files to put back what's missing.")
+        });
     }
 
     /// Looks for a newer release in the background (once at a time). `asked`: chosen from
@@ -410,20 +421,74 @@ fn reinstall(app: &App, slots: &Slots) -> bool {
     }
 }
 
-/// Waits up to `seconds` for a control before the bridge runs, acting on a Reinstall (the
-/// rest are picked up by the caller's next look at the config).
-fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) {
-    if let Ok(Control::Reinstall) = rx.recv_timeout(Duration::from_secs(seconds)) {
-        match slots {
-            Some(slots) => {
-                reinstall(app, slots);
-            }
-            None => app.notify(Notice::new(
-                Level::Error,
-                "Can't reinstall the addon yet",
-                "T3 WoW hasn't found the WoW folder: choose it with Choose WoW folder… in the tray menu first.",
-            )),
+/// Puts back the addon files that are gone and updates an older addon, keeping the rest:
+/// the slots' updates, the sign-in, the settings. `asked`: chosen from the tray, so it says
+/// how it went whatever happened. A note to restart WoW when anything was written.
+fn put_back(app: &App, slots: &Slots, asked: bool) -> Option<RestartNote> {
+    let repair = match slots.repair() {
+        Ok(repair) => repair,
+        Err(error) => {
+            log::line(&format!("Couldn't put back the addon files: {error}"));
+            app.notify(Notice::new(Level::Error, "Couldn't write the addon files", error.to_string()));
+            return None;
         }
+    };
+    if let Some(addon) = &repair.addon {
+        log::line(&format!("Addon {addon} in {}", slots.addon_dir.display()));
+    }
+    if repair.created > 0 {
+        log::line(&format!("Created {} missing addon files", repair.created));
+    }
+    if repair.addon.is_none() && repair.created == 0 {
+        if asked {
+            app.notify(Notice::new(Level::Info, "Addon files: nothing missing", format!("Every T3 WoW file is in {}.", slots.addons_dir.display())));
+        }
+        return None;
+    }
+    let what = match &repair.addon {
+        Some(addon) => format!("The addon was {addon}"),
+        None => format!("{} missing addon files were put back", repair.created),
+    };
+    let notice = if asked {
+        // Said now, whether WoW runs or not.
+        app.notify(Notice::new(
+            Level::Info,
+            "Addon files put back",
+            format!("{what}; your updates, sign-in and settings stay. If WoW is running, it needs a restart to load them: {RESTART_WOW}"),
+        ));
+        None
+    } else {
+        // Said once WoW is seen running with the old files.
+        Some(Notice::new(Level::Warning, "Restart WoW to load the new addon", format!("{what}, but the running game still has the old files. {RESTART_WOW}")))
+    };
+    Some(RestartNote { line: "restart WoW to load the new addon files (not /reload)".into(), notice })
+}
+
+/// How often the companion looks for addon files gone while it runs, and how long it waits
+/// after failing to put them back.
+const PUT_BACK_EVERY: Duration = Duration::from_secs(10);
+const PUT_BACK_RETRY: Duration = Duration::from_secs(300);
+
+/// Waits up to `seconds` for a control before the bridge runs, acting on a Reinstall or a
+/// Repair (the rest are picked up by the caller's next look at the config).
+fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) {
+    let reinstalling = match rx.recv_timeout(Duration::from_secs(seconds)) {
+        Ok(Control::Reinstall) => true,
+        Ok(Control::Repair) => false,
+        _ => return,
+    };
+    match slots {
+        Some(slots) if reinstalling => {
+            reinstall(app, slots);
+        }
+        Some(slots) => {
+            put_back(app, slots, true);
+        }
+        None => app.notify(Notice::new(
+            Level::Error,
+            "Can't change the addon yet",
+            "T3 WoW hasn't found the WoW folder: choose it with Choose WoW folder… in the tray menu first.",
+        )),
     }
 }
 
@@ -450,28 +515,7 @@ pub fn run(app: Arc<App>) {
 
     // 2. The addon files: put back what's missing, install or update the addon.
     let slots = Slots::for_wow(&wow_dir, &interface);
-    let mut restart: Option<RestartNote> = None;
-    match slots.repair() {
-        Ok(repair) => {
-            if let Some(addon) = &repair.addon {
-                log::line(&format!("Addon {addon} in {}", slots.addon_dir.display()));
-            }
-            if repair.created > 0 {
-                log::line(&format!("Created {} missing addon files", repair.created));
-            }
-            if repair.addon.is_some() || repair.created > 0 {
-                let what = match &repair.addon {
-                    Some(addon) => format!("The addon was {addon}"),
-                    None => "Missing addon files were put back".to_string(),
-                };
-                restart = Some(RestartNote {
-                    line: "restart WoW to load the new addon files (not /reload)".into(),
-                    notice: Some(Notice::new(Level::Warning, "Restart WoW to load the new addon", format!("{what}, but the running game still has the old files. {RESTART_WOW}"))),
-                });
-            }
-        }
-        Err(error) => app.notify(Notice::new(Level::Error, "Couldn't write the addon files", error.to_string())),
-    }
+    let mut restart: Option<RestartNote> = put_back(&app, &slots, false);
     // 0.5.0's Match WoW's interface version… could save a number no WoW has (1607186, from a
     // misread Wow.exe), and the game then marked every T3 WoW addon Incompatible. Config
     // already reads that as the shipped number; put it back in the files and the settings.
@@ -549,6 +593,8 @@ pub fn run(app: Arc<App>) {
     // For the restart note: the bridge only knows WoW runs once the capture has looked.
     let mut restart_since = Instant::now();
     let mut seen_running = false;
+    // When to look for addon files gone next (Put back missing addon files automatically).
+    let mut put_back_at = Instant::now() + PUT_BACK_EVERY;
     loop {
         while let Ok(message) = capture_rx.try_recv() {
             bridge.on_capture(message);
@@ -577,7 +623,33 @@ pub fn run(app: Arc<App>) {
                         bridge.republish();
                     }
                 }
+                Control::Repair => {
+                    if let Some(note) = put_back(&app, &slots, true) {
+                        restart = Some(note);
+                        (restart_since, seen_running) = (Instant::now(), false);
+                        // A slot written blank again lost its update: write them again.
+                        bridge.republish();
+                    }
+                }
                 Control::Trust(trust) => bridge.set_trust(trust),
+            }
+        }
+        // Something replaced or cleaned the addon folder (an addon manager, a copy of the
+        // addon from elsewhere): put back what it took, so the next start of WoW finds it.
+        // The addon itself gone means it was uninstalled: that stays as it is.
+        if Instant::now() >= put_back_at {
+            put_back_at = Instant::now() + PUT_BACK_EVERY;
+            if slots.missing_files() && slots.installed_version().is_some() && Config::load().put_back_files() {
+                log::line("Some addon files are gone from the AddOns folder: putting them back");
+                match put_back(&app, &slots, false) {
+                    Some(note) => {
+                        restart = Some(note);
+                        (restart_since, seen_running) = (Instant::now(), false);
+                        bridge.republish();
+                    }
+                    None if slots.missing_files() => put_back_at = Instant::now() + PUT_BACK_RETRY,
+                    None => {}
+                }
             }
         }
         bridge.tick();
@@ -632,7 +704,7 @@ pub fn run(app: Arc<App>) {
             (true, true, _) if s.write_problem.is_some() => s.write_problem.as_deref().unwrap_or("").chars().take(70).collect::<String>(),
             (true, true, _) if used >= SLOT_COUNT => "in game, all 200 updates used: Reload UI in the game".to_string(),
             (true, true, true) => format!("in game, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
-            (true, true, false) if s.signals_lost => "in game, signal files missing: Reinstall addon, then restart WoW".to_string(),
+            (true, true, false) if s.signals_lost && slots.missing_files() => "in game, signal files missing: choose Repair addon files, then restart WoW".to_string(),
             (true, true, false) if s.signals_out => format!("in game, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
             (true, true, false) => format!("in game, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
         };
