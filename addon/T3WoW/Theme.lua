@@ -33,7 +33,8 @@ Skin.THEMES = {
         fonts = {
             regular = MEDIA .. "Inter-Regular.ttf", strong = MEDIA .. "Inter-SemiBold.ttf", heading = MEDIA .. "Inter-SemiBold.ttf", mono = MONO,
         },
-        sizes = { text = 13, strong = 13, small = 11, title = 15, label = 11, button = 12, pill = 10, code = 12 },
+        -- Inter is wider than Arial Narrow, so its body text is a size smaller to take the same room.
+        sizes = { text = 12, strong = 12, small = 11, title = 15, label = 11, button = 12, pill = 10, code = 12 },
         shadow = false,
         check = "toggle", pillAlpha = 0.14,
         rowHeight = 44, compactHeight = 24,
