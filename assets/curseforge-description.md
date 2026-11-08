@@ -8,13 +8,24 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow-releases/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
 
+## Highlights
+
+- **Paste a screenshot to your agent.** Copy an image, press Ctrl+V in the message box, and it goes with your next message. Click it to see it bigger, before or after you send it.
+- **Switch models without leaving the game.** Pick the model and effort right in the message box, and move a thread to another provider mid-conversation.
+- **Launch agents between pulls.** Start a thread on any linked machine, with its project, model, effort, permissions and a worktree of its own.
+- **Never miss a finished run.** A notification slides in with T3 Code's own sound when a thread finishes, fails or needs you. Click it to open that thread.
+- **See what your agents made.** Charts and mockups they show appear as pictures right in the conversation.
+- **Keep an eye on your pull requests.** Each thread shows its linked PR, colored by whether it's open, merged or closed. Click one in an open thread to open it in your browser.
+
 ## What it does
 
-**Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar: Open, Working, Snoozed and Settled. Each title shows the machine and project under it. Threads an agent started appear indented under the thread that started them, as in T3. **Search**, over the list, narrows it as you type to threads whose title, project or machine matches; Enter opens the first one.
+**Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar: Open, Working, Snoozed and Settled. Each title shows the machine and project under it. Threads an agent started appear indented under the thread that started them, as in T3. **Search**, over the list, narrows it as you type to threads whose title, project or machine matches; Enter opens the first one. Each row shows the thread's linked pull request, green when open, purple when merged and red when closed. An open thread's header shows the branch its checkout is on and lists its pull requests; click one to open it in your browser.
 
-**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. To send an image, copy it (a screenshot, an image from a browser) and press Ctrl+V in the box: it shows small above the box and goes with your next message, in a thread or a new one. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
+**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). The box keeps the keyboard so you can type the next message; Escape gives it back to the game. If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. To send an image, copy it (a screenshot, an image from a browser) and press Ctrl+V in the box: it shows small above the box, where a click enlarges it, and goes with your next message, in a thread or a new one. Once sent, it shows small under your message, and a click enlarges it there too. Images attached in T3 itself don't show in the game. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
 
-**Start threads.** **New Thread** asks for the machine, the project, and whether the thread runs in a new worktree or the current checkout, then starts a thread with your message as its task and opens it.
+**Pick the model.** Inside the message box sit the model, its effort and the permissions, as in T3. In an open thread, picking a model or an effort changes it right away, on any provider the machine runs, and a move to another provider shows as a line in the conversation. A thread keeps the permissions it started with; to change them, use T3.
+
+**Start threads.** **New Thread** asks for the machine, the project, and whether the thread runs in a new worktree or the current checkout, then starts a thread with your message as its task and opens it. You can pick its model, effort and permissions too; whatever you leave alone stays T3's default.
 
 **Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Send answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
 
@@ -60,7 +71,7 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 1. Download t3wow.exe and run it. It runs in the system tray. The app isn't signed, so Windows may warn about an unrecognized app the first time. Choose More info, then Run anyway.
 2. It finds WoW: Forever, installs this addon and its update slots, and opens T3's sign-in page. Approve the sign-in, which lasts 30 days.
 3. Restart WoW completely the first time (not /reload). In the AddOns list, keep T3 WoW and the grey T3 WoW slot entries enabled.
-4. Leave the companion running while you play. Its tray menu shows the T3 and WoW status, and has sign in and out, Choose WoW folder, Reinstall addon, Match WoW's interface version, Commands from the game, Open log, Start with Windows and the update check.
+4. Leave the companion running while you play. Its tray menu shows the T3 and WoW status, and has sign in and out, Choose WoW folder, Repair addon files, Put back missing addon files automatically, Reinstall addon, Match WoW's interface version, Commands from the game, Open log, Start with Windows and the update check.
 
 The companion checks for a new version when it starts and every 6 hours, and updates itself from the tray menu. It installs an update only when the download matches the release's checksum (and, once release signing is set up, when the release is signed with the project's release key). The companion includes the addon, so the addon updates with it. If you install the addon from CurseForge, it updates here, and the companion never replaces a newer addon with an older one.
 
@@ -70,7 +81,7 @@ Any addon you install can draw the same strip of squares T3 WoW draws, and the c
 
 - **Full** (the default): everything the window offers.
 - **No new threads**: everything but starting threads.
-- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, Stop or Settle).
+- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Stop or Settle).
 
 It applies at once. The window greys out what the setting blocks and says why. Install addons you trust, or pick a stricter setting.
 
@@ -78,7 +89,7 @@ If you stream or record your game: the strip encodes what you send from the game
 
 ## How it works
 
-Addons can't talk to other programs, so the companion connects the two. While a command is waiting, the addon draws it as a small strip of colored squares in the top-left corner of the screen. The companion reads that corner of the WoW window and sends answers back as files in the AddOns folder, which the game loads. The companion never sends input to the game or reads its memory, and the addon uses only the documented addon API.
+Addons can't talk to other programs, so the companion connects the two. While a command is waiting, the addon draws it as a small strip of colored squares in the top-left corner of the screen. The companion reads that corner of the WoW window and sends answers back as files in the AddOns folder, which the game loads. To paste images, while the T3 WoW window is open, the companion checks Ctrl+V (those two keys only, about 60 times a second). It only counts presses made with WoW in front, and reads the clipboard only for a paste received within five seconds of such a press. The companion never sends input to the game or reads its memory, and the addon uses only the documented addon API.
 
 Each UI session has 200 updates, and the companion only spends one when something you can see changed. From 190, the window and a chat line say to Reload UI soon. After 200, notifications stop until you Reload UI. While the companion isn't running, the addon checks for updates less and less often, so it doesn't use them up.
 
