@@ -557,6 +557,8 @@ pub struct Bridge {
     pub clipboard: Box<dyn Fn() -> Result<Option<Clipped>, String> + Send>,
     /// Ctrl+V presses seen in WoW, and when the last was (`keys::presses`); replaced in tests.
     pub presses: Box<dyn Fn() -> (u64, i64) + Send>,
+    /// Turns the look for Ctrl+V on or off (`keys::arm`); replaced in tests.
+    pub arm_keys: Box<dyn Fn(bool) + Send>,
     /// The presses pastes have used: each press lets one paste through.
     presses_used: u64,
     /// Images pasted in the game, by the message they go with: "new" for New Thread,
@@ -1077,6 +1079,7 @@ impl Bridge {
             picture_errors: HashMap::new(),
             clipboard: Box::new(clip::read_image),
             presses: Box::new(crate::keys::presses),
+            arm_keys: Box::new(crate::keys::arm),
             presses_used: 0,
             drafts: BTreeMap::new(),
             sent: Vec::new(),
@@ -1407,8 +1410,10 @@ impl Bridge {
             match kind.as_str() {
                 "hello" | "ui" => {
                     self.window_open = command["o"] == true;
-                    // Ctrl+V is looked for only while the window is open (see `keys`).
-                    crate::keys::arm(self.window_open);
+                    // Ctrl+V is looked for only while you type in the message box (see `keys`).
+                    // An older addon doesn't say, so for it the window being open has to do.
+                    let typing = command["f"].as_bool().unwrap_or(true);
+                    (self.arm_keys)(self.window_open && typing);
                 }
                 "open" => {
                     self.view = (!id.is_empty()).then(|| View { env: env.clone(), id: id.clone(), depth: 1 });

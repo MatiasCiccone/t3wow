@@ -2008,8 +2008,16 @@ input:SetAutoFocus(false)
 input:SetFontObject(Skin.fonts.text)
 input:SetTextInsets(0, 0, 2, 2)
 input:SetWidth(messageWidth() - 24)
-input:SetScript("OnEditFocusGained", function() inputBox:SetColors(nil, "focus") end)
-input:SetScript("OnEditFocusLost", function() inputBox:SetColors(nil, "border") end)
+-- The companion looks for Ctrl+V only while you're typing here, so it hears when you are.
+input:SetScript("OnEditFocusGained", function()
+    inputBox:SetColors(nil, "focus")
+    ns.Link.Send({ t = "ui", o = true, f = true })
+end)
+input:SetScript("OnEditFocusLost", function()
+    inputBox:SetColors(nil, "border")
+    -- A window closing says so itself.
+    if frame:IsShown() then ns.Link.Send({ t = "ui", o = true, f = false }) end
+end)
 input:SetMaxBytes(2400)
 inputScroll:SetScrollChild(input)
 input:SetScript("OnEscapePressed", input.ClearFocus)
@@ -3437,7 +3445,7 @@ end)
 
 frame:SetScript("OnShow", function()
     restoreLayout()
-    ns.Link.Send({ t = "ui", o = true })
+    ns.Link.Send({ t = "ui", o = true, f = input:HasFocus() and true or false })
     scrollToEnd = true -- reopening the window also lands on the latest message
     UI.Refresh()
 end)
