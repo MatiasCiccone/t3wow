@@ -537,6 +537,8 @@ pub fn run(app: Arc<App>) {
     let (capture_tx, capture_rx) = channel::<CaptureMessage>();
     #[cfg(windows)]
     crate::capture::spawn(wow_dir.clone(), capture_tx);
+    #[cfg(windows)]
+    crate::keys::spawn();
     #[cfg(not(windows))]
     drop(capture_tx);
 

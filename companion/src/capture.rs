@@ -97,6 +97,10 @@ mod win {
     }
 
     impl WowProcess {
+        pub fn pid(&self) -> u32 {
+            self.pid
+        }
+
         /// Still the live client and its window: a few cheap calls, no snapshot. Needs a
         /// real client, so it isn't unit-tested.
         pub fn still_valid(&self) -> bool {
@@ -319,6 +323,8 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                     wow = win::find_wow(&client_folder);
                     searched = Some(std::time::Instant::now());
                 }
+                // Ctrl+V counts only in this client (see `keys`).
+                crate::keys::watch_process(wow.as_ref().map_or(0, |w| w.pid()));
                 let key = wow.as_ref().map(|w| w.key.clone());
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key.clone());
@@ -333,7 +339,7 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                         win::Sampled::Cells(cells) => {
                             if cells != last_cells {
                                 last_cells = cells.clone();
-                                if tx.send(CaptureMessage::Strip(cells)).is_err() {
+                                if tx.send(CaptureMessage::Strip(cells, crate::config::now_ms())).is_err() {
                                     return;
                                 }
                             }

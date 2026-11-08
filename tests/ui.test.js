@@ -41,6 +41,7 @@ function inboxWith(envs, extra)
   for _, p in ipairs(extra and extra.projects or {}) do data.projects[#data.projects + 1] = p end
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
   data.more = extra and extra.more
+  data.att, data.pi = extra and extra.att, extra and extra.pi
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -1190,4 +1191,103 @@ pillHit().scripts.OnClick(pillHit(), "LeftButton")
 return tostring(reloads)
 `, { before: `reloads = 0; function ReloadUI() reloads = reloads + 1 end` });
   assert.equal(out, "1");
+});
+
+// Presses Ctrl+V in the message box. `pasted` is the text the game pastes, if any.
+const CTRL_V = `
+function ctrlV(pasted)
+  local box, later = composer(), nil
+  local after = C_Timer.After
+  C_Timer.After = function(_, fn) later = fn end
+  controlDown = true
+  box.scripts.OnKeyDown(box, "V")
+  controlDown = false
+  C_Timer.After = after
+  if pasted then box.text = box.text .. pasted end
+  later()
+end
+function pasteChips()
+  local chips = {}
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "image") ~= nil and f.shown then chips[#chips + 1] = f end
+  end
+  return chips
+end
+THREAD = { e = 2, id = "t1", t = "Mac thread", s = "completed", set = false, at = time(), p = "" }
+`;
+
+test("Ctrl+V that pastes no text asks the companion for the clipboard's image, which shows above the box and goes with Send", () => {
+  run(`${CTRL_V}
+inboxWith(ENVS, { pi = true, threads = { THREAD } })
+UI.Select({ e = 2, id = "t1" })
+-- Text on the clipboard: the game pasted it, nothing to ask for.
+local before = #queue()
+ctrlV("some text")
+assert(#queue() == before, "asked for an image after text was pasted")
+-- Nothing pasted: the clipboard may hold an image.
+typeText("what's this?")
+ctrlV()
+assert(sent().t == "paste" and sent().d == "mac:t1", tostring(sent().t) .. " " .. tostring(sent().d))
+assert(showing("Sending…"))
+-- The companion has it: drawn small above the box, from its image slot; New Thread's isn't.
+local att = { { d = "mac:t1", i = 1, w = 1920, h = 1080, f = 3, tw = 142, th = 80 }, { d = "new", i = 2, w = 4, h = 4 } }
+inboxWith(ENVS, { pi = true, threads = { THREAD }, att = att })
+local chips = pasteChips()
+assert(#chips == 1 and chips[1].image.i == 1, #chips)
+assert(chips[1].picture.texturePath == ROOT .. "img\\\\0003.tga", tostring(chips[1].picture.texturePath))
+assert(chips[1].picture.shown, "no small picture")
+-- Send takes it along (the companion attaches what is pasted for the thread); images
+-- alone are a message too.
+typeText("")
+click("Send")
+assert(sent().t == "send" and sent().id == "t1" and sent().m == "", tostring(sent().m))
+assert(showing("Sending…"))
+-- New Thread shows its own, by number when the game can't show pictures.
+click("New Thread")
+chips = pasteChips()
+assert(#chips == 1 and chips[1].image.i == 2, #chips)
+assert(not chips[1].picture.shown and chips[1].label.text == "Image 1", tostring(chips[1].label.text))
+-- × takes one back.
+chips[1].remove.scripts.OnClick(chips[1].remove)
+assert(sent().t == "unpaste" and sent().d == "new" and sent().i == 2, tostring(sent().t))
+inboxWith(ENVS, { pi = true, threads = { THREAD }, att = { att[1] } })
+assert(#pasteChips() == 0, "still shows the image taken back")
+click("Start")
+assert(#queue() == 0, "started with nothing typed and no image")
+return "ok"
+`);
+});
+
+test("Ctrl+V asks for an image only from a companion that pastes, and a refused paste says why", () => {
+  run(`${CTRL_V}
+-- An older companion: Ctrl+V only pastes text, as before.
+inboxWith(ENVS, { threads = { THREAD } })
+UI.Select({ e = 2, id = "t1" })
+local before = #queue()
+ctrlV()
+assert(#queue() == before, "asked an older companion to paste")
+assert(not showing("Ctrl%+V pastes images"))
+-- A companion that pastes: the box says so, and a refusal comes back to the window.
+inboxWith(ENVS, { pi = true, threads = { THREAD } })
+assert(showing("Ctrl%+V pastes images too"))
+ctrlV()
+local s = sent().s
+inboxWith(ENVS, { pi = true, threads = { THREAD }, out = { { s = s, ok = false, x = "T3 WoW pastes only right after you press Ctrl+V in its message box" } } })
+assert(showing("Not pasted: T3 WoW pastes only right after"), "refusal not shown")
+assert(not showing("your text is back"))
+-- Read-only in the tray: not asked, and the window says why.
+inboxWith(ENVS, { pi = true, trust = "readonly", threads = { THREAD } })
+before = #queue()
+ctrlV()
+assert(#queue() == before)
+assert(showing("Pasting images from the game is off"))
+-- Eight is the most a message takes.
+local att = {}
+for i = 1, 8 do att[i] = { d = "mac:t1", i = i, w = 4, h = 4 } end
+inboxWith(ENVS, { pi = true, threads = { THREAD }, att = att })
+ctrlV()
+assert(#queue() == 0)
+assert(showing("A message takes 8 images at most"))
+return "ok"
+`);
 });

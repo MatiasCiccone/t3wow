@@ -10,10 +10,12 @@
 mod app;
 mod bridge;
 mod capture;
+mod clip;
 mod codec;
 mod config;
 #[cfg(windows)]
 mod dialog;
+mod keys;
 mod log;
 mod lua;
 mod render;

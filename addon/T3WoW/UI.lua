@@ -105,9 +105,10 @@ end
 -- "readonly"; an older companion leaves it out) limits what the game may make T3 do. The
 -- companion refuses those commands anyway: the window greys them out and says why.
 local TRUST_NAME = { nonew = "No new threads", readonly = "Read-only" }
-local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true }
+local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true, paste = true }
 local BLOCKED_LEAD = {
     send = "Sending messages from the game is off", new = "Starting threads from the game is off",
+    paste = "Pasting images from the game is off",
     answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
 }
 local function blockedReason(kind)
@@ -1747,7 +1748,8 @@ function renderView()
             echo = nil
         else
             local fs = messageString(count + 1)
-            placeMessage(fs, "|cff" .. Skin.Hex("dim") .. "(sending)|r\n" .. echo.text:gsub("|", "||"), true)
+            local pictures = (echo.images or 0) > 0 and format("[%d %s]\n", echo.images, echo.images == 1 and "image" or "images") or ""
+            placeMessage(fs, "|cff" .. Skin.Hex("dim") .. "(sending)|r\n" .. pictures .. echo.text:gsub("|", "||"), true)
         end
     end
     renderAsk(view)
@@ -1798,6 +1800,7 @@ setPlaceholder = function()
     local asking = pendingAsk() ~= nil
     local blocked = blockedReason((selected and selected.new) and "new" or (asking and "answer" or "send"))
     placeholder:SetText(blocked or (asking and "Type your own answer, or pick one above")
+        or (inbox and inbox.pi and "Message the agent (Shift+Enter for a new line, Ctrl+V pastes images too)")
         or "Message the agent (Shift+Enter for a new line)")
 end
 input:SetScript("OnCursorChanged", function(_, _, y, _, height)
@@ -1805,6 +1808,125 @@ input:SetScript("OnCursorChanged", function(_, _, y, _, height)
     if -y < offset then inputScroll:SetVerticalScroll(-y)
     elseif -y + height > offset + inputScroll:GetHeight() then inputScroll:SetVerticalScroll(-y + height - inputScroll:GetHeight()) end
 end)
+
+-- ---------------------------------------------------------------- pasting images
+-- The game can't read the clipboard, and Ctrl+V pastes only text into the box. When it
+-- pastes nothing, the clipboard may hold an image: the companion reads it, and keeps it
+-- for the message being written (a thread's, or New Thread's), drawn small above the box
+-- (inbox.att: { d = the message, i = its number, w, h, and f, tw, th for the small
+-- picture's image slot and size }). It takes the paste only right after a real Ctrl+V in
+-- WoW, so no other addon can paste for you. Each × takes one back; Send sends them along.
+-- One table, not a local each: the file is near Lua's 200 locals in one chunk.
+local Paste = {}
+do
+    local MAX_PASTED = 8
+    local PASTE_HEIGHT = 44
+
+    -- The message being written: "new" in New Thread, else "<machine>:<thread>".
+    function Paste.DraftKey()
+        if not selected then return nil end
+        if selected.new then return "new" end
+        return (selected.env or "") .. ":" .. tostring(selected.id)
+    end
+
+    function Paste.For(key)
+        local list = {}
+        for _, image in ipairs(key and inbox and type(inbox.att) == "table" and inbox.att or {}) do
+            if type(image) == "table" and image.d == key then list[#list + 1] = image end
+        end
+        return list
+    end
+
+    local function requestPaste()
+        local key = Paste.DraftKey()
+        -- An older companion can't paste: Ctrl+V just pastes text, as it always did.
+        if not key or not (inbox and inbox.pi) then return end
+        local blocked = blockedReason("paste")
+        if blocked then return UI.Notice(blocked) end
+        if #Paste.For(key) >= MAX_PASTED then return UI.Notice(format("A message takes %d images at most.", MAX_PASTED)) end
+        local s = ns.Link.Send({ t = "paste", d = key })
+        if s then awaiting[s] = { kind = "paste", at = GetTime() } end
+        UI.Refresh()
+    end
+
+    input:SetScript("OnKeyDown", function(self, key)
+        if key ~= "V" or not (IsControlKeyDown() or (IsMetaKeyDown and IsMetaKeyDown())) then return end
+        -- Once the game has pasted: no text came in, so look for an image.
+        local before = self:GetText()
+        C_Timer.After(0, function()
+            if self:GetText() == before then requestPaste() end
+        end)
+    end)
+
+    local pasteRow = CreateFrame("Frame", nil, right)
+    pasteRow:SetPoint("BOTTOMLEFT", inputBg, "TOPLEFT", 0, 6)
+    pasteRow:SetPoint("BOTTOMRIGHT", inputBg, "TOPRIGHT", 0, 6)
+    pasteRow:SetHeight(PASTE_HEIGHT)
+    pasteRow:Hide()
+    local pasteChips = {}
+
+    local function chipTooltip(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText(format("Pasted image, %d x %d", tonumber(self.image.w) or 0, tonumber(self.image.h) or 0))
+        GameTooltip:AddLine("It goes with your next message. × takes it back.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end
+
+    local function pasteChip(index)
+        local chip = pasteChips[index]
+        if chip then return chip end
+        chip = CreateFrame("Button", nil, pasteRow)
+        chip.box = Skin.Box(chip, { shape = "panel", fill = "card", ring = "border" })
+        chip.picture = chip:CreateTexture(nil, "ARTWORK")
+        chip.picture:SetPoint("CENTER")
+        chip.label = chip:CreateFontString(nil, "OVERLAY")
+        chip.label:SetFontObject(Skin.fonts.small)
+        chip.label:SetPoint("CENTER")
+        chip.remove = Skin.CloseButton(chip, function()
+            local image = chip.image
+            if image then ns.Link.Send({ t = "unpaste", d = image.d, i = image.i }) end
+        end)
+        chip.remove:SetSize(18, 18)
+        chip.remove:SetPoint("TOPRIGHT", 4, 4)
+        chip:SetScript("OnEnter", chipTooltip)
+        chip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        pasteChips[index] = chip
+        return chip
+    end
+
+    -- The images pasted for the message being written, in a row above the box; the
+    -- conversation (or New Thread's choices) ends above them while there are any.
+    function Paste.Render()
+        local list = Paste.For(Paste.DraftKey())
+        local x = 0
+        for i, image in ipairs(list) do
+            local chip = pasteChip(i)
+            chip.image = image
+            local height = PASTE_HEIGHT - 4
+            local width = 64
+            if type(image.f) == "number" and tonumber(image.tw) and tonumber(image.th) and tonumber(image.th) > 0 then
+                width = math.min(120, math.max(24, height * image.tw / image.th))
+                chip.picture:SetTexture(format("Interface\\AddOns\\T3WoW\\img\\%04d.tga", image.f))
+                chip.picture:SetSize(width - 4, height - 4)
+                chip.picture:Show()
+                chip.label:SetText("")
+            else
+                chip.picture:Hide()
+                chip.label:SetText(format("Image %d", i))
+            end
+            chip:SetSize(width, height)
+            chip:ClearAllPoints()
+            chip:SetPoint("BOTTOMLEFT", pasteRow, "BOTTOMLEFT", x, 0)
+            chip:Show()
+            x = x + width + 8
+        end
+        for i = #list + 1, #pasteChips do pasteChips[i]:Hide() end
+        pasteRow:SetShown(#list > 0)
+        local bottom = 100 + (#list > 0 and (PASTE_HEIGHT + 6) or 0)
+        messageScroll:SetPoint("BOTTOMRIGHT", -26, bottom)
+        newPanel:SetPoint("BOTTOMRIGHT", -26, bottom)
+    end
+end
 
 -- ---------------------------------------------------------------- copying
 -- The game can't write to the clipboard, so a clicked message opens over the conversation
@@ -1870,7 +1992,9 @@ local function sendCurrent()
         UI.Refresh()
         return
     end
-    if text == "" or not selected then return end
+    -- Pasted images can go on their own.
+    local images = #Paste.For(Paste.DraftKey())
+    if (text == "" and images == 0) or not selected then return end
     local blocked = blockedReason(selected.new and "new" or "send")
     if blocked then
         UI.Notice(blocked)
@@ -1900,8 +2024,8 @@ local function sendCurrent()
     if s then awaiting[s] = { kind = command.t, text = text, at = GetTime() } end
     if selected.new then
         UI.Notice("Starting a new thread…")
-    else
-        echo = { id = selected.id, text = text, s = s }
+    elseif text ~= "" then
+        echo = { id = selected.id, text = text, s = s, images = images }
     end
     input:SetText("")
     input:ClearFocus()
@@ -2510,6 +2634,7 @@ function UI.Refresh()
     if not frame:IsShown() then return end
     renderList()
     renderView()
+    Paste.Render()
     renderStatus()
 end
 
@@ -2558,7 +2683,8 @@ local function takeOutcomes(data)
                 if sent.text and input:GetText() == "" then input:SetText(sent.text) end
                 if echo and echo.s == o.s then echo = nil end
                 if sent.kind == "answer" then askState.sent = nil end
-                local what = sent.kind == "new" and "Couldn't start the thread" or (sent.kind == "answer" and "Answer not sent" or "Not sent")
+                local what = sent.kind == "new" and "Couldn't start the thread" or (sent.kind == "answer" and "Answer not sent")
+                    or (sent.kind == "paste" and "Not pasted") or "Not sent"
                 said = format("|cffff4040%s: %s|r%s", what, tostring(o.x or "failed"), sent.text and " (your text is back in the box)" or "")
             end
         end

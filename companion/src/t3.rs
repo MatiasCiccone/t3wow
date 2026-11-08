@@ -33,6 +33,9 @@ impl std::fmt::Display for T3Error {
 /// What the bridge needs from T3; a trait so tests can stand in for it.
 pub trait T3: Send + Sync {
     fn call(&self, name: &str, args: Value) -> Result<Value, T3Error>;
+    /// Sends a file's bytes to the upload address `t3_attachment_prepare_upload` gave (a
+    /// path on T3's origin that carries its own permission).
+    fn upload(&self, relative_url: &str, content_type: &str, bytes: &[u8]) -> Result<(), T3Error>;
 }
 
 /// The local T3 server's origin, from the runtime file the server writes while it runs.
@@ -141,6 +144,8 @@ pub struct SignIn {
 /// commands, the tray's controls and the screen capture, so a hung T3 mustn't hold
 /// them up for longer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// An image upload (up to 10 MB, maybe to T3 on another machine) gets longer.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// HTTP statuses come back as responses (not errors), so callers read error bodies too.
 fn agent() -> ureq::Agent {
@@ -601,6 +606,28 @@ impl T3 for McpClient {
         }
         unreachable!()
     }
+
+    fn upload(&self, relative_url: &str, content_type: &str, bytes: &[u8]) -> Result<(), T3Error> {
+        if !relative_url.starts_with('/') {
+            return Err(T3Error::Other("T3 gave an upload address that isn't on its server".into()));
+        }
+        let origin = self.endpoint.strip_suffix("/mcp").unwrap_or(&self.endpoint);
+        let mut response = self
+            .http
+            .post(&format!("{origin}{relative_url}"))
+            .config()
+            .timeout_global(Some(UPLOAD_TIMEOUT))
+            .build()
+            .header("content-type", content_type)
+            .send(bytes)
+            .map_err(|e| T3Error::Other(format!("T3 unreachable: {e}")))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let text = response.body_mut().read_to_string().unwrap_or_default();
+        Err(T3Error::Other(format!("T3 refused the image ({status}): {}", text.chars().take(200).collect::<String>())))
+    }
 }
 
 #[cfg(test)]
@@ -664,6 +691,25 @@ mod tests {
         assert!(reply.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{reply}");
         assert!(!reply.contains("<script>"), "{reply}");
         assert_eq!(waiting.join().unwrap(), Err("Sign-in failed: <script>alert(1)</script>".to_string()));
+    }
+
+    #[test]
+    #[ignore = "uploads a 1-pixel image to the T3 the companion is signed in to, then discards it"]
+    fn uploads_an_image_to_the_signed_in_t3() {
+        let target = target().expect("no T3 to talk to");
+        let client = McpClient::new(&target.origin, target.token.as_deref().expect("not signed in"));
+        let png = crate::clip::encode_png(&crate::render::Bitmap { width: 1, height: 1, rgba: vec![0, 255, 0, 255] }).unwrap();
+        let upload = json!({ "type": "image", "name": "t3wow-probe.png", "mimeType": "image/png", "sizeBytes": png.len() });
+        let prepared = client.call("t3_attachment_prepare_upload", json!({ "upload": upload })).unwrap();
+        let id = prepared["attachmentId"].as_str().unwrap().to_string();
+        client.upload(prepared["relativeUrl"].as_str().unwrap(), "image/png", &png).unwrap();
+        // A wrong size is refused, and says so.
+        let other = client.call("t3_attachment_prepare_upload", json!({ "upload": { "type": "image", "name": "x.png", "mimeType": "image/png", "sizeBytes": png.len() + 5 } })).unwrap();
+        let refused = client.upload(other["relativeUrl"].as_str().unwrap(), "image/png", &png);
+        println!("uploaded {id} to {}; a wrong size: {refused:?}", target.origin);
+        for discard in [id.as_str(), other["attachmentId"].as_str().unwrap()] {
+            client.call("t3_attachment_discard", json!({ "attachmentId": discard })).unwrap();
+        }
     }
 
     #[test]
