@@ -12,6 +12,8 @@ const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 /// The small picture's height, in pixels (the game draws it about half that tall).
 pub const THUMB_HEIGHT: u32 = 80;
 const THUMB_MAX_WIDTH: u32 = 240;
+/// The widest large picture of a pasted image (a 1024-wide texture loads in the game).
+const PREVIEW_MAX_WIDTH: u32 = 1024;
 
 /// An image read from the clipboard: the PNG to send and the pixels to draw it from.
 pub struct Clipped {
@@ -104,6 +106,14 @@ fn halved(bitmap: &Bitmap) -> Bitmap {
 pub fn thumbnail(bitmap: &Bitmap) -> Bitmap {
     let (w, h) = (bitmap.width as f64, bitmap.height as f64);
     let scale = (THUMB_HEIGHT as f64 / h).min(THUMB_MAX_WIDTH as f64 / w).min(1.0);
+    scaled(bitmap, ((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1))
+}
+
+/// The large picture: what the game enlarges on a click and shows in the conversation once
+/// the image is sent. An image that fits a texture stays as it is.
+pub fn preview(bitmap: &Bitmap) -> Bitmap {
+    let (w, h) = (bitmap.width as f64, bitmap.height as f64);
+    let scale = (PREVIEW_MAX_WIDTH as f64 / w).min(crate::render::MAX_HEIGHT as f64 / h).min(1.0);
     scaled(bitmap, ((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1))
 }
 
@@ -342,6 +352,16 @@ mod tests {
         let tiny = Bitmap { width: 2, height: 2, rgba: [RED, BLUE, RED, BLUE].concat() };
         assert_eq!(thumbnail(&tiny), tiny);
         assert_eq!(halved(&tiny).rgba, vec![127, 0, 127, 255]);
+    }
+
+    #[test]
+    fn previews_fit_a_texture_keeping_the_shape_and_small_images_stay_as_they_are() {
+        let wide = Bitmap { width: 1920, height: 1080, rgba: vec![200; 1920 * 1080 * 4] };
+        assert_eq!((preview(&wide).width, preview(&wide).height), (1024, 576));
+        let tall = Bitmap { width: 400, height: 4096, rgba: vec![0; 400 * 4096 * 4] };
+        assert_eq!((preview(&tall).width, preview(&tall).height), (200, 2048));
+        let tiny = Bitmap { width: 2, height: 2, rgba: [RED, BLUE, RED, BLUE].concat() };
+        assert_eq!(preview(&tiny), tiny);
     }
 
     #[test]

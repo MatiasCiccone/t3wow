@@ -2189,7 +2189,7 @@ fn a_paste_right_after_ctrl_v_in_wow_shows_above_the_box_and_goes_with_the_messa
     assert_eq!(outcome(&rig, 2), json!({ "s": 2, "ok": true }));
     // Its small picture is in an image slot, named to the game process.
     let att = rig.bridge.snapshot()["att"].clone();
-    assert_eq!(att, json!([{ "d": "mac:t1", "i": 1, "w": 1920, "h": 1080, "f": 1, "tw": 142, "th": 80 }]));
+    assert_eq!(att, json!([{ "d": "mac:t1", "i": 1, "w": 1920, "h": 1080, "f": 1, "tw": 142, "th": 80, "bf": 2, "bw": 1024, "bh": 576 }]));
     assert!(rig.written.lock().unwrap().images.contains_key(&1));
     assert!(rig.bridge.link.images_shown.contains(&1));
     assert!(rig.slot(2).contains("att={{d=\"mac:t1\",i=1,"), "{}", rig.slot(2));
@@ -2215,6 +2215,74 @@ fn a_paste_right_after_ctrl_v_in_wow_shows_above_the_box_and_goes_with_the_messa
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
     assert_eq!(rig.t3.calls_to("t3_thread_send_attachments").len(), 1);
+}
+
+#[test]
+fn a_sent_image_shows_under_its_own_message_and_not_under_older_words_like_it() {
+    let (mut rig, presses) = paste_rig(58_000_000, 1920, 1080, 5000);
+    rig.bridge.set_painter(Some(Box::new(FakePainter::default())));
+    // The same words said long before, with no image.
+    let old = json!({ "position": 0, "messageId": "old", "type": "user_message", "text": "look", "updatedAt": "1970-01-01T10:00:00Z" });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![old.clone()]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    press(&rig, &presses);
+    rig.advance(200);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "mac:t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["att"][0]["bf"], 2);
+
+    // Sent, but T3 doesn't show it yet: the older message doesn't take the picture.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "look" }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["att"].is_null());
+    assert!(view_items(&rig).iter().all(|item| item["im"].is_null()), "{:?}", view_items(&rig));
+
+    // T3 shows it: the large picture follows that message, with no second copy written.
+    let written = rig.written.lock().unwrap().images.len();
+    let new = json!({ "position": 2, "messageId": "mcp:new", "type": "user_message", "text": "look", "updatedAt": "1970-01-01T16:06:50Z" });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![old.clone(), new.clone()]);
+    rig.t3.set("completed", "1970-01-01T16:06:51Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert_eq!(items[2], json!({ "r": "u", "x": "[Pasted image]", "im": { "f": 2, "w": 1024, "h": 576, "sm": 1 } }));
+    assert_eq!(rig.written.lock().unwrap().images.len(), written);
+    assert_eq!(rig.bridge.link.images[&2].key, "sent:mac:t1:mcp:new:0");
+
+    // A new game process still finds it: it's filed under the message now.
+    rig.bridge.on_capture(CaptureMessage::Wow(Some("456@2".into())));
+    rig.t3.set("completed", "1970-01-01T16:06:59Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(view_items(&rig)[2]["im"]["f"], 2);
+    assert!(rig.bridge.link.images_shown.contains(&2), "named to the new game process");
+}
+
+#[test]
+fn an_image_sent_with_no_words_is_only_its_picture_and_other_blank_messages_stay() {
+    let (mut rig, presses) = paste_rig(59_000_000, 4, 4, 100);
+    rig.bridge.set_painter(Some(Box::new(FakePainter::default())));
+    let blank = json!({ "position": 0, "messageId": "blank", "type": "user_message", "text": "", "updatedAt": "1970-01-01T10:00:00Z" });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![blank.clone()]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    press(&rig, &presses);
+    rig.advance(200);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "mac:t1" }] }));
+    rig.bridge.tick();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "" }] }));
+    rig.bridge.tick();
+    let new = json!({ "position": 2, "messageId": "mcp:new", "type": "user_message", "text": "", "updatedAt": "1970-01-01T16:23:30Z" });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![blank, new]);
+    rig.t3.set("completed", "1970-01-01T16:23:31Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0]["x"], "", "a blank message with no picture stays");
+    assert_eq!(items[1], json!({ "r": "u", "x": "[Pasted image]", "im": { "f": 2, "w": 4, "h": 4, "sm": 1 } }));
 }
 
 #[test]

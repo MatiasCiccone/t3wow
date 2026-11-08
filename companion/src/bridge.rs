@@ -486,6 +486,8 @@ pub struct Bridge {
     /// Images pasted in the game, by the message they go with: "new" for New Thread,
     /// "{e}:{id}" for a thread, as the game's commands name its machine and id.
     drafts: BTreeMap<String, Vec<Pasted>>,
+    /// Images sent from the game whose message T3 hasn't shown yet, oldest first.
+    sent: Vec<SentImages>,
     pasted_count: u64,
     /// When this companion started (epoch ms), so its pasted images' small pictures don't
     /// take the image slot keys of an earlier run's.
@@ -594,6 +596,8 @@ struct FoundPage {
 enum Source {
     Page { item_id: String },
     File { path: PathBuf },
+    /// Already in an image slot: an image sent from the game, which can't be drawn again.
+    Sent,
 }
 
 #[derive(Clone)]
@@ -654,6 +658,11 @@ const MAX_PASTED: usize = 8;
 const PASTE_PRESS_MS: i64 = 5000;
 const UNPROVEN_PASTE: &str = "T3 WoW pastes only right after you press Ctrl+V in its message box";
 const NO_IMAGE: &str = "the clipboard holds no image";
+/// Sends remembered until T3 shows their message.
+const SENT_KEPT: usize = 16;
+/// How far T3's clock may be behind this PC's (it may run on another machine) for a message
+/// to still count as the one just sent.
+const SENT_CLOCK_SKEW_MS: i64 = 120_000;
 
 /// An image pasted in the game, waiting to go with the message it was pasted for.
 struct Pasted {
@@ -665,6 +674,18 @@ struct Pasted {
     /// The image slot holding its small picture, and that picture's size (None: the game
     /// can't show pictures, or every slot is in use).
     thumb: Option<(u32, u32, u32)>,
+    /// The same for its large picture, enlarged on a click and shown once sent.
+    big: Option<(u32, u32, u32)>,
+}
+
+/// The large pictures of a message sent with images. T3's reads say nothing of a message's
+/// attachments, so the companion ties them to the message itself when it first appears.
+struct SentImages {
+    env: String,
+    thread: String,
+    text: String,
+    at: i64,
+    slots: Vec<u32>,
 }
 
 /// A working thread's pending requests, as last read.
@@ -977,6 +998,7 @@ impl Bridge {
             presses: Box::new(crate::keys::presses),
             presses_used: 0,
             drafts: BTreeMap::new(),
+            sent: Vec::new(),
             pasted_count: 0,
             started_ms,
             command_seen_at: 0,
@@ -1046,6 +1068,7 @@ impl Bridge {
         self.notes.clear();
         self.outcomes.clear();
         self.drafts.clear();
+        self.sent.clear();
         self.list_errors.clear();
         self.polled_ok = false;
         self.auth_error = None;
@@ -1162,8 +1185,9 @@ impl Bridge {
     /// their disk space back.
     fn new_game_images(&mut self) {
         self.link.images_shown.clear();
-        // Images pasted in a game that quit: their small pictures' slots can go to others.
+        // Images pasted in a game that quit: their pictures' slots can go to others.
         self.drafts.clear();
+        self.sent.clear();
         let mut by_use: Vec<(i64, u32)> = self.link.images.iter().map(|(n, slot)| (slot.used, *n)).collect();
         by_use.sort_unstable_by(|a, b| b.cmp(a));
         for (_, n) in by_use.into_iter().skip(IMAGES_KEPT) {
@@ -1317,7 +1341,7 @@ impl Bridge {
                             self.discard_uploads(&attachments);
                             return Err(error);
                         }
-                        self.drafts.remove(&draft);
+                        self.remember_sent(&draft, &env, &id, &message);
                     } else {
                         let args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
                         self.client.call("t3_thread_send", with_args(args, &env_arg))?;
@@ -1367,8 +1391,8 @@ impl Bridge {
                             return Err(error);
                         }
                     };
-                    self.drafts.remove(&draft);
                     let new_id = launched["threadId"].as_str().or(launched["thread"]["threadId"].as_str()).map(str::to_string);
+                    self.remember_sent(&draft, &env, new_id.as_deref().unwrap_or(""), &message);
                     self.note(&format!("Started \"{title}\"."));
                     if let Some(new_id) = new_id {
                         self.view = Some(View { env: env.clone(), id: new_id.clone(), depth: 1 });
@@ -1508,33 +1532,91 @@ impl Bridge {
         Ok(())
     }
 
-    /// Keeps a pasted image for `draft`'s message, and its small picture in an image slot
-    /// for the game to show above the box.
+    /// Puts a picture of a pasted image in an image slot and names it to the game process:
+    /// the slot and the picture's size, None if it couldn't be stored.
+    fn show_pasted(&mut self, key: &str, bitmap: &Bitmap) -> Option<(u32, u32, u32)> {
+        if let Err(error) = self.store_picture(key, bitmap) {
+            self.log(&format!("couldn't show the pasted image in the game: {error}"));
+            return None;
+        }
+        let now = self.now_ms();
+        let (slot, image) = self.link.images.iter_mut().find(|(_, image)| image.key == key)?;
+        image.used = now;
+        let slot = *slot;
+        if !self.link.images_shown.contains(&slot) {
+            self.link.images_shown.push(slot);
+        }
+        self.save_state();
+        Some((slot, bitmap.width, bitmap.height))
+    }
+
+    /// Keeps a pasted image for `draft`'s message, with its pictures in image slots for the
+    /// game: a small one above the box, and a large one for a click and for after it's sent.
     fn stage(&mut self, draft: String, clipped: Clipped) {
         self.pasted_count += 1;
         let n = self.pasted_count;
-        let mut thumb = None;
+        let (mut thumb, mut big) = (None, None);
         if self.images_ok {
             let key = format!("paste:{}:{n}", self.started_ms);
-            let small = clip::thumbnail(&clipped.bitmap);
-            match self.store_picture(&key, &small) {
-                Ok(()) => {
-                    let now = self.now_ms();
-                    if let Some((slot, image)) = self.link.images.iter_mut().find(|(_, image)| image.key == key) {
-                        image.used = now;
-                        thumb = Some((*slot, small.width, small.height));
-                    }
-                    if let Some((slot, _, _)) = thumb.filter(|(slot, _, _)| !self.link.images_shown.contains(slot)) {
-                        self.link.images_shown.push(slot);
-                    }
-                    self.save_state();
-                }
-                Err(error) => self.log(&format!("couldn't show the pasted image in the game: {error}")),
-            }
+            thumb = self.show_pasted(&key, &clip::thumbnail(&clipped.bitmap));
+            big = self.show_pasted(&format!("{key}:big"), &clip::preview(&clipped.bitmap));
         }
         let (w, h) = (clipped.bitmap.width, clipped.bitmap.height);
         self.log(&format!("Image pasted from the clipboard ({w}x{h}, {} KB)", clipped.png.len() / 1024));
-        self.drafts.entry(draft).or_default().push(Pasted { n, png: clipped.png, w, h, thumb });
+        self.drafts.entry(draft).or_default().push(Pasted { n, png: clipped.png, w, h, thumb, big });
+    }
+
+    /// `draft`'s images went out with `text`: they leave the box, and their large pictures
+    /// wait for the message to appear in the thread.
+    fn remember_sent(&mut self, draft: &str, env: &str, thread: &str, text: &str) {
+        let images = self.drafts.remove(draft).unwrap_or_default();
+        let slots: Vec<u32> = images.iter().filter_map(|image| image.big.map(|(slot, _, _)| slot)).collect();
+        if slots.is_empty() || thread.is_empty() {
+            return;
+        }
+        let at = self.now_ms();
+        self.sent.push(SentImages { env: env.to_string(), thread: thread.to_string(), text: text.to_string(), at, slots });
+        if self.sent.len() > SENT_KEPT {
+            self.sent.remove(0);
+        }
+    }
+
+    /// The image slot keys of the pictures sent with this user message, in order. The first
+    /// time a message appears that matches a send (the same words, not older than the send;
+    /// the newest send first), its pictures are filed under T3's id for the message, so they
+    /// stay with it from then on.
+    fn sent_pictures(&mut self, env: &str, id: &str, item: &Value) -> Vec<String> {
+        let message = str_of(&item["messageId"]);
+        if message.is_empty() {
+            return Vec::new();
+        }
+        let prefix = format!("sent:{env}:{id}:{message}:");
+        if !self.link.images.values().any(|slot| slot.key.starts_with(&prefix)) {
+            let said = str_of(&item["text"]).trim();
+            let cut_short = item["textTruncated"] == true;
+            let at = iso_seconds(str_of(&item["updatedAt"])) * 1000;
+            let found = self.sent.iter().rposition(|sent| {
+                let same = if cut_short { sent.text.trim().starts_with(said) } else { sent.text.trim() == said };
+                sent.env == env && sent.thread == id && same && at >= sent.at - SENT_CLOCK_SKEW_MS
+            });
+            if let Some(found) = found {
+                let sent = self.sent.remove(found);
+                for (i, slot) in sent.slots.iter().enumerate() {
+                    if let Some(image) = self.link.images.get_mut(slot) {
+                        image.key = format!("{prefix}{i}");
+                    }
+                }
+                self.save_state();
+            }
+        }
+        let mut kept: Vec<(u32, String)> = self
+            .link
+            .images
+            .values()
+            .filter_map(|slot| Some((slot.key.strip_prefix(&prefix)?.parse().ok()?, slot.key.clone())))
+            .collect();
+        kept.sort();
+        kept.into_iter().map(|(_, key)| key).collect()
     }
 
     /// Uploads `draft`'s images to T3, as attachments for a message.
@@ -2430,6 +2512,11 @@ impl Bridge {
                     embedded.insert(0, Picture { key, source: Source::File { path }, label, order: position * 2 + 1, role });
                 }
             }
+            if kind == "user_message" {
+                for key in self.sent_pictures(&env, &id, item).into_iter().rev() {
+                    embedded.insert(0, Picture { key, source: Source::Sent, label: "Pasted image".to_string(), order: position * 2 + 1, role });
+                }
+            }
         }
         let more = messages.len() > items.len() || earlier;
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
@@ -2672,6 +2759,7 @@ impl Bridge {
                 Some(painter) => painter.picture(path),
                 None => Err("no browser to draw with".into()),
             },
+            Source::Sent => Err("its picture is gone".into()),
         };
         let stored = drawn.and_then(|bitmap| self.store_picture(&picture.key, &bitmap));
         if let Err(error) = stored {
@@ -2727,7 +2815,12 @@ impl Bridge {
                     if !self.link.images_shown.contains(&n) {
                         self.link.images_shown.push(n);
                     }
-                    json!({ "r": picture.role, "x": format!("[{label}]"), "im": { "f": n, "w": w, "h": h } })
+                    let mut im = json!({ "f": n, "w": w, "h": h });
+                    // An image pasted in the game stays small there, until it's clicked.
+                    if matches!(picture.source, Source::Sent) {
+                        im["sm"] = json!(1);
+                    }
+                    json!({ "r": picture.role, "x": format!("[{label}]"), "im": im })
                 }
                 None => {
                     let why = match self.picture_errors.get(&picture.key) {
@@ -2758,6 +2851,9 @@ impl Bridge {
             let mut all: Vec<(u64, Value)> = read.positions.iter().map(|p| p * 2).zip(items).collect();
             all.extend(placed);
             all.sort_by_key(|(order, _)| *order);
+            // A message that is only its images is just the pictures, with no empty bubble.
+            let pictures: HashSet<u64> = all.iter().filter(|(_, item)| item["im"].is_object()).map(|(order, _)| *order).collect();
+            all.retain(|(order, item)| !(item["r"] == "u" && str_of(&item["x"]).trim().is_empty() && pictures.contains(&(order + 1))));
             built["items"] = json!(all.into_iter().map(|(_, item)| item).collect::<Vec<_>>());
         }
         self.name_links();
@@ -3048,6 +3144,11 @@ impl Bridge {
                         entry["f"] = json!(slot);
                         entry["tw"] = json!(tw);
                         entry["th"] = json!(th);
+                    }
+                    if let Some((slot, bw, bh)) = image.big {
+                        entry["bf"] = json!(slot);
+                        entry["bw"] = json!(bw);
+                        entry["bh"] = json!(bh);
                     }
                     entry
                 })
