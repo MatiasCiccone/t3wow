@@ -696,6 +696,9 @@ local function messageWidth() return frame:GetWidth() - LIST_WIDTH - 46 end
 local messageScroll, messageChild = makeScroll(right, messageWidth())
 messageScroll:SetPoint("TOPLEFT", 18, -SIZE.header - 12)
 messageScroll:SetPoint("BOTTOMRIGHT", -26, 100)
+-- By index: a message's, then (sending) at count + 1 and Working… at count + 2. That can
+-- leave a gap (Working… with no echo before it), so go through them with pairs: ipairs
+-- stopped at the gap and left the last Working… shown under the next reply.
 local messageStrings = {}
 local earlier = button(messageChild, "Show earlier messages", 180, function() ns.Link.Send({ t = "more" }) end, "ghost")
 local openCopy -- the copy box, made after the composer
@@ -1660,7 +1663,7 @@ function renderView()
     -- Stay at the end while new messages come in, unless you scrolled up to read.
     local stickToBottom = scrollToEnd
         or messageScroll:GetVerticalScroll() >= scrollRange() - 8
-    for _, fs in ipairs(messageStrings) do
+    for _, fs in pairs(messageStrings) do
         fs:Hide()
         fs.hit:Hide()
         fs.bubble:Hide()
@@ -2765,7 +2768,7 @@ function UI.Select(thread) selectThread(envIdOf(thread.e) or "", thread.id) end
 local function applyWidth()
     local width = messageWidth()
     messageChild:SetWidth(width)
-    for _, fs in ipairs(messageStrings) do fs:SetWidth(width - 8) end
+    for _, fs in pairs(messageStrings) do fs:SetWidth(width - 8) end
     input:SetWidth(width - 24)
     copyEdit:SetWidth(width - 8)
 end
