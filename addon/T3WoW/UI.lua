@@ -2357,7 +2357,6 @@ local function sendCurrent()
     -- While the agent waits on a question, Send (and Enter) answers it.
     if pendingAsk() then
         if sendAnswer(text) and text ~= "" then input:SetText("") end
-        input:ClearFocus()
         UI.Refresh()
         return
     end
@@ -2398,7 +2397,6 @@ local function sendCurrent()
         echo = { id = selected.id, text = text, s = s, images = images }
     end
     input:SetText("")
-    input:ClearFocus()
     UI.Refresh()
 end
 
