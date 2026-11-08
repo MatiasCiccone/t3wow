@@ -85,8 +85,14 @@ function find(kind, text)
   end
 end
 function click(text) find("Button", text).scripts.OnClick(find("Button", text), "LeftButton") end
-function typeText(text) find("EditBox").text = text end
-function typed() return find("EditBox").text end
+-- The message box: the first unnamed edit box (the search box over the list has a name).
+function composer()
+  for _, f in ipairs(frames) do
+    if f.kind == "EditBox" and rawget(f, "name") == nil then return f end
+  end
+end
+function typeText(text) composer().text = text end
+function typed() return composer().text end
 function said(pattern)
   local n = 0
   for _, line in ipairs(printed) do if line:find(pattern) then n = n + 1 end end

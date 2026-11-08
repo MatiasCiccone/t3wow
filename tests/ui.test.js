@@ -21,8 +21,14 @@ function find(kind, text)
   end
 end
 function click(text) find("Button", text).scripts.OnClick(find("Button", text), "LeftButton") end
-function typeText(text) find("EditBox").text = text end
-function typed() return find("EditBox").text end
+-- The message box: the first unnamed edit box (the search box over the list has a name).
+function composer()
+  for _, f in ipairs(frames) do
+    if f.kind == "EditBox" and rawget(f, "name") == nil then return f end
+  end
+end
+function typeText(text) composer().text = text end
+function typed() return composer().text end
 function queue() return Link.Queue() end
 function sent() return queue()[#queue()] end
 local MAC = { id = "mac", name = "Mac", ok = true }
@@ -509,6 +515,88 @@ assert(not listed("Delegated, done"), "a finished delegated thread shows in Open
 assert(listed("Delegated, running") and count("Working") == 1, "a working delegated thread missing")
 assert(listed("Delegated, asking"), "a delegated thread that needs you is missing")
 assert(count("Settled") == 1, "Settled counts " .. tostring(count("Settled")))
+return "ok"
+`);
+});
+
+test("Search narrows the list to threads matching every word, opens groups on their matches, and Escape clears it", () => {
+  run(`
+local function count(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and f.text.text == label and f.shown then return tonumber(f.count.text) end
+  end
+end
+local function listed(title)
+  for _, f in ipairs(frames) do
+    if type(f.thread) == "table" and f.thread.t == title and f.shown then return true end
+  end
+  return false
+end
+local function searchFor(text)
+  T3WoWSearch.text = text
+  T3WoWSearch.scripts.OnTextChanged(T3WoWSearch, true)
+end
+local now = time()
+inboxWith(ENVS, { threads = {
+  { e = 2, id = "t1", t = "Fix login bug", s = "completed", set = false, at = now, p = "web" },
+  { e = 1, id = "t2", t = "Write docs", s = "completed", set = false, at = now, p = "t3wow" },
+  { e = 1, id = "t3", t = "Login subtask", s = "completed", set = false, par = "t2", at = now, p = "t3wow" },
+  { e = 1, id = "t4", t = "Old LOGIN cleanup", s = "completed", set = true, at = now, p = "" },
+  { e = 1, id = "t5", t = "Refactor", s = "running", set = false, at = now, p = "" },
+  -- Finished, launched by a thread that isn't listed (or isn't known): kept out of Open.
+  { e = 1, id = "t6", t = "Delegated login", s = "completed", set = false, ag = true, at = now, p = "" },
+  { e = 1, id = "t7", t = "Orphan login", s = "completed", set = false, par = "gone", at = now, p = "" },
+}, more = { settled = true } })
+assert(not listed("Delegated login") and not listed("Orphan login"), "a hidden launched thread shows")
+assert(listed("Write docs") and listed("Login subtask") and not listed("Old LOGIN cleanup"), "before searching")
+assert(showing("^Search$"), "no placeholder")
+
+-- Case aside; a launched thread whose launcher doesn't match stands on its own; collapsed
+-- Settled opens on its match and counts only its matches; Working, with none, hides.
+searchFor("login")
+assert(listed("Fix login bug") and listed("Login subtask") and listed("Old LOGIN cleanup"), "a match missing")
+assert(listed("Delegated login") and listed("Orphan login"), "a launched thread with no listed launcher missing")
+assert(not listed("Write docs") and not listed("Refactor"), "a thread that doesn't match")
+assert(count("Open") == 4 and count("Settled") == 1, "counts " .. tostring(count("Open")) .. "/" .. tostring(count("Settled")))
+assert(count("Working") == nil, "Working shows with no match")
+assert(not showing("^Search$"), "placeholder over the text")
+
+-- Every word must match, in the title, the project or the machine.
+searchFor("mac LOGIN")
+assert(listed("Fix login bug") and not listed("Login subtask") and not listed("Old LOGIN cleanup"), "machine")
+searchFor("t3wow")
+assert(listed("Write docs") and listed("Login subtask"), "project")
+
+-- Nothing matches: the list says so, and Settled stays for its Show more.
+searchFor("zzz")
+assert(showing("No threads match") == false and count("Settled") == 0, "Settled with more to list hid")
+inboxWith(ENVS, { threads = { { e = 1, id = "t2", t = "Write docs", s = "completed", set = false, at = now, p = "t3wow" } } })
+assert(showing("No threads match") and count("Open") == nil, "no word that nothing matches")
+
+-- Enter opens the first thread shown.
+searchFor("docs")
+T3WoWSearch.scripts.OnEnterPressed(T3WoWSearch)
+assert(sent().t == "open" and sent().id == "t2", "Enter sent " .. tostring(sent().t))
+
+-- Escape clears it: the whole list, with Settled collapsed again.
+inboxWith(ENVS, { threads = {
+  { e = 1, id = "t2", t = "Write docs", s = "completed", set = false, at = now, p = "t3wow" },
+  { e = 1, id = "t4", t = "Old LOGIN cleanup", s = "completed", set = true, at = now, p = "" },
+} })
+searchFor("login")
+assert(listed("Old LOGIN cleanup"), "settled match missing")
+T3WoWSearch.scripts.OnEscapePressed(T3WoWSearch)
+T3WoWSearch.scripts.OnTextChanged(T3WoWSearch, false) -- the game fires it for SetText
+assert(T3WoWSearch.text == "" and listed("Write docs") and not listed("Old LOGIN cleanup"), "Escape left the search")
+assert(showing("^Search$") and not showing("No threads match"), "after Escape")
+
+-- The magnifying glass shows only if the game found its file (it started after the update).
+local glyph = T3WoWSearch.glyph
+T3WoWSearch.scripts.OnShow(T3WoWSearch)
+assert(glyph.shown, "glyph hidden although its file is there")
+missingTextures[glyph.texturePath] = true
+T3WoWSearch.scripts.OnShow(T3WoWSearch)
+assert(not glyph.shown, "glyph shown with no file behind it")
 return "ok"
 `);
 });

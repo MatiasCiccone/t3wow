@@ -161,6 +161,7 @@ frame:SetClampedToScreen(true)
 local SIZE = {
     title = 40, footer = 48, -- the title bar and the footer
     header = 58, -- a thread's title and status, above the conversation
+    search = 36, -- the search box over the thread list, with its margins
     row = LIST_WIDTH - 26, -- a thread row's width
     bubbleX = 12, bubbleY = 8, -- the padding inside a message bubble
     card = 14, -- the padding inside the question's card
@@ -383,10 +384,11 @@ do
 end
 
 local listScroll, listChild = makeScroll(frame, SIZE.row)
-listScroll:SetPoint("TOPLEFT", 8, -SIZE.title - 6)
+listScroll:SetPoint("TOPLEFT", 8, -SIZE.title - SIZE.search - 6)
 listScroll:SetPoint("BOTTOMLEFT", 8, SIZE.footer + 6)
 listScroll:SetWidth(SIZE.row)
 local rows, headers = {}, {}
+local search -- the search box over the list (built after renderList)
 
 -- Compact (a setting): one line per thread, its machine and project in the tooltip.
 local function compactList() return T3WoWDB ~= nil and T3WoWDB.settings ~= nil and T3WoWDB.settings.compact == true end
@@ -501,40 +503,64 @@ local function renderList()
     -- The same goes for an agent-launched thread ("ag") whose launcher isn't known:
     -- delegate_task leaves no sender to find it by.
     local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (WORKING[t.s] and "working") or "open" end
+    -- A search keeps the threads whose title, project or machine has every word typed,
+    -- case aside. A launched thread whose launcher doesn't match, or isn't listed, stands on its own.
+    local words = {}
+    for word in (search and search:GetText() or ""):lower():gmatch("%S+") do words[#words + 1] = word end
+    local searching = #words > 0
+    local function matches(t)
+        local e = env(t.e)
+        local text = format("%s\n%s\n%s", t.t or "", t.p or "", e and e.name or ""):lower()
+        for _, word in ipairs(words) do
+            if not text:find(word, 1, true) then return false end
+        end
+        return true
+    end
     local threads = inbox and inbox.threads or {}
     local byId, launched = {}, {}
     for _, t in ipairs(threads) do byId[t.e .. ":" .. t.id] = t end
     for _, t in ipairs(threads) do
         local parent = t.par and byId[t.e .. ":" .. t.par]
-        if parent and groupOf(parent) == groupOf(t) then
+        if not matches(t) then
+            -- left out by the search
+        elseif parent and matches(parent) and groupOf(parent) == groupOf(t) then
             local key = t.e .. ":" .. t.par
             launched[key] = launched[key] or {}
             table.insert(launched[key], t)
-        elseif not (t.par or t.ag) or parent or t.set or WORKING[t.s] or t.s == "waiting" or t.s == "approval" then
+        elseif searching or not (t.par or t.ag) or parent or t.set or WORKING[t.s] or t.s == "waiting" or t.s == "approval" then
             table.insert(groups[groupOf(t)], t)
         end
     end
     local compact = compactList()
     local rowHeight = compact and Skin.Theme().compactHeight or Skin.Theme().rowHeight
     local y, rowIndex, headerIndex = 0, 0, 0
+    -- While searching, every group opens on its matches (folding one lasts for this search),
+    -- and a group with none and nothing more to list hides.
+    local folded = searching and search.folded or collapsed
+    local more = inbox and type(inbox.more) == "table" and inbox.more or {} -- an older companion sends none
+    local shownGroups = {}
     for _, group in ipairs({ { "open", "Open" }, { "working", "Working" }, { "snoozed", "Snoozed" }, { "settled", "Settled" } }) do
+        if not searching or #groups[group[1]] > 0 or more[group[1]] then shownGroups[#shownGroups + 1] = group end
+    end
+    search.none:SetShown(#shownGroups == 0)
+    for _, group in ipairs(shownGroups) do
         local key, label = group[1], group[2]
         headerIndex = headerIndex + 1
         local h = header(headerIndex)
         -- Only recent settled threads are listed; the count is all of them, as in T3.
         local count = #groups[key]
-        if key == "settled" and inbox and inbox.settledTotal then count = math.max(count, inbox.settledTotal) end
+        if key == "settled" and not searching and inbox and inbox.settledTotal then count = math.max(count, inbox.settledTotal) end
         h.text:SetText(label)
         h.count:SetText(count)
-        Skin.PointGlyph(h.chevron, collapsed[key])
+        Skin.PointGlyph(h.chevron, folded[key])
         h:SetPoint("TOPLEFT", 0, -y)
         h:SetScript("OnClick", function()
-            collapsed[key] = not collapsed[key]
+            folded[key] = not folded[key]
             renderList()
         end)
         h:Show()
         y = y + 28
-        if not collapsed[key] then
+        if not folded[key] then
             local placed = {}
             local function place(t, indent)
                 local id = t.e .. ":" .. t.id
@@ -560,8 +586,7 @@ local function renderList()
                 for _, child in ipairs(launched[id] or {}) do place(child, math.min(indent + 14, 42)) end
             end
             for _, t in ipairs(groups[key]) do place(t, 0) end
-            -- An older companion sends no "more": no row.
-            if inbox and type(inbox.more) == "table" and inbox.more[key] then
+            if more[key] then
                 local b = moreButton(key)
                 b:SetPoint("TOPLEFT", 4, -y - 2)
                 b:Show()
@@ -571,6 +596,54 @@ local function renderList()
     end
     listChild:SetHeight(math.max(y, 1))
 end
+
+-- Search, over the list as in T3's sidebar: typing narrows the list (renderList), Enter
+-- opens the first thread it shows, Escape clears it. It searches the threads the companion
+-- listed; Show more lists more of a group.
+search = CreateFrame("EditBox", "T3WoWSearch", frame)
+search:SetPoint("TOPLEFT", 10, -SIZE.title - 8)
+search:SetSize(LIST_WIDTH - 20, 26)
+search:SetAutoFocus(false)
+search:SetMaxLetters(80)
+search:SetFontObject(Skin.fonts.text)
+search:SetTextInsets(28, 8, 0, 0)
+search.folded = {} -- groups folded during this search
+search.box = Skin.Box(search, { shape = "control", fill = "input", ring = "border" })
+search.glyph = Skin.Glyph(search, "search", 14, "muted", "OVERLAY")
+search.glyph:SetPoint("LEFT", 9, 0)
+-- A game started before this version found no search.tga: no glyph, rather than a square.
+-- Asked each time the window shows, as the answer can come a while after SetTexture.
+search:SetScript("OnShow", function(self)
+    local known = not self.glyph.GetTextureFilePath or self.glyph:GetTextureFilePath()
+    self.glyph:SetShown(known ~= nil and known ~= "")
+end)
+search.placeholder = search:CreateFontString(nil, "OVERLAY")
+search.placeholder:SetFontObject(Skin.fonts.muted)
+search.placeholder:SetPoint("LEFT", 28, 0)
+search.placeholder:SetText("Search")
+search.none = listChild:CreateFontString(nil, "OVERLAY")
+search.none:SetFontObject(Skin.fonts.muted)
+search.none:SetPoint("TOPLEFT", 10, -8)
+search.none:SetText("No threads match")
+search.none:Hide()
+search:SetScript("OnEditFocusGained", function(self) self.box:SetColors(nil, "focus") end)
+search:SetScript("OnEditFocusLost", function(self) self.box:SetColors(nil, "border") end)
+search:SetScript("OnTextChanged", function(self)
+    local text = self:GetText()
+    self.placeholder:SetShown(text == "")
+    if not text:find("%S") then self.folded = {} end
+    listScroll:SetVerticalScroll(0)
+    renderList()
+end)
+search:SetScript("OnEscapePressed", function(self)
+    self:SetText("")
+    self:ClearFocus()
+end)
+search:SetScript("OnEnterPressed", function(self)
+    self:ClearFocus()
+    local first = rows[1]
+    if self:GetText():find("%S") and first and first:IsShown() then UI.Select(first.thread) end
+end)
 
 -- ---------------------------------------------------------------- conversation
 

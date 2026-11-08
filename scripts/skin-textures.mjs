@@ -60,7 +60,7 @@ tga("classic-ring.tga", 64, (x, y) => {
   return [grey, grey, grey, clamp(0.5 - d) - clamp(0.5 - (d + 6))];
 });
 
-// Glyphs, stroked: close, a chevron pointing down, a check mark and the resize grip.
+// Glyphs, stroked: close, a chevron pointing down, a check mark, the resize grip and search.
 function strokes(name, width, lines) {
   tga(name, 32, (x, y) => {
     let d = Infinity;
@@ -74,4 +74,7 @@ strokes("close.tga", 2.6, [[[9, 9], [23, 23]], [[23, 9], [9, 23]]]);
 strokes("chevron.tga", 2.6, [[[9, 12.5], [16, 19.5], [23, 12.5]]]);
 strokes("check.tga", 2.8, [[[8.5, 16.5], [13.5, 21.5], [23.5, 10.5]]]);
 strokes("grip.tga", 2.2, [[[27, 11], [11, 27]], [[27, 19], [19, 27]]]);
+// A magnifying glass: a ring (a 48-sided polygon) and its handle.
+const ring = Array.from({ length: 49 }, (_, i) => [13.5 + 7.5 * Math.cos((i * Math.PI) / 24), 13.5 + 7.5 * Math.sin((i * Math.PI) / 24)]);
+strokes("search.tga", 2.6, [ring, [[19, 19], [25.5, 25.5]]]);
 console.log("skin textures written to addon/T3WoW/Media");
