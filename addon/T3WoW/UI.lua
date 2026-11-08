@@ -1203,6 +1203,7 @@ end
 -- ---------------------------------------------------------------- pictures
 do
     local IMG = "Interface\\AddOns\\T3WoW\\img\\"
+    local PASTED_MAX_WIDTH, PASTED_MAX_HEIGHT = 360, 200
     local function path(im) return format("%s%04d.tga", IMG, im.f) end
 
     -- Screen pixels per UI unit of `region`: a picture fits the conversation pixel for pixel
@@ -1235,6 +1236,11 @@ do
         local full = messageWidth() - 8
         local width, height = fit(im, full, messageChild)
         if not width then return false end
+        -- An image you pasted stays small in the conversation; a click enlarges it.
+        if im.sm then
+            local shrink = math.min(1, PASTED_MAX_WIDTH / width, PASTED_MAX_HEIGHT / height)
+            width, height = width * shrink, height * shrink
+        end
         local n = (Pictures.used or 0) + 1
         Pictures.used = n
         local texture = Pictures.pool[n]
@@ -1253,7 +1259,7 @@ do
 
     -- A picture enlarged over the screen, up to twice its own size; a click or Escape
     -- closes it.
-    local zoom
+    local zoom, typingIn
     function Pictures.Zoom(im)
         if not zoom then
             zoom = CreateFrame("Button", "T3WoWPictureZoom", UIParent)
@@ -1270,13 +1276,24 @@ do
             help:SetPoint("BOTTOM", 0, 24)
             help:SetText("Click or press Escape to close.")
             zoom:SetScript("OnClick", function(self) self:Hide() end)
-            tinsert(UISpecialFrames, "T3WoWPictureZoom")
+            -- Back to the box you were typing in, once it closes.
+            zoom:SetScript("OnHide", function()
+                local box = typingIn
+                typingIn = nil
+                if box and frame:IsShown() then box:SetFocus() end
+            end)
+            -- Escape closes it, and only it, as with the game's menus (UIMenus); a client
+            -- without that table closes it with the window.
+            tinsert(type(UIMenus) == "table" and UIMenus or UISpecialFrames, "T3WoWPictureZoom")
         end
         local room = math.min(UIParent:GetWidth() * 0.92, (UIParent:GetHeight() * 0.88) * (tonumber(im.w) or 1) / math.max(1, tonumber(im.h) or 1))
         local width, height = fit(im, room, zoom, 2)
         if not width then return end
         zoom.picture:SetTexture(path(im))
         zoom.picture:SetSize(width, height)
+        -- A box being typed in would take the Escape meant for the picture.
+        typingIn = GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus() or nil
+        if typingIn then typingIn:ClearFocus() end
         zoom:Show()
     end
 end
@@ -1840,9 +1857,10 @@ end)
 -- The game can't read the clipboard, and Ctrl+V pastes only text into the box. When it
 -- pastes nothing, the clipboard may hold an image: the companion reads it, and keeps it
 -- for the message being written (a thread's, or New Thread's), drawn small above the box
--- (inbox.att: { d = the message, i = its number, w, h, and f, tw, th for the small
--- picture's image slot and size }). It takes the paste only right after a real Ctrl+V in
--- WoW, so no other addon can paste for you. Each × takes one back; Send sends them along.
+-- (inbox.att: { d = the message, i = its number, w, h, f, tw, th for the small picture's
+-- image slot and size, bf, bw, bh for the large one's }). It takes the paste only right
+-- after a real Ctrl+V in WoW, so no other addon can paste for you. A click enlarges one,
+-- each × takes one back, and Send sends them along.
 -- One table, not a local each: the file is near Lua's 200 locals in one chunk.
 local Paste = {}
 do
@@ -1895,8 +1913,18 @@ do
     local function chipTooltip(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
         GameTooltip:SetText(format("Pasted image, %d x %d", tonumber(self.image.w) or 0, tonumber(self.image.h) or 0))
+        if type(self.image.bf) == "number" then GameTooltip:AddLine("Click to enlarge") end
         GameTooltip:AddLine("It goes with your next message. × takes it back.", 1, 1, 1, true)
         GameTooltip:Show()
+    end
+
+    -- Enlarges the large picture the companion keeps of it (bf, bw, bh: its image slot and
+    -- size); one that has none, from an older companion, does nothing.
+    local function chipClick(self)
+        local image = self.image
+        if image and type(image.bf) == "number" then
+            Pictures.Zoom({ f = image.bf, w = image.bw, h = image.bh })
+        end
     end
 
     local function pasteChip(index)
@@ -1917,6 +1945,7 @@ do
         chip.remove:SetPoint("TOPRIGHT", 4, 4)
         chip:SetScript("OnEnter", chipTooltip)
         chip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        chip:SetScript("OnClick", chipClick)
         pasteChips[index] = chip
         return chip
     end

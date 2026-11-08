@@ -866,6 +866,33 @@ return "ok"
 `, { before: SCROLLING });
 });
 
+test("an image pasted in the game stays small in the conversation, and a click still enlarges it", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "u", x = "[Pasted image]", im = { f = 7, w = 1024, h = 576, sm = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+for _, f in ipairs(frames) do rawset(f, "GetEffectiveScale", function() return 1 end) end
+rawset(T3WoWFrame, "GetWidth", function() return 1600 end)
+rawset(UIParent, "GetWidth", function() return 1365 end)
+rawset(UIParent, "GetHeight", function() return 768 end)
+UI.Refresh()
+local SLOT, tex = ROOT .. "img\\\\0007.tga", nil
+for _, f in ipairs(frames) do
+  if f.kind == "Texture" and f.shown and f.texturePath == SLOT and f.point then tex = f end
+end
+assert(tex, "no picture")
+assert(math.abs(tex.height - 200) < 0.01, "not capped: " .. tostring(tex.height))
+assert(tex.width <= 360 and math.abs(tex.height / tex.width - 576 / 1024) < 0.001, "out of shape: " .. tostring(tex.width))
+local hit
+for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "picture") then hit = f end end
+assert(hit and hit.picture.f == 7, "the picture can't be clicked")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(T3WoWPictureZoom.shown and T3WoWPictureZoom.picture.width > 2 * tex.width, "not enlarged past its small size")
+return "ok"
+`);
+});
+
 test("a picture draws from its image slot among the messages, and a click enlarges it instead of copying", () => {
   run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
@@ -1326,6 +1353,46 @@ click("Start")
 assert(#queue() == 0, "started with nothing typed and no image")
 return "ok"
 `);
+});
+
+test("a click on a pasted image enlarges its large picture, and one without a large picture stays put", () => {
+  run(`${CTRL_V}
+local att = { { d = "mac:t1", i = 1, w = 1920, h = 1080, f = 3, tw = 142, th = 80, bf = 4, bw = 1024, bh = 576 }, { d = "mac:t1", i = 2, w = 4, h = 4, f = 5, tw = 4, th = 4 } }
+inboxWith(ENVS, { pi = true, threads = { THREAD }, att = att })
+UI.Select({ e = 2, id = "t1" })
+local chips = pasteChips()
+assert(#chips == 2, #chips)
+chips[2].scripts.OnClick(chips[2], "LeftButton")
+assert(not (T3WoWPictureZoom and T3WoWPictureZoom.shown), "enlarged a picture it doesn't have")
+chips[1].scripts.OnClick(chips[1], "LeftButton")
+assert(T3WoWPictureZoom.shown, "not enlarged")
+assert(T3WoWPictureZoom.picture.texturePath == ROOT .. "img\\\\0004.tga", tostring(T3WoWPictureZoom.picture.texturePath))
+return "ok"
+`);
+});
+
+test("Escape over an enlarged picture closes only it, and you go back to typing where you were", () => {
+  run(`${CTRL_V}
+local att = { { d = "mac:t1", i = 1, w = 1920, h = 1080, f = 3, tw = 142, th = 80, bf = 4, bw = 1024, bh = 576 } }
+inboxWith(ENVS, { pi = true, threads = { THREAD }, att = att })
+UI.Select({ e = 2, id = "t1" })
+local box, focus = composer(), nil
+focus = box
+local cleared, restored = 0, 0
+rawset(box, "ClearFocus", function() cleared = cleared + 1; focus = nil end)
+rawset(box, "SetFocus", function() restored = restored + 1; focus = box end)
+function GetCurrentKeyBoardFocus() return focus end
+local chip = pasteChips()[1]
+chip.scripts.OnClick(chip, "LeftButton")
+assert(T3WoWPictureZoom.shown, "not enlarged")
+assert(cleared == 1 and focus == nil, "the box being typed in would take the Escape")
+local function listed(list) for _, name in ipairs(list) do if name == "T3WoWPictureZoom" then return true end end end
+assert(listed(UIMenus), "Escape wouldn't close it first, as a menu")
+assert(not listed(UISpecialFrames), "Escape would close it with the window")
+T3WoWPictureZoom:Hide()
+assert(restored == 1 and focus == box, "the box didn't get its focus back")
+return "ok"
+`, { before: `UIMenus = {}` });
 });
 
 test("Ctrl+V asks for an image only from a companion that pastes, and a refused paste says why", () => {
