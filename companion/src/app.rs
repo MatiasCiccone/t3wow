@@ -793,6 +793,36 @@ mod tests {
     }
 
     #[test]
+    fn repair_addon_files_from_the_tray_puts_back_only_whats_missing() {
+        let dir = std::env::temp_dir().join(format!("t3wow-repair-tray-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let slots = Slots::new(&dir, "16001");
+        slots.install().unwrap();
+        let app = App::new();
+        let (tx, rx) = channel();
+
+        // Nothing missing: it says so.
+        tx.send(Control::Repair).unwrap();
+        wait(&app, &rx, 0, Some(&slots));
+        assert_eq!(app.take_notices()[0].title, "Addon files: nothing missing");
+
+        // The folder replaced by a plain copy of the addon; a slot holds an update.
+        for made in ["sig", "ctl", "img"] {
+            std::fs::remove_dir_all(slots.addon_dir.join(made)).unwrap();
+        }
+        let inbox = dir.join("T3WoW_S003").join("Inbox.lua");
+        std::fs::write(&inbox, "T3WoW_Inbox = {}").unwrap();
+        tx.send(Control::Repair).unwrap();
+        wait(&app, &rx, 0, Some(&slots));
+        let notices = app.take_notices();
+        assert_eq!(notices[0].title, "Addon files put back");
+        assert!(notices[0].text.contains("missing addon files were put back"), "{}", notices[0].text);
+        assert!(!slots.missing_files());
+        assert_eq!(std::fs::read_to_string(&inbox).unwrap(), "T3WoW_Inbox = {}", "the slot's update stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_restart_note_lasts_until_the_game_that_had_the_old_files_stops() {
         let early = Duration::from_secs(1);
         let late = Duration::from_secs(60);
