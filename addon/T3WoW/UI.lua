@@ -1041,7 +1041,7 @@ do
     -- Screen pixels per UI unit of `region`: a picture fits the conversation pixel for pixel
     -- when it can, and is scaled down to its width when it can't.
     local function pixelsPerUnit(region)
-        local _, height = GetPhysicalScreenSize and GetPhysicalScreenSize()
+        local _, height = GetPhysicalScreenSize()
         local scale = region.GetEffectiveScale and region:GetEffectiveScale() or 1
         if type(height) ~= "number" or height <= 0 or type(scale) ~= "number" or scale <= 0 then return 1 end
         return height / 768 * scale
