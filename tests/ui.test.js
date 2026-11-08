@@ -545,6 +545,16 @@ assert(not shownString("Page: Sales"), "its text shows too")
 assert(below(tex, shownString("chart it")), "not below the message before it")
 assert(below(shownString("Done%."), tex), "the next message isn't below it")
 assert(tex.width ~= 0 and math.abs(tex.height / tex.width - 300 / 728) < 0.001, "out of shape")
+-- Pixel for pixel: on a 1080-pixel screen at UI scale 1 a UI unit is 1080/768 pixels, so a
+-- 728-pixel picture is 728 * 768/1080 units wide in a window with room for it; enlarged,
+-- twice that.
+for _, f in ipairs(frames) do rawset(f, "GetEffectiveScale", function() return 1 end) end
+rawset(T3WoWFrame, "GetWidth", function() return 1600 end)
+rawset(UIParent, "GetWidth", function() return 1365 end)
+rawset(UIParent, "GetHeight", function() return 768 end)
+UI.Refresh()
+tex = picture()
+assert(math.abs(tex.width - 728 * 768 / 1080) < 0.01, "not pixel for pixel: " .. tostring(tex.width))
 -- A click enlarges it; a click closes it again.
 local hit
 for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "picture") then hit = f end end
@@ -552,6 +562,9 @@ assert(hit and hit.picture.f == 7, "the picture can't be clicked")
 hit.scripts.OnClick(hit, "LeftButton")
 assert(T3WoWPictureZoom.shown, "not enlarged")
 assert(T3WoWPictureZoom.picture.texturePath == SLOT, "another picture enlarged")
+rawset(T3WoWPictureZoom, "GetEffectiveScale", function() return 1 end)
+hit.scripts.OnClick(hit, "LeftButton")
+assert(math.abs(T3WoWPictureZoom.picture.width - 2 * 728 * 768 / 1080) < 0.01, "not twice its size: " .. tostring(T3WoWPictureZoom.picture.width))
 for _, f in ipairs(frames) do assert(not (f.kind == "EditBox" and f.shown and f.text == "[Page: Sales]"), "copied instead") end
 T3WoWPictureZoom.scripts.OnClick(T3WoWPictureZoom, "LeftButton")
 assert(not T3WoWPictureZoom.shown, "didn't close")
