@@ -831,6 +831,8 @@ struct ViewRead {
     thread: Value,
     /// Its model selection and modes (T3's read of a thread has no effort), when T3 gave them.
     config: Option<Value>,
+    /// Its latest runs, each with the provider and model it ran on.
+    runs: Value,
     /// When the head was read (a full read's time).
     began: i64,
     /// Reading on from this cache (same thread, safe to); None: a full read.
@@ -2216,6 +2218,37 @@ impl Bridge {
         }
     }
 
+    /// A model as the game names it: what the machine calls it, else its id.
+    fn model_name(&self, env: &str, provider: &Value, model: &Value) -> String {
+        let listed = self
+            .catalogs
+            .get(env)
+            .and_then(|c| c.providers.iter().find(|p| p["id"] == *provider))
+            .and_then(|p| p["m"].as_array()?.iter().find(|m| m["id"] == *model));
+        listed.map_or_else(|| plain(str_of(model), 40), |m| str_of(&m["t"]).to_string())
+    }
+
+    /// Where a thread moved to another provider, by the position of the first message on it:
+    /// what the line over that message says, as T3 draws one. Runs carry the provider and
+    /// model, and every message names its run; messages from runs too old to be listed are
+    /// passed over.
+    fn handoffs(&self, env: &str, messages: &[Value], runs: &Value) -> HashMap<u64, String> {
+        let mut lines = HashMap::new();
+        let mut previous: Option<&Value> = None;
+        let runs = runs.as_array().map_or(&[][..], Vec::as_slice);
+        for message in messages.iter().filter(|m| matches!(str_of(&m["type"]), "user_message" | "assistant_message")) {
+            let Some(run) = runs.iter().find(|r| r["runId"] == message["runId"]) else { continue };
+            if let (Some(before), Some(position)) = (previous, message["position"].as_u64()) {
+                if before["providerInstanceId"] != run["providerInstanceId"] {
+                    let name = |r: &Value| self.model_name(env, &r["providerInstanceId"], &r["model"]);
+                    lines.insert(position, format!("{} > {}", name(before), name(run)));
+                }
+            }
+            previous = Some(run);
+        }
+        lines
+    }
+
     /// The model a command picked, as T3 takes it (none picked: None), with `kept` options and
     /// its effort. T3 stores whatever effort it's given, so one it doesn't offer stops here.
     fn model_selection(&self, env: &str, command: &Value, mut kept: Vec<Value>) -> Result<Option<Value>, T3Error> {
@@ -2319,9 +2352,10 @@ impl Bridge {
         if Some(&key) == self.view_key.as_ref() && self.view_data.is_some() {
             return Ok(());
         }
-        let args = with_args(json!({ "threadId": view.id, "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&view.env));
+        let args = with_args(json!({ "threadId": view.id, "limit": 1, "maxCharsPerItem": 1, "runLimit": 50 }), &self.env_arg(&view.env));
         let head = self.client.call("t3_thread_read", args)?;
         let thread = head["thread"].clone();
+        let runs = head["recentRuns"].clone();
         let item_count = thread["itemCount"].as_u64().unwrap_or(0) as usize;
         let status = str_of(&thread["status"]);
         let now = self.now_ms();
@@ -2351,6 +2385,7 @@ impl Bridge {
                 gen,
                 thread,
                 config: None,
+                runs,
                 began: now,
                 cache,
                 messages: Vec::new(),
@@ -2474,6 +2509,7 @@ impl Bridge {
             messages: messages.clone(),
             earlier,
         });
+        let handoffs = self.handoffs(&env, &messages, &read.runs);
         let want = VIEW_MESSAGES * depth;
         let mut items: Vec<Value> = Vec::new();
         let mut positions: Vec<u64> = Vec::new();
@@ -2497,6 +2533,9 @@ impl Bridge {
                 }
                 length += segments.iter().map(|s| s.to_string().encode_utf16().count()).sum::<usize>();
                 shown["g"] = json!(segments);
+            }
+            if let Some(line) = item["position"].as_u64().and_then(|p| handoffs.get(&p)) {
+                shown["ho"] = json!(line);
             }
             if chars + length > VIEW_CHARS && !items.is_empty() {
                 break;

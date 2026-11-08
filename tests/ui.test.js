@@ -1626,8 +1626,8 @@ inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = vie
 assert(shown("T3WoWModelMenu") == "Claude Opus", shown("T3WoWModelMenu"))
 assert(shown("T3WoWEffortMenu") == "High", shown("T3WoWEffortMenu"))
 assert(shown("T3WoWPermissionMenu") == "Auto", shown("T3WoWPermissionMenu"))
--- A thread stays with its provider, as in T3, so there are no groups and no default row.
-assert(menuTexts("T3WoWModelMenu") == "Claude Opus|Claude Haiku", menuTexts("T3WoWModelMenu"))
+-- Every provider the machine runs, as in T3; only New Thread has a default row.
+assert(menuTexts("T3WoWModelMenu") == "Claude|Claude Opus|Claude Haiku|Grok|Grok Build", menuTexts("T3WoWModelMenu"))
 assert(menuTexts("T3WoWEffortMenu") == "Low|High|Extra high", menuTexts("T3WoWEffortMenu"))
 
 -- Picking is sent at once and shows right away, ahead of the thread's next read.
@@ -1673,6 +1673,46 @@ assert(shown("T3WoWModelMenu") == "Claude Haiku", "too soon to give up")
 clock = clock + 21
 update(opus)
 assert(shown("T3WoWModelMenu") == "Claude Opus", shown("T3WoWModelMenu"))
+return "ok"
+`);
+});
+
+test("an open thread can move to another provider's model, dropping an effort that one doesn't have", () => {
+  run(SELECTOR_HELPERS + `
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+local function update(cfg) inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = cfg } }) end
+update({ pv = "claudeAgent", m = "opus", ef = "high", rm = "auto" })
+UI.Select({ e = 1, id = "t1" })
+update({ pv = "claudeAgent", m = "opus", ef = "high", rm = "auto" })
+pick("T3WoWModelMenu", "Grok Build")
+assert(sent().t == "model" and sent().pv == "grok" and sent().md == "grok-build" and sent().ef == nil, "bad switch")
+assert(shown("T3WoWModelMenu") == "Grok Build" and not T3WoWEffortMenu.shown, shown("T3WoWModelMenu"))
+update({ pv = "grok", m = "grok-build", rm = "auto" })
+assert(shown("T3WoWModelMenu") == "Grok Build", shown("T3WoWModelMenu"))
+assert(shown("T3WoWPermissionMenu") == "Auto", "a thread's permissions stay when its model moves")
+return "ok"
+`);
+});
+
+test("a message from a thread's new provider has a handoff line over it, gone with the message", () => {
+  run(`
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+local function update(items) inboxWith(ENVS, { threads = thread, view = { e = 1, id = "t1", t = "A thread", s = "completed", items = items } }) end
+inboxWith(ENVS, { threads = thread })
+UI.Select({ e = 1, id = "t1" })
+update({ { r = "a", x = "before" }, { r = "u", x = "after", ho = "Claude Haiku > Codex Sol" } })
+assert(showing("Context handoff · Claude Haiku > Codex Sol"), "no line")
+-- Above the message it belongs to: the message is placed after it.
+local line, message
+for _, fs in ipairs(fontStrings) do
+  if type(fs.text) == "string" and fs.text:find("Context handoff") then line = fs end
+  if fs.text == "after" then message = fs end
+end
+assert(message.point[2] == line, "the message isn't under the line")
+update({ { r = "a", x = "before" }, { r = "u", x = "after" } })
+assert(not showing("Context handoff"), "still drawn")
+update({ { r = "a", x = "before" }, { r = "u", x = "after", ho = "Claude Haiku > Codex Sol" } })
+assert(showing("Context handoff"), "not drawn again")
 return "ok"
 `);
 });

@@ -1685,6 +1685,46 @@ local function renderAsk(view)
     end
 end
 
+-- The line T3 draws where a thread moved to another provider: its text in the middle, a
+-- rule each side. Each message that has one (item.ho) gets it above itself.
+local Handoff = { pool = {}, used = 0 }
+
+function Handoff.Release()
+    for _, line in ipairs(Handoff.pool) do
+        line.text:Hide()
+        line.left:Hide()
+        line.right:Hide()
+    end
+    Handoff.used = 0
+end
+
+function Handoff.Place(what)
+    Handoff.used = Handoff.used + 1
+    local line = Handoff.pool[Handoff.used]
+    if not line then
+        line = { text = messageChild:CreateFontString(nil, "OVERLAY"), left = Skin.Line(messageChild), right = Skin.Line(messageChild) }
+        line.text:SetFontObject(Skin.fonts.muted)
+        line.text:SetJustifyH("CENTER")
+        line.text:SetWordWrap(false)
+        -- The theme sizes its lines when it's applied, and that was before this one existed.
+        line.left:SetHeight(Skin.px)
+        line.right:SetHeight(Skin.px)
+        Handoff.pool[Handoff.used] = line
+    end
+    line.text:SetWidth(messageWidth() - 8)
+    line.text:SetText("Context handoff · " .. what)
+    place(line.text, 4, 18)
+    local room = math.ceil((line.text:GetStringWidth() or 0) / 2) + 8
+    line.left:ClearAllPoints()
+    line.left:SetPoint("LEFT", line.text, "LEFT", 0, 0)
+    line.left:SetPoint("RIGHT", line.text, "CENTER", -room, 0)
+    line.left:Show()
+    line.right:ClearAllPoints()
+    line.right:SetPoint("LEFT", line.text, "CENTER", room, 0)
+    line.right:SetPoint("RIGHT", line.text, "RIGHT", 0, 0)
+    line.right:Show()
+end
+
 function renderView()
     -- The conversation is hidden while the window is resized, and drawn when you let go.
     if Sizing.from then return end
@@ -1703,6 +1743,7 @@ function renderView()
     end
     Mono.Release()
     Pictures.Release()
+    Handoff.Release()
     hideAsk()
     earlier:Hide()
     if selected and selected.new then
@@ -1763,6 +1804,7 @@ function renderView()
     local count = #items
     for i, item in ipairs(items) do
         local fs = messageString(i)
+        if item.ho then Handoff.Place(item.ho) end
         local card = type(item.d) == "table"
         local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
         if card then
@@ -2092,15 +2134,11 @@ do
             if not c then return list end
             if c.new then list[1] = { text = "Default model" } end
             local providers, listed = providersOn(selected.env), false
-            -- A thread that exists stays with its provider, as in T3.
-            local several = c.new and #providers > 1
             for _, p in ipairs(providers) do
-                if c.new or p.id == c.pv then
-                    if several then list[#list + 1] = { text = p.t, note = true } end
-                    for _, model in ipairs(p.m or {}) do
-                        list[#list + 1] = { text = model.t, value = { pv = p.id, m = model.id } }
-                        listed = listed or (p.id == c.pv and model.id == c.m)
-                    end
+                if #providers > 1 then list[#list + 1] = { text = p.t, note = true } end
+                for _, model in ipairs(p.m or {}) do
+                    list[#list + 1] = { text = model.t, value = { pv = p.id, m = model.id } }
+                    listed = listed or (p.id == c.pv and model.id == c.m)
                 end
             end
             -- T3 lists its usual models only; the one a thread is on stays shown.
