@@ -4,7 +4,7 @@
 
 use crate::codec::decode_cells;
 use crate::config::Trust;
-use crate::lua::{plain, to_lua, wow_segments, wow_text};
+use crate::lua::{name_thread_links, plain, to_lua, wow_segments, wow_text};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::t3::{T3Error, T3};
@@ -365,6 +365,8 @@ pub struct Bridge {
     painter: Option<Box<dyn Painter>>,
     /// The game's addon can show pictures this UI session (its frames say `im`).
     images_ok: bool,
+    /// The game's addon draws delegated tasks as cards (its frames say `dc`).
+    cards_ok: bool,
     /// The open thread's pages found so far (see `read_view_scan`).
     scan: Option<ScanCache>,
     /// Pictures that couldn't be drawn, why, and when (tried again after PICTURE_RETRY_MS).
@@ -380,6 +382,82 @@ struct ScanCache {
     from: u64,
     upto: Option<u64>,
     pages: Vec<FoundPage>,
+    cards: Vec<FoundCard>,
+}
+
+/// A task the open thread delegated, as its activity shows it (T3 draws it as a card).
+#[derive(Clone)]
+struct FoundCard {
+    position: u64,
+    item_id: String,
+    title: String,
+    /// As the game names a thread's status: "running", "completed", "failed" or "cancelled".
+    status: &'static str,
+    /// Its result so far; whether that was cut short, and whether it was read in full
+    /// (CARD_CHARS of it) after the task ended.
+    text: String,
+    truncated: bool,
+    full: bool,
+    at: i64,
+}
+
+impl FoundCard {
+    fn from_item(item: &Value, position: u64) -> FoundCard {
+        let status = match str_of(&item["status"]) {
+            "completed" => "completed",
+            "failed" | "error" => "failed",
+            "cancelled" | "interrupted" | "declined" => "cancelled",
+            _ => "running",
+        };
+        FoundCard {
+            position,
+            item_id: str_of(&item["itemId"]).to_string(),
+            title: str_of(&item["title"]).to_string(),
+            status,
+            text: str_of(&item["text"]).to_string(),
+            truncated: item["textTruncated"] == true,
+            full: false,
+            at: iso_seconds(str_of(&item["updatedAt"])),
+        }
+    }
+
+    fn ended(&self) -> bool {
+        self.status != "running"
+    }
+
+    /// The task's own part of its id ("delegated-task:..."), which its thread's id
+    /// ("thread:delegated-task:...") shares.
+    fn task(&self) -> &str {
+        task_part(&self.item_id)
+    }
+
+    /// The card for the game: its title, status, when it ended and the start of its
+    /// result. An addon without cards shows `x`, which says the same in text.
+    fn shown(&self) -> Value {
+        let title = if self.title.trim().is_empty() { "Delegated task".to_string() } else { plain(&self.title, 120) };
+        let body = if self.ended() && !self.text.trim().is_empty() {
+            let mut body = wow_text(&self.text, CARD_BODY_CHARS);
+            if self.truncated && !body.ends_with('…') {
+                body.push_str("\n…");
+            }
+            body
+        } else {
+            String::new()
+        };
+        let word = match self.status {
+            "completed" => "finished",
+            "failed" => "failed",
+            "cancelled" => "stopped",
+            _ => "working",
+        };
+        let x = if body.is_empty() { format!("{title} ({word})") } else { format!("{title} ({word})\n{body}") };
+        json!({ "r": "a", "x": x, "d": { "t": title, "s": self.status, "at": self.at, "b": body } })
+    }
+}
+
+/// The part of a T3 id after its kind ("turn-item:", "thread:", "node:").
+fn task_part(id: &str) -> &str {
+    id.split_once(':').map_or(id, |(_, rest)| rest)
 }
 
 #[derive(Clone)]
@@ -421,6 +499,12 @@ struct Drawing {
 
 /// Pictures drawn in one poll at most (each takes the browser a second or two).
 const DRAWS_PER_POLL: usize = 2;
+/// Delegated tasks read again in one poll at most (those still running, and those that
+/// ended with more result than the scan reads).
+const CARD_READS_PER_POLL: usize = 4;
+/// How much of a delegated task's result is read, and shown on its card.
+const CARD_CHARS: usize = 600;
+const CARD_BODY_CHARS: usize = 400;
 /// Activity pages read in one poll at most while looking for pages.
 const SCAN_PAGES: usize = 4;
 /// A picture that couldn't be drawn is tried again after this long.
@@ -534,6 +618,7 @@ enum Step {
     /// Its pictures: a page of its activity (looking for pages an agent showed), each
     /// picture to draw (a request at a time for a page's HTML), then the view with them.
     ViewScan,
+    ViewCard(String),
     ViewDraw(usize),
     ViewPictures,
 }
@@ -710,6 +795,7 @@ impl Bridge {
             trust: Trust::Full,
             painter: None,
             images_ok: false,
+            cards_ok: false,
             scan: None,
             picture_errors: HashMap::new(),
         }
@@ -905,6 +991,12 @@ impl Bridge {
             if images_ok && self.painter.is_some() {
                 self.log("The game can show pictures: pages and images in threads go to it as pictures");
             }
+            self.view_changed();
+        }
+        // An addon that draws delegated tasks as cards says so in every frame.
+        let cards_ok = frame["dc"] == 1;
+        if cards_ok != self.cards_ok {
+            self.cards_ok = cards_ok;
             self.view_changed();
         }
         let l = frame["l"].as_u64().unwrap_or(0) as u32;
@@ -1190,6 +1282,7 @@ impl Bridge {
             Step::ViewAsk => self.read_view_ask(),
             Step::ViewAskRead(request_id) => self.read_view_request(request_id),
             Step::ViewScan => self.read_view_scan(),
+            Step::ViewCard(item_id) => self.read_view_card(item_id),
             Step::ViewDraw(i) => self.draw_picture(i),
             Step::ViewPictures => {
                 self.place_pictures();
@@ -1857,9 +1950,12 @@ impl Bridge {
         if let Some(run) = self.poll_run.as_mut() {
             run.reading = Some(read);
         }
-        if self.images_ok && self.painter.is_some() {
+        if self.scans() {
             self.push_steps(vec![Step::ViewScan]);
-        } else if pending {
+            return;
+        }
+        self.name_links();
+        if pending {
             self.push_steps(vec![Step::ViewAsk]);
         } else {
             self.finish_view(None);
@@ -1889,7 +1985,7 @@ impl Bridge {
         let View { env, id, .. } = read.view.clone();
         let mut cache = match self.scan.take().filter(|c| c.env == env && c.id == id && c.from <= first) {
             Some(cache) => cache,
-            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new() },
+            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new() },
         };
         let mut args = json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 200 });
         if let Some(after) = cache.upto.or(first.checked_sub(1)) {
@@ -1906,6 +2002,15 @@ impl Bridge {
         let mut waiting = false;
         for item in result["items"].as_array().into_iter().flatten() {
             let Some(position) = item["position"].as_u64() else { continue };
+            if item["type"] == "subagent" {
+                let card = FoundCard::from_item(item, position);
+                match cache.cards.iter_mut().find(|c| c.item_id == card.item_id) {
+                    Some(known) if known.full && known.status == card.status => {}
+                    Some(known) => *known = card,
+                    None if !card.item_id.is_empty() => cache.cards.push(card),
+                    None => {}
+                }
+            }
             if item["type"] == "dynamic_tool" && is_page_item(str_of(&item["text"])) {
                 match str_of(&item["status"]) {
                     "completed" => {
@@ -1942,7 +2047,8 @@ impl Bridge {
     /// images its messages embed. Those not in an image slot yet are drawn now, a few a
     /// poll; the rest wait for the next one.
     fn plan_pictures(&mut self) {
-        let found = self.scan.as_ref().map(|c| c.pages.clone()).unwrap_or_default();
+        let pictures_ok = self.images_ok && self.painter.is_some();
+        let found = self.scan.as_ref().filter(|_| pictures_ok).map(|c| c.pages.clone()).unwrap_or_default();
         let late = self.out_of_time();
         let now = self.now_ms();
         let Some(read) = self.view_read() else { return };
@@ -1959,7 +2065,16 @@ impl Bridge {
                 role: "a",
             })
             .collect();
-        pictures.extend(read.embedded.iter().cloned());
+        if pictures_ok {
+            pictures.extend(read.embedded.iter().cloned());
+        }
+        // Delegated tasks to read again: still running, or ended with more result than
+        // the scan read (once).
+        let cards: Vec<String> = match (self.cards_ok, self.scan.as_ref()) {
+            (true, Some(scan)) => scan.cards.iter().filter(|c| c.position >= first && (!c.ended() || (c.truncated && !c.full))).map(|c| c.item_id.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let reads = if late { 0 } else { cards.len().min(CARD_READS_PER_POLL) };
         let mut drawing: Vec<Drawing> = Vec::new();
         let mut later = false;
         for picture in &pictures {
@@ -1976,10 +2091,38 @@ impl Bridge {
         }
         let Some(read) = self.view_read() else { return };
         read.pictures = pictures;
-        read.again |= later;
-        let steps: Vec<Step> = (0..drawing.len()).map(Step::ViewDraw).chain([Step::ViewPictures]).collect();
+        read.again |= later || reads < cards.len();
+        let steps: Vec<Step> = cards
+            .into_iter()
+            .take(reads)
+            .map(Step::ViewCard)
+            .chain((0..drawing.len()).map(Step::ViewDraw))
+            .chain([Step::ViewPictures])
+            .collect();
         read.drawing = drawing;
         self.push_steps(steps);
+    }
+
+    /// A delegated task's item read again, for its status and (once it ended) CARD_CHARS of
+    /// its result. A task that ends adds to its thread (T3 tells the agent), so the view is
+    /// read again then, and this with it.
+    fn read_view_card(&mut self, item_id: String) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        let Some(position) = self.scan.as_ref().and_then(|s| s.cards.iter().find(|c| c.item_id == item_id)).map(|c| c.position) else { return Ok(()) };
+        let mut args = json!({ "threadId": id, "view": "activity", "limit": 1, "maxCharsPerItem": CARD_CHARS });
+        if let Some(after) = position.checked_sub(1) {
+            args["afterPosition"] = json!(after);
+        }
+        let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
+        let item = result["items"].as_array().and_then(|items| items.iter().find(|it| it["itemId"] == item_id.as_str())).cloned();
+        if let (Some(item), Some(scan)) = (item, self.scan.as_mut()) {
+            if let Some(card) = scan.cards.iter_mut().find(|c| c.item_id == item_id) {
+                *card = FoundCard::from_item(&item, position);
+                card.full = card.ended();
+            }
+        }
+        Ok(())
     }
 
     /// Draws the `i`th picture of this poll into an image slot. A page's HTML is read
@@ -2092,6 +2235,12 @@ impl Bridge {
         if !placed.is_empty() {
             self.save_state();
         }
+        if self.cards_ok {
+            let first = self.view_read().and_then(|r| r.positions.first().copied()).unwrap_or(u64::MAX);
+            for card in self.scan.iter().flat_map(|s| s.cards.iter()).filter(|c| c.position >= first) {
+                placed.push((card.position * 2, card.shown()));
+            }
+        }
         let Some(read) = self.view_read() else { return };
         read.again |= again;
         if let Some(built) = read.built.as_mut().filter(|_| !placed.is_empty()) {
@@ -2101,7 +2250,49 @@ impl Bridge {
             all.sort_by_key(|(order, _)| *order);
             built["items"] = json!(all.into_iter().map(|(_, item)| item).collect::<Vec<_>>());
         }
+        self.name_links();
         self.ask_or_finish();
+    }
+
+    /// Whether the open thread's activity is read: for pictures, or for delegated tasks'
+    /// cards. An addon that shows neither needs only the messages.
+    fn scans(&self) -> bool {
+        self.cards_ok || (self.images_ok && self.painter.is_some())
+    }
+
+    /// The thread links in the built view, named: a delegated task's or a listed thread's
+    /// title in quotes, else what it is ("a delegated task", "a thread").
+    fn name_links(&mut self) {
+        let cards: HashMap<String, String> = self
+            .scan
+            .iter()
+            .flat_map(|s| s.cards.iter())
+            .filter(|c| !c.title.trim().is_empty())
+            .map(|c| (c.task().to_string(), c.title.clone()))
+            .collect();
+        let threads = &self.threads;
+        let Some(read) = self.poll_run.as_mut().and_then(|run| run.reading.as_mut()) else { return };
+        let Some(items) = read.built.as_mut().and_then(|b| b["items"].as_array_mut()) else { return };
+        let name = |env: &str, thread: &str| {
+            let card = cards.get(task_part(thread)).filter(|_| thread.starts_with("thread:")).cloned();
+            let listed = || threads.get(env).and_then(|list| list.iter().find(|t| t["threadId"] == thread)).map(|t| str_of(&t["title"]).to_string());
+            match card.or_else(listed).filter(|t| !t.trim().is_empty()) {
+                Some(title) => format!("“{}”", plain(&title, 120)),
+                None if thread.contains("delegated-task:") => "a delegated task".to_string(),
+                None => "a thread".to_string(),
+            }
+        };
+        fn walk(value: &mut Value, name: &dyn Fn(&str, &str) -> String) {
+            match value {
+                Value::String(text) => *text = name_thread_links(text, name),
+                Value::Array(list) => list.iter_mut().for_each(|v| walk(v, name)),
+                Value::Object(map) => map.values_mut().for_each(|v| walk(v, name)),
+                _ => {}
+            }
+        }
+        for item in items {
+            walk(item, &name);
+        }
     }
 
     /// The question the open thread waits on: which request it is (it's read next).

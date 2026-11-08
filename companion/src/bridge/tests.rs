@@ -1863,3 +1863,88 @@ fn a_picture_whose_file_is_gone_is_forgotten_at_start() {
     assert_eq!(bridge.link.images.keys().copied().collect::<Vec<_>>(), vec![2]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const TASK_LINK: &str = "<t3-thread://v2/local/thread:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1>";
+
+/// A rig with thread t1 open: you asked (0), it delegated a review (1, `status`, with
+/// `result`), and said where it runs (2), linking the task and the thread itself.
+fn delegate_rig(start_ms: i64, cards: bool, status: &str, result: &str) -> Rig {
+    let mut rig = Rig::new(start_ms);
+    let said = format!("Sol is reviewing in {TASK_LINK}. Back in <t3-thread://v2/local/t1> after.");
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["review it", &said]));
+    let task = json!({
+        "position": 1, "itemId": "turn-item:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1", "type": "subagent",
+        "status": status, "title": "Sol review (round 1)", "text": result, "updatedAt": "2026-11-06T10:00:30Z",
+    });
+    let activity = vec![
+        json!({ "position": 0, "itemId": "m0", "type": "user_message", "status": "completed", "text": "review it" }),
+        task,
+        json!({ "position": 2, "itemId": "m2", "type": "assistant_message", "status": "completed", "text": said }),
+    ];
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    let mut frame = json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] });
+    if cards {
+        frame["dc"] = json!(1);
+    }
+    rig.frame(frame);
+    rig
+}
+
+fn card_reads(rig: &Rig) -> Vec<Value> {
+    rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| a["view"] == "activity" && a["limit"] == 1).collect()
+}
+
+#[test]
+fn a_delegated_task_shows_as_a_card_where_t3_shows_it_and_links_to_it_say_its_title() {
+    let result = format!("VERDICT: APPROVE\n\nS1 [nit] {}", "a".repeat(500));
+    let mut rig = delegate_rig(40_000_000, true, "completed", &result);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 3, "{items:?}");
+    let card = &items[1]["d"];
+    assert_eq!(card["t"], "Sol review (round 1)");
+    assert_eq!(card["s"], "completed");
+    assert_eq!(card["at"], iso_seconds("2026-11-06T10:00:30Z"));
+    // The scan reads 200 chars of it; the card reads more once (it ended), and shows 400.
+    let body = card["b"].as_str().unwrap();
+    assert!(body.starts_with("VERDICT: APPROVE\n\nS1 [nit] aaa"), "{body}");
+    assert!(body.chars().count() > 300 && body.ends_with('…'), "{body}");
+    assert!(str_of(&items[1]["x"]).starts_with("Sol review (round 1) (finished)\nVERDICT"), "{}", items[1]["x"]);
+    let reads = card_reads(&rig);
+    assert_eq!(reads.len(), 1);
+    assert_eq!((reads[0]["afterPosition"].clone(), reads[0]["maxCharsPerItem"].clone()), (json!(0), json!(CARD_CHARS)));
+    assert_eq!(items[2]["x"], "Sol is reviewing in “Sol review (round 1)”. Back in “Fix tests” after.");
+    // Nothing new: it isn't read again.
+    rig.t3.set("running", "2026-11-06T10:00:05Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(card_reads(&rig).len(), 1);
+    assert_eq!(view_items(&rig)[1]["d"]["b"], json!(body));
+}
+
+#[test]
+fn a_running_delegated_task_says_so_and_its_card_fills_in_once_it_ends() {
+    let mut rig = delegate_rig(41_000_000, true, "running", "");
+    rig.bridge.tick();
+    let card = view_items(&rig)[1].clone();
+    assert_eq!((card["d"]["s"].clone(), card["d"]["b"].clone()), (json!("running"), json!("")));
+    assert_eq!(card["x"], "Sol review (round 1) (working)");
+    // It ends: T3 tells the thread, which changes, and the card is read again.
+    rig.t3.activity.lock().unwrap().get_mut("t1").unwrap()[1]["status"] = json!("completed");
+    rig.t3.activity.lock().unwrap().get_mut("t1").unwrap()[1]["text"] = json!("VERDICT: APPROVE");
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let card = view_items(&rig)[1].clone();
+    assert_eq!((card["d"]["s"].clone(), card["d"]["b"].clone()), (json!("completed"), json!("VERDICT: APPROVE")));
+}
+
+#[test]
+fn without_an_addon_that_draws_cards_links_still_read_as_words_and_no_activity_is_read() {
+    let mut rig = delegate_rig(42_000_000, false, "completed", "VERDICT: APPROVE");
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_read").iter().all(|a| a["view"] != "activity"));
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1]["x"], "Sol is reviewing in a delegated task. Back in “Fix tests” after.");
+}
