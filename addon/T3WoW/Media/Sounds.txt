@@ -1,0 +1,11 @@
+The notification sounds are T3 Code's own (https://github.com/pingdotgg/t3code, MIT),
+copied unchanged so the game sounds like the app.
+
+notification-completion.mp3 is derived from Notification Sound 1 by deadrobotmusic:
+https://freesound.org/people/deadrobotmusic/sounds/750607/
+
+notification-input.mp3 is derived from Notification Sound 3 by deadrobotmusic:
+https://freesound.org/people/deadrobotmusic/sounds/750609/
+
+The original sounds are dedicated to the public domain under CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/

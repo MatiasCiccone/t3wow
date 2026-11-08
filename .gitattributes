@@ -4,4 +4,5 @@
 *.tga binary
 *.rgba binary
 *.ttf binary
+*.mp3 binary
 *.sh text eol=lf
