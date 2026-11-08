@@ -298,6 +298,11 @@ function Skin.Glyph(host, name, size, colorKey, layer)
     return tex
 end
 
+-- Another shape on a glyph already made.
+function Skin.SetGlyphFile(tex, name)
+    tex:SetTexture(MEDIA .. name)
+end
+
 function Skin.SetGlyphColor(tex, colorKey)
     tex.colorKey = colorKey
     tex:SetVertexColor(Skin.Color(colorKey))

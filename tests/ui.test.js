@@ -42,6 +42,7 @@ function inboxWith(envs, extra)
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
   data.more = extra and extra.more
   data.att, data.pi = extra and extra.att, extra and extra.pi
+  data.sel, data.models = extra and extra.sel, extra and extra.models
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -1390,4 +1391,253 @@ assert(laidOutAt == 1000 - 300 - 46, "not laid out at the new width: " .. tostri
 assert(T3WoWDB.window.w == 1000 and T3WoWDB.window.h == 620 and T3WoWDB.window.point == "TOPLEFT", "the size wasn't saved")
 return "ok"
 `, { before: SCROLLING, db: "{}" });
+});
+
+// What the companion says each machine offers, as inbox.models carries it.
+const SELECTOR_HELPERS = `
+CATALOG = {
+  { e = 1, id = "claudeAgent", t = "Claude", m = {
+    { id = "opus", t = "Claude Opus", o = "effort", ef = { "low", "high", "xhigh" } },
+    { id = "haiku", t = "Claude Haiku", o = "effort", ef = { "low" } },
+  } },
+  { e = 1, id = "grok", t = "Grok", rm = { "approval-required", "auto", "full-access" }, m = { { id = "grok-build", t = "Grok Build" } } },
+  { e = 2, id = "codex", t = "Codex", m = { { id = "luna", t = "gpt-luna", o = "reasoningEffort", ef = { "medium" } } } },
+}
+SEL_ENVS = { { id = "local", name = "PC", ok = true, dm = "full-access" }, { id = "mac", name = "Mac", ok = true, dm = "approval-required" } }
+function segments()
+  local list = {}
+  for _, f in ipairs(frames) do
+    if f.parent == T3WoWPermissions and rawget(f, "mode") then list[#list + 1] = f end
+  end
+  return list
+end
+function segment(id)
+  for _, s in ipairs(segments()) do if s.mode.id == id then return s end end
+end
+function lit()
+  local on = {}
+  for _, s in ipairs(segments()) do if s.lit.shown then on[#on + 1] = s.mode.id end end
+  return table.concat(on, ",")
+end
+function openPermissions()
+  if T3WoWPermissions.shown then T3WoWPermissions:Hide() end
+  T3WoWPermissionMenu.scripts.OnClick(T3WoWPermissionMenu, "LeftButton")
+end
+`;
+
+test("New Thread picks a model, effort and permissions, and leaves out what you left alone", () => {
+  run(SELECTOR_HELPERS + `
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG })
+click("New Thread")
+assert(T3WoWModelMenu.shown and T3WoWPermissionMenu.shown, "the row is hidden")
+assert(shown("T3WoWModelMenu") == "Default model", shown("T3WoWModelMenu"))
+assert(not T3WoWEffortMenu.shown, "no model picked, so no efforts to list")
+assert(shown("T3WoWPermissionMenu") == "Full access", "shows what a thread gets by default")
+-- The list opens over the chip: the box is at the window's bottom.
+assert(T3WoWModelMenu.menu.above, "should open upward")
+assert(menuTexts("T3WoWModelMenu") == "Default model|Claude|Claude Opus|Claude Haiku|Grok|Grok Build", menuTexts("T3WoWModelMenu"))
+-- Left alone: nothing about models or modes goes out, so T3's defaults apply.
+typeText("as it comes")
+click("Start")
+local plain = sent()
+assert(plain.t == "new" and plain.pv == nil and plain.md == nil and plain.ef == nil and plain.rm == nil, "sent a pick nobody made")
+
+click("New Thread")
+pick("T3WoWModelMenu", "Claude Opus")
+assert(T3WoWEffortMenu.shown, "a picked model's efforts")
+assert(shown("T3WoWEffortMenu") == "Default", shown("T3WoWEffortMenu"))
+assert(menuTexts("T3WoWEffortMenu") == "Default|Low|High|Extra high", menuTexts("T3WoWEffortMenu"))
+pick("T3WoWEffortMenu", "Extra high")
+openPermissions()
+segment("approval-required").scripts.OnClick(segment("approval-required"), "LeftButton")
+assert(shown("T3WoWPermissionMenu") == "Supervised", shown("T3WoWPermissionMenu"))
+typeText("carefully")
+click("Start")
+local picked = sent()
+assert(picked.pv == "claudeAgent" and picked.md == "opus" and picked.ef == "xhigh" and picked.rm == "approval-required",
+  table.concat({ tostring(picked.pv), tostring(picked.md), tostring(picked.ef), tostring(picked.rm) }, ","))
+-- The message stays in its own field.
+assert(picked.m == "carefully", picked.m)
+return "ok"
+`);
+});
+
+test("an effort another model doesn't have goes, and another machine starts over with its own models", () => {
+  run(SELECTOR_HELPERS + `
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG })
+click("New Thread")
+pick("T3WoWModelMenu", "Claude Opus")
+pick("T3WoWEffortMenu", "High")
+-- Haiku only has low.
+pick("T3WoWModelMenu", "Claude Haiku")
+assert(shown("T3WoWEffortMenu") == "Default", shown("T3WoWEffortMenu"))
+-- A model with no efforts has no effort to pick.
+pick("T3WoWModelMenu", "Grok Build")
+assert(not T3WoWEffortMenu.shown, "Grok has no efforts")
+openPermissions()
+segment("approval-required").scripts.OnClick(segment("approval-required"), "LeftButton")
+pick("T3WoWMachineMenu", "Mac")
+assert(shown("T3WoWModelMenu") == "Default model", shown("T3WoWModelMenu"))
+assert(shown("T3WoWPermissionMenu") == "Supervised", "the Mac's default, not the pick made for the PC")
+assert(menuTexts("T3WoWModelMenu") == "Default model|gpt-luna", menuTexts("T3WoWModelMenu"))
+typeText("on the mac")
+click("Start")
+assert(sent().e == "mac" and sent().md == nil and sent().rm == nil, "a pick for the PC went to the Mac")
+return "ok"
+`);
+});
+
+test("the permissions popover lights the mode, says what each does, and dims what a provider can't run", () => {
+  run(SELECTOR_HELPERS + `
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG })
+click("New Thread")
+openPermissions()
+assert(T3WoWPermissions.shown, "didn't open")
+assert(#segments() == 4, #segments())
+assert(lit() == "full-access", lit())
+assert(showing("Allow commands and edits without prompts"), "the lit mode's description")
+-- Hovering one says what it does; leaving goes back to the lit one.
+local edits = segment("auto-accept-edits")
+edits.scripts.OnEnter(edits)
+assert(showing("Apply edits without asking"), "hover text")
+edits.scripts.OnLeave(edits)
+assert(showing("Allow commands and edits without prompts"), "back to the lit mode")
+-- It stays open as you pick, lighting the new one.
+segment("auto").scripts.OnClick(segment("auto"), "LeftButton")
+assert(T3WoWPermissions.shown and lit() == "auto", lit())
+T3WoWPermissions:Hide()
+-- Grok has no "auto-accept-edits": it can't be picked once Grok is the model.
+pick("T3WoWModelMenu", "Grok Build")
+openPermissions()
+assert(segment("auto-accept-edits").enabled == false, "Grok can't run that mode")
+assert(segment("auto").enabled == true and lit() == "auto", lit())
+T3WoWPermissions:Hide()
+-- Claude takes every mode; a pick Grok can't run goes back to the default on the way in.
+pick("T3WoWModelMenu", "Claude Opus")
+openPermissions()
+segment("auto-accept-edits").scripts.OnClick(segment("auto-accept-edits"), "LeftButton")
+T3WoWPermissions:Hide()
+pick("T3WoWModelMenu", "Grok Build")
+assert(shown("T3WoWPermissionMenu") == "Full access", shown("T3WoWPermissionMenu"))
+return "ok"
+`);
+});
+
+test("an open thread shows what it runs on: model and effort change, its permissions don't", () => {
+  run(SELECTOR_HELPERS + `
+local function view(cfg) return { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = cfg } end
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+local opus = { pv = "claudeAgent", m = "opus", ef = "high", rm = "auto" }
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread })
+UI.Select({ e = 1, id = "t1" })
+assert(not T3WoWModelMenu.shown, "nothing to show until its read arrives")
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view(opus) })
+assert(shown("T3WoWModelMenu") == "Claude Opus", shown("T3WoWModelMenu"))
+assert(shown("T3WoWEffortMenu") == "High", shown("T3WoWEffortMenu"))
+assert(shown("T3WoWPermissionMenu") == "Auto", shown("T3WoWPermissionMenu"))
+-- A thread stays with its provider, as in T3, so there are no groups and no default row.
+assert(menuTexts("T3WoWModelMenu") == "Claude Opus|Claude Haiku", menuTexts("T3WoWModelMenu"))
+assert(menuTexts("T3WoWEffortMenu") == "Low|High|Extra high", menuTexts("T3WoWEffortMenu"))
+
+-- Picking is sent at once and shows right away, ahead of the thread's next read.
+pick("T3WoWEffortMenu", "Low")
+local change = sent()
+assert(change.t == "model" and change.e == "local" and change.id == "t1" and change.pv == "claudeAgent" and change.md == "opus" and change.ef == "low", "bad change")
+assert(shown("T3WoWEffortMenu") == "Low", shown("T3WoWEffortMenu"))
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view(opus) })
+assert(shown("T3WoWEffortMenu") == "Low", "fell back while the read caught up")
+return "ok"
+`);
+});
+
+test("a refused model change goes back and says why; one that lands stops showing as pending", () => {
+  run(SELECTOR_HELPERS + `
+local function view(cfg) return { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = cfg } end
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+local opus = { pv = "claudeAgent", m = "opus", ef = "high", rm = "auto" }
+local function update(cfg, out) inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view(cfg), out = out }) end
+update(opus)
+UI.Select({ e = 1, id = "t1" })
+update(opus)
+pick("T3WoWEffortMenu", "Low")
+local seq = sent().s
+assert(type(seq) == "number", "no command number")
+update(opus, { { s = seq, ok = false, x = "T3 said no" } })
+assert(shown("T3WoWEffortMenu") == "High", shown("T3WoWEffortMenu"))
+assert(showing("Model not changed: T3 said no"), "the reason")
+
+-- Switching model keeps the effort when the new one has it, and drops it when it doesn't.
+pick("T3WoWModelMenu", "Claude Haiku")
+assert(sent().md == "haiku" and sent().ef == nil, "Haiku has no high")
+local landed = { pv = "claudeAgent", m = "haiku", rm = "auto" }
+update(landed)
+assert(shown("T3WoWModelMenu") == "Claude Haiku" and shown("T3WoWEffortMenu") == "Default", shown("T3WoWEffortMenu"))
+-- A later change on T3's side shows: nothing is held over.
+update(opus)
+assert(shown("T3WoWModelMenu") == "Claude Opus", shown("T3WoWModelMenu"))
+-- A pick that never shows up stops being shown after a while.
+pick("T3WoWModelMenu", "Claude Haiku")
+update(opus)
+assert(shown("T3WoWModelMenu") == "Claude Haiku", "too soon to give up")
+clock = clock + 21
+update(opus)
+assert(shown("T3WoWModelMenu") == "Claude Opus", shown("T3WoWModelMenu"))
+return "ok"
+`);
+});
+
+test("a thread's permissions only show, with the way to change them in T3", () => {
+  run(SELECTOR_HELPERS + `
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+local v = { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = { pv = "claudeAgent", m = "opus", rm = "approval-required" } }
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread })
+UI.Select({ e = 1, id = "t1" })
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = v })
+openPermissions()
+assert(lit() == "approval-required", lit())
+for _, s in ipairs(segments()) do assert(s.enabled == false, s.mode.id .. " can be picked") end
+assert(showing("keeps the permissions it started with"), "doesn't say why")
+local before = #queue()
+segment("full-access").scripts.OnClick(segment("full-access"), "LeftButton")
+assert(#queue() == before and lit() == "approval-required", "a thread's permissions changed from the game")
+for _, f in ipairs(frames) do
+  if f.kind == "Button" and f.parent == T3WoWPermissions and f.text == "Open in T3" then f.scripts.OnClick(f, "LeftButton") end
+end
+assert(sent().t == "t3" and sent().id == "t1", "didn't open T3")
+assert(not T3WoWPermissions.shown, "stayed open")
+return "ok"
+`);
+});
+
+test("the tray's Read-only greys out changing the model; No new threads leaves it", () => {
+  run(SELECTOR_HELPERS + `
+local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
+local v = { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = { pv = "claudeAgent", m = "opus", ef = "high", rm = "auto" } }
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, trust = "readonly" })
+UI.Select({ e = 1, id = "t1" })
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = v, trust = "readonly" })
+assert(T3WoWModelMenu.enabled == false and T3WoWEffortMenu.enabled == false, "still enabled")
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = v, trust = "nonew" })
+assert(T3WoWModelMenu.enabled == true and T3WoWEffortMenu.enabled == true, "No new threads still changes models")
+return "ok"
+`);
+});
+
+test("a companion that can't take the picks shows no row, and a game without the icon files shows words", () => {
+  run(SELECTOR_HELPERS + `
+-- An older companion: no inbox.sel, so a pick would be dropped and T3's default would run.
+inboxWith(SEL_ENVS, {})
+click("New Thread")
+assert(not T3WoWModelMenu.shown and not T3WoWEffortMenu.shown and not T3WoWPermissionMenu.shown, "offered picks it would ignore")
+-- A companion that reads no models still has the permissions to offer.
+inboxWith(SEL_ENVS, { sel = true })
+assert(not T3WoWModelMenu.shown and T3WoWPermissionMenu.shown, "permissions need no catalog")
+for _, name in ipairs({ "lock", "pencil", "sparkle", "shield-off" }) do missingTextures[ROOT .. "Media\\\\" .. name] = true end
+inboxWith(SEL_ENVS, { sel = true })
+openPermissions()
+local segment = segments()[1]
+assert(segment.short.hidden == false and not segment.glyph.shown, "should fall back to its word")
+assert(not T3WoWPermissionMenu.icon.shown, "no square on the chip")
+return "ok"
+`);
 });

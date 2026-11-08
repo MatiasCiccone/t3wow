@@ -34,6 +34,9 @@ struct FakeT3 {
     watching: Mutex<bool>,
     /// Images uploaded: the address, its content type and how many bytes.
     uploads: Mutex<Vec<(String, String, usize)>>,
+    /// What each thread runs on (`t3_thread_configure`), and what the machines offer.
+    configs: Mutex<HashMap<String, Value>>,
+    capabilities: Mutex<Value>,
 }
 
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
@@ -69,6 +72,8 @@ impl FakeT3 {
             item_texts: Mutex::new(HashMap::new()),
             watching: Mutex::new(false),
             uploads: Mutex::new(Vec::new()),
+            configs: Mutex::new(HashMap::new()),
+            capabilities: Mutex::new(json!({})),
         })
     }
 
@@ -123,6 +128,19 @@ impl T3 for FakeT3 {
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
             "t3_thread_launch" => json!({ "threadId": "new1" }),
+            "orchestrator_capabilities" => self.capabilities.lock().unwrap().clone(),
+            // As T3 answers: a thread's settings, or a sequence number for a change, which
+            // replaces the whole selection, options and all.
+            "t3_thread_configure" => {
+                let id = str_of(&args["threadId"]).to_string();
+                let mut configs = self.configs.lock().unwrap();
+                if args["modelSelection"].is_object() {
+                    configs.entry(id).or_insert_with(|| json!({ "runtimeMode": "auto" }))["modelSelection"] = args["modelSelection"].clone();
+                    json!({ "sequence": 1 })
+                } else {
+                    configs.get(&id).cloned().unwrap_or_else(|| json!({}))
+                }
+            }
             "list_thread_pull_requests" => {
                 let prs = self.thread(&args["threadId"])["pullRequests"].clone();
                 let watching = *self.watching.lock().unwrap();
@@ -2356,4 +2374,270 @@ fn without_pictures_in_the_game_a_paste_still_works_with_no_small_picture() {
     assert_eq!(rig.bridge.snapshot()["att"], json!([{ "d": "new", "i": 1, "w": 2, "h": 2 }]));
     assert!(rig.written.lock().unwrap().images.is_empty());
     assert_eq!(rig.bridge.snapshot()["pi"], true);
+}
+
+/// What T3 says a machine offers, in the shape it answers (see the probe in the PR).
+fn capabilities() -> Value {
+    json!({
+        "runtimeMode": "full-access",
+        "providers": [
+            { "providerInstanceId": "codex", "displayName": "Codex", "constraints": [], "models": [
+                { "id": "gpt-luna", "options": [
+                    { "id": "reasoningEffort", "values": ["low", "medium"], "default": "medium" },
+                    { "id": "serviceTier", "values": ["default", "priority"], "default": "default" },
+                ] },
+            ] },
+            { "providerInstanceId": "claudeAgent", "displayName": "Claude", "constraints": [], "models": [
+                { "id": "claude-opus", "label": "Claude Opus", "options": [
+                    { "id": "effort", "values": ["low", "high"], "default": "medium" },
+                    { "id": "fastMode", "values": [false, true] },
+                ] },
+                { "id": "claude-haiku", "label": "Claude Haiku", "options": [{ "id": "effort", "values": ["low"], "default": "low" }] },
+            ] },
+            { "providerInstanceId": "picky", "displayName": "Picky", "constraints": [], "runtimeModes": ["approval-required"], "models": [{ "id": "only", "label": "Only" }] },
+            // Disabled ones still list models.
+            { "providerInstanceId": "grok", "displayName": "Grok", "constraints": ["Provider instance is disabled."], "models": [{ "id": "grok-build" }] },
+            { "providerInstanceId": "empty", "displayName": "Empty", "constraints": [], "models": [] },
+        ],
+    })
+}
+
+/// A rig whose machines have been read once, with the window open.
+fn rig_with_catalog(start_ms: i64) -> Rig {
+    let mut rig = Rig::new(start_ms);
+    *rig.t3.capabilities.lock().unwrap() = capabilities();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    rig
+}
+
+#[test]
+fn the_game_hears_what_each_machine_offers_and_a_new_threads_default_permissions() {
+    let rig = rig_with_catalog(40_000_000);
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["sel"], true);
+    let models = snapshot["models"].as_array().unwrap();
+    let on_local: Vec<&str> = models.iter().filter(|p| p["e"] == 1).map(|p| str_of(&p["id"])).collect();
+    assert_eq!(on_local, ["codex", "claudeAgent", "picky"], "disabled and empty providers stay out");
+    let on_mac: Vec<&str> = models.iter().filter(|p| p["e"] == 2).map(|p| str_of(&p["id"])).collect();
+    assert_eq!(on_mac, ["codex", "claudeAgent", "picky"]);
+    assert_eq!(snapshot["envs"][0]["dm"], "full-access");
+
+    let claude = models.iter().find(|p| p["id"] == "claudeAgent" && p["e"] == 1).unwrap();
+    assert_eq!(claude["t"], "Claude");
+    assert_eq!(claude["m"][0], json!({ "id": "claude-opus", "t": "Claude Opus", "o": "effort", "ef": ["low", "high"] }));
+    assert!(claude["rm"].is_null(), "a provider with no list takes every mode");
+    let codex = models.iter().find(|p| p["id"] == "codex" && p["e"] == 1).unwrap();
+    assert_eq!(codex["m"][0]["t"], "gpt-luna", "a model with no label goes by its id");
+    assert_eq!(codex["m"][0]["o"], "reasoningEffort");
+    let picky = models.iter().find(|p| p["id"] == "picky" && p["e"] == 1).unwrap();
+    assert_eq!(picky["rm"], json!(["approval-required"]));
+    assert!(picky["m"][0]["ef"].is_null(), "no efforts to list");
+}
+
+#[test]
+fn what_a_machine_offers_is_read_every_few_minutes_and_a_failed_read_keeps_the_last() {
+    let mut rig = rig_with_catalog(41_000_000);
+    // One read a machine, though the machines were read twice.
+    assert_eq!(rig.t3.calls_to("orchestrator_capabilities").len(), 2);
+    assert!(rig.t3.calls_to("orchestrator_capabilities").iter().any(|a| a["environmentId"] == "mac"));
+    rig.advance(CATALOG_TTL_MS);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("orchestrator_capabilities").len(), 4);
+
+    rig.t3.failing.lock().unwrap().insert("orchestrator_capabilities".into(), "no such tool".into());
+    rig.advance(CATALOG_TTL_MS);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("orchestrator_capabilities").len(), 6);
+    assert!(!rig.bridge.snapshot()["models"].as_array().unwrap().is_empty(), "lost what it knew");
+    // Not asked again every minute.
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("orchestrator_capabilities").len(), 6);
+}
+
+#[test]
+fn what_a_machine_offers_goes_when_it_is_unlinked_or_the_t3_changes() {
+    let mut rig = rig_with_catalog(42_000_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let models = rig.bridge.snapshot()["models"].clone();
+    assert!(models.as_array().unwrap().iter().all(|p| p["e"] == 1), "{models}");
+    rig.bridge.set_login("another");
+    assert!(rig.bridge.snapshot()["models"].is_null());
+}
+
+#[test]
+fn the_open_thread_says_what_it_runs_on_even_if_t3_wont_say_its_effort() {
+    let mut rig = rig_with_catalog(43_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["providerInstanceId"] = json!("claudeAgent");
+        threads[0]["model"] = json!("claude-opus");
+        threads[0]["runtimeMode"] = json!("auto");
+    }
+    rig.t3.configs.lock().unwrap().insert("t1".into(), json!({
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus", "options": [{ "id": "effort", "value": "high" }, { "id": "fastMode", "value": false }] },
+        "runtimeMode": "approval-required",
+    }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "open", "e": "local", "id": "t1" }] }));
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["view"]["cfg"], json!({ "pv": "claudeAgent", "m": "claude-opus", "ef": "high", "rm": "approval-required" }));
+
+    // Without T3's read of its settings, the thread's own read still names the model.
+    rig.t3.failing.lock().unwrap().insert("t3_thread_configure".into(), "no such tool".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "refresh" }] }));
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let view = rig.bridge.snapshot()["view"].clone();
+    assert_eq!(view["cfg"], json!({ "pv": "claudeAgent", "m": "claude-opus", "rm": "auto" }));
+    assert_eq!(view["id"], "t1", "the conversation is still shown");
+}
+
+#[test]
+fn a_new_thread_starts_on_the_picks_and_on_t3s_defaults_for_the_rest() {
+    let mut rig = rig_with_catalog(44_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "e": "mac", "m": "All picked", "pv": "claudeAgent", "md": "claude-opus", "ef": "high", "rm": "approval-required" },
+        { "s": 3, "t": "new", "e": "mac", "m": "Only a model", "pv": "codex", "md": "gpt-luna" },
+        { "s": 4, "t": "new", "e": "mac", "m": "Nothing picked" },
+    ] }));
+    rig.bridge.tick();
+    let launches = rig.t3.calls_to("t3_thread_launch");
+    assert_eq!(launches[0]["modelSelection"], json!({ "instanceId": "claudeAgent", "model": "claude-opus", "options": [{ "id": "effort", "value": "high" }] }));
+    assert_eq!(launches[0]["runtimeMode"], "approval-required");
+    assert_eq!(launches[0]["message"], "All picked");
+    assert_eq!(launches[1]["modelSelection"], json!({ "instanceId": "codex", "model": "gpt-luna" }));
+    assert!(launches[1]["runtimeMode"].is_null(), "{}", launches[1]);
+    assert!(launches[2]["modelSelection"].is_null() && launches[2]["runtimeMode"].is_null(), "{}", launches[2]);
+}
+
+#[test]
+fn a_permission_mode_or_effort_it_cant_name_starts_nothing() {
+    let mut rig = rig_with_catalog(45_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "e": "mac", "m": "Oops", "rm": "root" },
+        { "s": 3, "t": "new", "e": "mac", "m": "Oops", "pv": "claudeAgent", "md": "claude-opus", "ef": "nonsense" },
+    ] }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_launch").is_empty(), "started at T3's default instead");
+    let out = rig.bridge.snapshot()["out"].clone();
+    assert_eq!(out[0]["ok"], false);
+    assert_eq!(out[0]["x"], "unknown permission mode \"root\"");
+    assert_eq!(out[1]["x"], "claude-opus has no effort \"nonsense\"");
+}
+
+#[test]
+fn changing_a_threads_effort_keeps_its_other_options_and_a_new_model_starts_clean() {
+    let mut rig = rig_with_catalog(46_000_000);
+    rig.t3.configs.lock().unwrap().insert("t1".into(), json!({
+        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-opus", "options": [{ "id": "effort", "value": "high" }, { "id": "fastMode", "value": true }] },
+        "runtimeMode": "auto",
+    }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus", "ef": "low" }] }));
+    rig.bridge.tick();
+    let sets: Vec<Value> = rig.t3.calls_to("t3_thread_configure").into_iter().filter(|a| a["modelSelection"].is_object()).collect();
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0]["environmentId"], "mac");
+    assert_eq!(sets[0]["threadId"], "t1");
+    let mut options = sets[0]["modelSelection"]["options"].as_array().unwrap().clone();
+    options.sort_by_key(|o| str_of(&o["id"]).to_string());
+    assert_eq!(options, vec![json!({ "id": "effort", "value": "low" }), json!({ "id": "fastMode", "value": true })]);
+
+    // Another model: its options are its own (fast mode may not exist there).
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-haiku", "ef": "low" }] }));
+    rig.bridge.tick();
+    let sets: Vec<Value> = rig.t3.calls_to("t3_thread_configure").into_iter().filter(|a| a["modelSelection"].is_object()).collect();
+    assert_eq!(sets[1]["modelSelection"], json!({ "instanceId": "claudeAgent", "model": "claude-haiku", "options": [{ "id": "effort", "value": "low" }] }));
+}
+
+#[test]
+fn a_refused_model_change_comes_back_with_its_reason_and_an_unknown_effort_never_reaches_t3() {
+    let mut rig = rig_with_catalog(47_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus", "ef": "nonsense" }] }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_configure").iter().all(|a| !a["modelSelection"].is_object()), "T3 stores whatever effort it's given");
+    assert_eq!(rig.bridge.snapshot()["out"][0]["ok"], false);
+
+    rig.t3.failing.lock().unwrap().insert("t3_thread_configure".into(), "Not allowed".into());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus" }] }));
+    rig.bridge.tick();
+    let out = rig.bridge.snapshot()["out"].clone();
+    assert_eq!(out[1], json!({ "s": 3, "ok": false, "x": "Not allowed" }));
+}
+
+#[test]
+fn the_trays_read_only_refuses_a_model_change_and_no_new_threads_refuses_only_starting() {
+    let mut rig = rig_with_catalog(48_000_000);
+    rig.bridge.set_trust(crate::config::Trust::ReadOnly);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus" }] }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_configure").iter().all(|a| !a["modelSelection"].is_object()));
+    assert_eq!(rig.bridge.snapshot()["out"][0]["ok"], false);
+
+    rig.bridge.set_trust(crate::config::Trust::NoNewThreads);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [
+        { "s": 3, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus" },
+        { "s": 4, "t": "new", "e": "mac", "m": "Nope", "rm": "full-access" },
+    ] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_configure").iter().filter(|a| a["modelSelection"].is_object()).count(), 1);
+    assert!(rig.t3.calls_to("t3_thread_launch").is_empty());
+}
+
+#[test]
+#[ignore = "starts one small thread on the T3 the companion is signed in to, changes its effort, then archives it"]
+fn the_selectors_work_on_the_signed_in_t3() {
+    let target = crate::t3::target().expect("no T3 to talk to");
+    let client = Arc::new(crate::t3::McpClient::new(&target.origin, target.token.as_deref().expect("not signed in")));
+    let mut rig = Rig::new(49_000_000);
+    rig.bridge.set_client(client.clone());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    let settle = |rig: &mut Rig, until: &dyn Fn(&Value) -> bool| -> Value {
+        for _ in 0..60 {
+            rig.advance(61_000);
+            for _ in 0..40 {
+                rig.bridge.tick();
+                let snapshot = rig.bridge.snapshot();
+                if until(&snapshot) {
+                    return snapshot;
+                }
+            }
+        }
+        panic!("never settled: {}", rig.bridge.snapshot());
+    };
+    let snapshot = settle(&mut rig, &|s| s["models"].is_array());
+    let haiku = "claude-haiku-5-5";
+    assert!(snapshot["models"].as_array().unwrap().iter().any(|p| p["id"] == "claudeAgent"), "{}", snapshot["models"]);
+    println!("default permissions: {}", snapshot["envs"][0]["dm"]);
+
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "m": "Reply with just OK.", "pv": "claudeAgent", "md": haiku, "ef": "low", "rm": "approval-required" },
+    ] }));
+    let snapshot = settle(&mut rig, &|s| s["out"].is_array());
+    let id = snapshot["out"][0]["id"].as_str().unwrap_or_else(|| panic!("{}", snapshot["out"])).to_string();
+    let read = |client: &crate::t3::McpClient| client.call("t3_thread_configure", json!({ "threadId": id })).unwrap();
+    let started = read(&client);
+    println!("started: {started}");
+
+    let opened = settle(&mut rig, &|s| s["view"]["cfg"]["ef"] == "low");
+    println!("view: {}", opened["view"]["cfg"]);
+
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [
+        { "s": 3, "t": "model", "id": id, "pv": "claudeAgent", "md": haiku, "ef": "medium" },
+    ] }));
+    let changed = settle(&mut rig, &|s| s["view"]["cfg"]["ef"] == "medium");
+    println!("changed: {}", changed["view"]["cfg"]);
+    let after = read(&client);
+    client.call("t3_thread_organize", json!({ "action": "archive", "threadId": id })).unwrap();
+
+    assert_eq!(started["modelSelection"]["model"], haiku);
+    assert_eq!(started["modelSelection"]["options"], json!([{ "id": "effort", "value": "low" }]));
+    assert_eq!(started["runtimeMode"], "approval-required");
+    assert_eq!(after["modelSelection"]["options"], json!([{ "id": "effort", "value": "medium" }]));
+    assert_eq!(after["runtimeMode"], "approval-required", "a change of model leaves the permissions alone");
 }

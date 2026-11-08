@@ -35,7 +35,8 @@ local STATUS = {
 
 local inbox
 -- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil,
--- worktree = true to start it in a new worktree }.
+-- worktree = true to start it in a new worktree, and what you picked of pv, m (provider and
+-- model), ef (effort) and rm (permissions), each nil for T3's default }.
 -- Machines and projects are kept by id: their places in the lists change between updates.
 local selected
 local collapsed = { settled = true, snoozed = true }
@@ -105,10 +106,10 @@ end
 -- "readonly"; an older companion leaves it out) limits what the game may make T3 do. The
 -- companion refuses those commands anyway: the window greys them out and says why.
 local TRUST_NAME = { nonew = "No new threads", readonly = "Read-only" }
-local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true, paste = true }
+local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true, paste = true, model = true }
 local BLOCKED_LEAD = {
     send = "Sending messages from the game is off", new = "Starting threads from the game is off",
-    paste = "Pasting images from the game is off",
+    paste = "Pasting images from the game is off", model = "Changing the model from the game is off",
     answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
 }
 local function blockedReason(kind)
@@ -176,6 +177,7 @@ local SIZE = {
     -- Where the New Thread form's dropdowns start: past its widest label, "Workspace", which
     -- T3's Inter draws about 66 wide.
     newField = 80,
+    composer = 126, -- the message box and its row of selectors, with their margins
 }
 -- The window is drawn in the theme (Theme.lua): a panel with a title bar and a footer, the
 -- thread list down the left.
@@ -253,8 +255,8 @@ end
 -- A dropdown: click it to open a list, pick one. Every dropdown is built here, so a reskin
 -- restyles them in one place. menu.entries() returns the list, asked again each time it
 -- opens: { text, value } entries can be picked (menu.pick(value), and menu.isSelected(value)
--- checks one), { text, note = true } lines can't (an empty list's note). The widget's
--- SetLabel(text) sets what it shows closed.
+-- checks one), { text, note = true } lines can't (an empty list's note, a group's name). The
+-- widget's SetLabel(text) sets what it shows closed; menu.above opens the list over it.
 -- The list is the addon's own, drawn in the theme: Blizzard's menus draw their own art,
 -- shared with every other addon, and UIDropDownMenu can taint the game's menus. One list
 -- serves every dropdown and opens under the one clicked; past 15 rows it scrolls.
@@ -345,7 +347,11 @@ do
         list:SetSize(width + 2 * PAD + (scrolls and 12 or 0), math.max(1, shown) * ROW_HEIGHT + 2 * PAD)
         scroll:SetVerticalScroll(0)
         list:ClearAllPoints()
-        list:SetPoint("TOPLEFT", dd, "BOTTOMLEFT", 0, -2)
+        if dd.menu.above then
+            list:SetPoint("BOTTOMLEFT", dd, "TOPLEFT", 0, 2)
+        else
+            list:SetPoint("TOPLEFT", dd, "BOTTOMLEFT", 0, -2)
+        end
         catcher:Show()
         list:Show()
     end
@@ -698,7 +704,7 @@ end
 local function messageWidth() return frame:GetWidth() - LIST_WIDTH - 46 end
 local messageScroll, messageChild = makeScroll(right, messageWidth())
 messageScroll:SetPoint("TOPLEFT", 18, -SIZE.header - 12)
-messageScroll:SetPoint("BOTTOMRIGHT", -26, 100)
+messageScroll:SetPoint("BOTTOMRIGHT", -26, SIZE.composer)
 -- By index: a message's, then (sending) at count + 1 and Working… at count + 2. That can
 -- leave a gap (Working… with no echo before it), so go through them with pairs: ipairs
 -- stopped at the gap and left the last Working… shown under the next reply.
@@ -1277,7 +1283,7 @@ end
 
 local newPanel = CreateFrame("Frame", nil, right)
 newPanel:SetPoint("TOPLEFT", 18, -SIZE.header - 12)
-newPanel:SetPoint("BOTTOMRIGHT", -26, 100)
+newPanel:SetPoint("BOTTOMRIGHT", -26, SIZE.composer)
 local newHelp = newPanel:CreateFontString(nil, "OVERLAY")
 newHelp:SetFontObject(Skin.fonts.muted)
 newHelp:SetPoint("TOPLEFT", 4, -8)
@@ -1299,7 +1305,9 @@ local envMenu = dropdown(newPanel, "T3WoWMachineMenu", 240, {
     isSelected = function(id) return composing() and selected.env == id end,
     pick = function(id)
         if not composing() or selected.env == id then return end
+        -- Another machine offers other models: what was picked for this one goes.
         selected.env, selected.project = id, nil
+        selected.pv, selected.m, selected.ef, selected.rm = nil, nil, nil, nil
         UI.Refresh()
     end,
 })
@@ -1688,7 +1696,9 @@ function renderView()
         viewTitle:SetText("New thread")
         setViewMeta(nil, "Type the task below and press Start.")
         local blocked = blockedReason("new")
-        newHelp:SetText(blocked and ("|cffff8000" .. blocked .. "|r") or "The thread uses the project's default model and mode.")
+        newHelp:SetText(blocked and ("|cffff8000" .. blocked .. "|r")
+            or (inbox and inbox.sel and "Pick its model and permissions in the box below, or leave T3's defaults.")
+            or "The thread uses the project's default model and mode.")
         local noMachines = #(inbox and inbox.envs or {}) == 0
         envMenu:SetLabel(e and e.name or (noMachines and "|cffff4040none linked|r" or "|cffff4040no longer linked: pick another|r"))
         projectMenu:SetLabel(project and project.t
@@ -1782,13 +1792,14 @@ end
 
 -- The box is a card; its outline takes the focus color while you type.
 local inputScroll = CreateFrame("ScrollFrame", nil, right, "UIPanelScrollFrameTemplate")
-inputScroll:SetPoint("BOTTOMLEFT", 28, 22)
-inputScroll:SetPoint("BOTTOMRIGHT", -40, 22)
+-- It leaves room inside the card, under the text, for the row of selectors.
+inputScroll:SetPoint("BOTTOMLEFT", 28, 48)
+inputScroll:SetPoint("BOTTOMRIGHT", -40, 48)
 inputScroll:SetHeight(60)
 Skin.ScrollBar(inputScroll)
 local inputBg = CreateFrame("Frame", nil, right)
 inputBg:SetPoint("TOPLEFT", inputScroll, -10, 10)
-inputBg:SetPoint("BOTTOMRIGHT", inputScroll, 26, -10)
+inputBg:SetPoint("BOTTOMRIGHT", inputScroll, 26, -36)
 inputBg:SetFrameLevel(math.max(0, inputScroll:GetFrameLevel() - 1))
 local inputBox = Skin.Box(inputBg, { shape = "panel", fill = "input", ring = "border" })
 
@@ -1938,10 +1949,352 @@ do
         end
         for i = #list + 1, #pasteChips do pasteChips[i]:Hide() end
         pasteRow:SetShown(#list > 0)
-        local bottom = 100 + (#list > 0 and (PASTE_HEIGHT + 6) or 0)
+        local bottom = SIZE.composer + (#list > 0 and (PASTE_HEIGHT + 6) or 0)
         messageScroll:SetPoint("BOTTOMRIGHT", -26, bottom)
         newPanel:SetPoint("BOTTOMRIGHT", -26, bottom)
     end
+end
+
+-- ---------------------------------------------------------------- model, effort, permissions
+-- The row inside the box, as in T3's composer: the model, its effort and, on the right, the
+-- permissions. New Thread picks all three (inbox.models says what each machine offers, and
+-- envs[i].dm the permissions a thread gets when none is picked); what you leave alone is
+-- T3's default. An open thread's model and effort change as you pick them. T3's tools can't
+-- change a thread's permissions once it exists, so there they only show. A companion
+-- without inbox.sel ignores these picks: the row stays hidden rather than promise them.
+-- One table, not a local each: the file is near Lua's 200 locals in one chunk.
+local Selectors = {}
+do
+    -- A change just picked is shown until the thread's read agrees, T3 refuses it, or this passes.
+    local PENDING_TIMEOUT = 20
+    local MODES = {
+        { id = "approval-required", name = "Supervised", icon = "lock", short = "Ask", text = "Ask before running commands and editing files." },
+        { id = "auto-accept-edits", name = "Auto-accept edits", icon = "pencil", short = "Edits", text = "Apply edits without asking, and ask before running commands." },
+        { id = "auto", name = "Auto", icon = "sparkle", short = "Auto", text = "Let the agent decide when it needs to ask." },
+        { id = "full-access", name = "Full access", icon = "shield-off", short = "Full", text = "Allow commands and edits without prompts." },
+    }
+    local MODE = {}
+    for _, mode in ipairs(MODES) do MODE[mode.id] = mode end
+    local EFFORT_NAME = {
+        low = "Low", medium = "Medium", high = "High", xhigh = "Extra high", max = "Max",
+        ultra = "Ultra", ultracode = "Ultracode", ultrathink = "Ultrathink", auto = "Auto",
+    }
+    local function effortName(value) return EFFORT_NAME[value] or tostring(value):gsub("|", "||") end
+    local pending -- { env, id, s, pv, m, ef, at }: a change sent for an open thread
+
+    local function providersOn(envId)
+        local index, list = envIndexById(envId), {}
+        for _, p in ipairs(inbox and type(inbox.models) == "table" and inbox.models or {}) do
+            if type(p) == "table" and p.e == index then list[#list + 1] = p end
+        end
+        return list
+    end
+
+    -- The model as the machine offers it (nil for one it doesn't list), and its provider.
+    local function find(envId, pv, m)
+        for _, p in ipairs(providersOn(envId)) do
+            if p.id == pv then
+                for _, model in ipairs(p.m or {}) do
+                    if model.id == m then return model, p end
+                end
+                return nil, p
+            end
+        end
+    end
+
+    local function offers(model, effort)
+        for _, value in ipairs(model and model.ef or {}) do
+            if value == effort then return true end
+        end
+        return false
+    end
+
+    local function allows(provider, mode)
+        if not provider or type(provider.rm) ~= "table" then return true end
+        for _, id in ipairs(provider.rm) do
+            if id == mode then return true end
+        end
+        return false
+    end
+
+    -- What the row shows: { new, pv, m, ef, rm }, or nil when it has nothing to show.
+    local function current()
+        if not selected or not inbox or not inbox.sel then return nil end
+        if selected.new then
+            local e = envById(selected.env)
+            if not e then return nil end
+            return { new = true, pv = selected.pv, m = selected.m, ef = selected.ef, rm = selected.rm or e.dm }
+        end
+        local view = inbox.view
+        if not isSelectedView(view) or type(view.cfg) ~= "table" then return nil end
+        local cfg = view.cfg
+        if pending and pending.env == selected.env and pending.id == selected.id then
+            local arrived = pending.pv == cfg.pv and pending.m == cfg.m and pending.ef == cfg.ef
+            if not arrived and GetTime() - pending.at < PENDING_TIMEOUT then
+                return { pv = pending.pv, m = pending.m, ef = pending.ef, rm = cfg.rm }
+            end
+            pending = nil
+        end
+        return cfg
+    end
+
+    -- Sends a new model or effort for the open thread.
+    local function change(pv, m, ef)
+        local blocked = blockedReason("model")
+        if blocked then return UI.Notice(blocked) end
+        local s = ns.Link.Send({ t = "model", e = selected.env, id = selected.id, pv = pv, md = m, ef = ef })
+        if s then awaiting[s] = { kind = "model", at = GetTime() } end
+        pending = { env = selected.env, id = selected.id, s = s, pv = pv, m = m, ef = ef, at = GetTime() }
+        UI.Refresh()
+    end
+
+    local function chip(name, width, menu)
+        menu.above = true
+        local dd = dropdown(inputBg, name, width, menu)
+        dd:SetHeight(22)
+        dd.label:SetFontObject(Skin.fonts.muted)
+        dd:Hide()
+        return dd
+    end
+
+    local modelMenu = chip("T3WoWModelMenu", 150, {
+        entries = function()
+            local c, list = current(), {}
+            if not c then return list end
+            if c.new then list[1] = { text = "Default model" } end
+            local providers, listed = providersOn(selected.env), false
+            -- A thread that exists stays with its provider, as in T3.
+            local several = c.new and #providers > 1
+            for _, p in ipairs(providers) do
+                if c.new or p.id == c.pv then
+                    if several then list[#list + 1] = { text = p.t, note = true } end
+                    for _, model in ipairs(p.m or {}) do
+                        list[#list + 1] = { text = model.t, value = { pv = p.id, m = model.id } }
+                        listed = listed or (p.id == c.pv and model.id == c.m)
+                    end
+                end
+            end
+            -- T3 lists its usual models only; the one a thread is on stays shown.
+            if not c.new and not listed and c.m then
+                table.insert(list, 1, { text = c.m:gsub("|", "||"), value = { pv = c.pv, m = c.m } })
+            end
+            if #list == 0 then list[1] = { text = "No models on this machine", note = true } end
+            return list
+        end,
+        isSelected = function(value)
+            local c = current()
+            if not c then return false end
+            if not value then return c.new and c.m == nil end
+            return value.pv == c.pv and value.m == c.m
+        end,
+        pick = function(value)
+            local c = current()
+            if not c then return end
+            local model, provider
+            if value then model, provider = find(selected.env, value.pv, value.m) end
+            local effort = offers(model, c.ef) and c.ef or nil
+            if c.new then
+                selected.pv, selected.m, selected.ef = value and value.pv, value and value.m, effort
+                -- A mode this provider doesn't run goes back to the default.
+                if selected.rm and not allows(provider, selected.rm) then selected.rm = nil end
+                UI.Refresh()
+            elseif value and (value.pv ~= c.pv or value.m ~= c.m) then
+                change(value.pv, value.m, effort)
+            end
+        end,
+    })
+    modelMenu:SetPoint("BOTTOMLEFT", inputBg, "BOTTOMLEFT", 8, 7)
+
+    local EFFORT_WIDTH, PERMISSION_WIDTH = 96, 148
+    local effortMenu = chip("T3WoWEffortMenu", EFFORT_WIDTH, {
+        entries = function()
+            local c, list = current(), {}
+            local model = c and find(selected.env, c.pv, c.m)
+            if not model then return list end
+            if c.new then list[1] = { text = "Default" } end
+            for _, value in ipairs(model.ef or {}) do
+                list[#list + 1] = { text = effortName(value), value = value }
+            end
+            return list
+        end,
+        isSelected = function(value)
+            local c = current()
+            return c ~= nil and c.ef == value
+        end,
+        pick = function(value)
+            local c = current()
+            if not c then return end
+            if c.new then
+                selected.ef = value
+                UI.Refresh()
+            elseif value ~= c.ef then
+                change(c.pv, c.m, value)
+            end
+        end,
+    })
+    effortMenu:SetPoint("LEFT", modelMenu, "RIGHT", 6, 0)
+
+    local permissionMenu = chip("T3WoWPermissionMenu", PERMISSION_WIDTH, {})
+    permissionMenu:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -8, 7)
+    permissionMenu.icon = Skin.Glyph(permissionMenu, "lock", 14, "muted", "OVERLAY")
+    permissionMenu.icon:SetPoint("LEFT", 8, 0)
+
+    -- The game finds a new file only when it starts: a game started before this version
+    -- shows no icon rather than a square. Asked each time, as the answer can come a while
+    -- after SetTexture.
+    local function known(glyph)
+        local file = not glyph.GetTextureFilePath or glyph:GetTextureFilePath()
+        return file ~= nil and file ~= ""
+    end
+
+    local POPOVER_WIDTH, SEGMENT_HEIGHT = 300, 28
+    local popover = CreateFrame("Frame", "T3WoWPermissions", UIParent)
+    popover:SetFrameStrata("FULLSCREEN_DIALOG")
+    popover:SetFrameLevel(20)
+    popover:SetClampedToScreen(true)
+    popover:EnableMouse(true)
+    popover:SetWidth(POPOVER_WIDTH)
+    popover:SetPoint("BOTTOMRIGHT", permissionMenu, "TOPRIGHT", 0, 4)
+    Skin.Box(popover, { shape = "panel", fill = "card", ring = "border", ringLayer = "BORDER" })
+    popover:Hide()
+    tinsert(type(UIMenus) == "table" and UIMenus or UISpecialFrames, "T3WoWPermissions")
+    -- A click anywhere else closes it, as with the dropdown lists.
+    local catcher = CreateFrame("Button", nil, UIParent)
+    catcher:SetFrameStrata("FULLSCREEN_DIALOG")
+    catcher:SetFrameLevel(10)
+    catcher:SetAllPoints(UIParent)
+    catcher:RegisterForClicks("AnyUp")
+    catcher:SetScript("OnClick", function() popover:Hide() end)
+    catcher:Hide()
+    popover:SetScript("OnHide", function() catcher:Hide() end)
+
+    local heading = popover:CreateFontString(nil, "OVERLAY")
+    heading:SetFontObject(Skin.fonts.muted)
+    heading:SetPoint("TOPLEFT", 12, -10)
+    heading:SetText("Permissions")
+    local name = popover:CreateFontString(nil, "OVERLAY")
+    name:SetFontObject(Skin.fonts.strong)
+    name:SetPoint("TOPLEFT", 12, -66)
+    name:SetJustifyH("LEFT")
+    local description = popover:CreateFontString(nil, "OVERLAY")
+    description:SetFontObject(Skin.fonts.muted)
+    description:SetPoint("TOPLEFT", 12, -84)
+    description:SetWidth(POPOVER_WIDTH - 24)
+    description:SetJustifyH("LEFT")
+    description:SetWordWrap(true)
+    local locked = popover:CreateFontString(nil, "OVERLAY")
+    locked:SetFontObject(Skin.fonts.small)
+    locked:SetPoint("TOPLEFT", 12, -118)
+    locked:SetWidth(POPOVER_WIDTH - 24)
+    locked:SetJustifyH("LEFT")
+    locked:SetWordWrap(true)
+    locked:SetText("A thread keeps the permissions it started with here. To change them, use T3.")
+    local openT3 = button(popover, "Open in T3", 110, function()
+        popover:Hide()
+        if selected and not selected.new then openInT3(selected.id, selected.env) end
+    end)
+    openT3:SetPoint("BOTTOMRIGHT", -12, 10)
+
+    local function describe(mode)
+        name:SetText(mode and mode.name or "Default")
+        description:SetText(mode and mode.text or "T3 sets it from this machine and your sign-in.")
+    end
+
+    local function describeCurrent()
+        local c = current()
+        describe(c and MODE[c.rm])
+    end
+
+    local segments = {}
+    local segmentWidth = (POPOVER_WIDTH - 24) / #MODES
+    for index, mode in ipairs(MODES) do
+        local segment = CreateFrame("Button", nil, popover)
+        segment:SetSize(segmentWidth - 2, SEGMENT_HEIGHT)
+        segment:SetPoint("TOPLEFT", 12 + (index - 1) * segmentWidth + 1, -30)
+        segment.mode = mode
+        segment.lit = Skin.Box(segment, { shape = "control", fill = "selected", ring = "selectedRing" })
+        segment.lit:Hide()
+        segment.glyph = Skin.Glyph(segment, mode.icon, 16, "muted", "OVERLAY")
+        segment.glyph:SetPoint("CENTER")
+        -- What it says when the game has no icon file yet.
+        segment.short = segment:CreateFontString(nil, "OVERLAY")
+        segment.short:SetFontObject(Skin.fonts.muted)
+        segment.short:SetPoint("CENTER")
+        segment.short:SetText(mode.short)
+        segment.short:Hide()
+        segment:SetScript("OnClick", function(self)
+            if not selected or not selected.new then return end
+            selected.rm = self.mode.id
+            UI.Refresh()
+        end)
+        segment:SetScript("OnEnter", function(self) describe(self.mode) end)
+        segment:SetScript("OnLeave", describeCurrent)
+        Skin.Hover(segment)
+        segments[index] = segment
+    end
+
+    local function renderPopover(c)
+        local provider = select(2, find(selected.env, c.pv, c.m))
+        for _, segment in ipairs(segments) do
+            local on = segment.mode.id == c.rm
+            local open = c.new and allows(provider, segment.mode.id)
+            segment.lit:SetShown(on)
+            segment:SetEnabled(open and true or false)
+            local drawn = known(segment.glyph)
+            segment.glyph:SetShown(drawn)
+            segment.short:SetShown(not drawn)
+            Skin.SetGlyphColor(segment.glyph, on and "text" or (open and "muted" or "dim"))
+        end
+        describe(MODE[c.rm])
+        locked:SetShown(not c.new)
+        openT3:SetShown(not c.new)
+        popover:SetHeight(c.new and 122 or 192)
+    end
+
+    permissionMenu:SetScript("OnClick", function()
+        if popover:IsShown() then return popover:Hide() end
+        local c = current()
+        if not c then return end
+        renderPopover(c)
+        catcher:Show()
+        popover:Show()
+    end)
+    permissionMenu:SetScript("OnHide", function() popover:Hide() end)
+
+    function Selectors.Render()
+        local c = current()
+        if not c then
+            modelMenu:Hide()
+            effortMenu:Hide()
+            permissionMenu:Hide()
+            return
+        end
+        local model = find(selected.env, c.pv, c.m)
+        -- The model takes what room the box has beside the two that keep their size.
+        modelMenu:SetWidth(math.min(220, math.max(110, inputBg:GetWidth() - EFFORT_WIDTH - PERMISSION_WIDTH - 28)))
+        modelMenu:SetShown(c.m ~= nil or #providersOn(selected.env) > 0)
+        modelMenu:SetLabel(model and model.t or (c.m and c.m:gsub("|", "||")) or "Default model")
+        effortMenu:SetShown(model ~= nil and type(model.ef) == "table" and #model.ef > 0)
+        effortMenu:SetLabel(c.ef and effortName(c.ef) or "Default")
+        local changeable = c.new or not blockedReason("model")
+        modelMenu:SetEnabled(changeable and true or false)
+        effortMenu:SetEnabled(changeable and true or false)
+        local mode = MODE[c.rm]
+        permissionMenu:SetShown(true)
+        permissionMenu:SetLabel(mode and mode.name or "Default")
+        Skin.SetGlyphFile(permissionMenu.icon, mode and mode.icon or "lock")
+        local drawn = known(permissionMenu.icon)
+        permissionMenu.icon:SetShown(drawn)
+        permissionMenu.label:SetPoint("LEFT", drawn and 26 or 9, 0)
+        if popover:IsShown() then renderPopover(c) end
+    end
+
+    -- T3 refused the change: back to what the thread really runs on.
+    function Selectors.Refused(s)
+        if pending and pending.s == s then pending = nil end
+    end
+
+    function Selectors.Forget() pending = nil end
 end
 
 -- ---------------------------------------------------------------- copying
@@ -2030,7 +2383,8 @@ local function sendCurrent()
         return
     end
     local command = selected.new
-        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = text }
+        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = text,
+            pv = selected.pv, md = selected.m, ef = selected.ef, rm = selected.rm }
         or { t = "send", e = selected.env, id = selected.id, m = text }
     if not ns.Link.Fits(command) then
         UI.Notice("That message is too long to send from the game: shorten it.")
@@ -2651,6 +3005,7 @@ function UI.Refresh()
     renderList()
     renderView()
     Paste.Render()
+    Selectors.Render()
     renderStatus()
 end
 
@@ -2699,8 +3054,9 @@ local function takeOutcomes(data)
                 if sent.text and input:GetText() == "" then input:SetText(sent.text) end
                 if echo and echo.s == o.s then echo = nil end
                 if sent.kind == "answer" then askState.sent = nil end
+                if sent.kind == "model" then Selectors.Refused(o.s) end
                 local what = sent.kind == "new" and "Couldn't start the thread" or (sent.kind == "answer" and "Answer not sent")
-                    or (sent.kind == "paste" and "Not pasted") or "Not sent"
+                    or (sent.kind == "paste" and "Not pasted") or (sent.kind == "model" and "Model not changed") or "Not sent"
                 said = format("|cffff4040%s: %s|r%s", what, tostring(o.x or "failed"), sent.text and " (your text is back in the box)" or "")
             end
         end
@@ -2748,6 +3104,7 @@ function UI.ForgetLogin()
     copyBox:Hide()
     awaiting = {}
     askState.k, askState.picks, askState.sent, askState.sentAt = nil, {}, nil, nil
+    Selectors.Forget()
     announced = false
     while #toasts > 0 do removeToast(toasts[#toasts]) end
     UI.Refresh()
