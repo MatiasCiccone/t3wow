@@ -32,6 +32,11 @@ local SYNC_SECONDS = 1.5
 local RECHECK_SECONDS, RECHECK_QUIET_SECONDS, QUIET_AFTER = 0.75, 2.5, 60
 -- A command waiting this long also gets a slot loaded directly, in case a signal was missed.
 local NUDGE_AFTER = 6
+-- While watching signals, a slot is also loaded after this long without any update, longer
+-- each time until a signal arrives again: a signal that can never come (its files gone, say)
+-- would otherwise hold back every update until you do something in the window. The update
+-- it brings can also tell us to stop watching (sigoff). Each costs one of the 200 slots.
+local CHECKIN_AFTER = { 600, 1200, 1800 }
 -- Seconds between loads for a waiting command while nothing answers, by how many loads
 -- in a row went unanswered: as a nudge in signal mode, and on the timer. Once the
 -- companion counts as not answering (ACK_PATIENCE), nudges stop and the timer slows down.
@@ -498,6 +503,7 @@ poller:SetScript("OnUpdate", function(_, delta)
                     index, now - check.at, state.checksOfWatched or 0, state.signalBase))
                 for _, other in ipairs(fontPool) do other.index = nil end
                 state.lastCheckAt, state.lastSignalAt, state.signalsSeen = nil, now, (state.signalsSeen or 0) + 1
+                state.checkins = 0
                 -- The update we load names the next wait; until then, assume the companion
                 -- moved past every file it raised for this one (ours and its neighbours).
                 state.signalBase, state.signalTime = index + 2, time()
@@ -530,8 +536,17 @@ poller:SetScript("OnUpdate", function(_, delta)
             state.lastCheckAt = now
             state.checksOfWatched = (state.checksOfWatched or 0) + 1
         end
-        -- A companion that isn't answering at all won't answer a nudge either.
-        if not (state.queueSince and now - state.queueSince > NUDGE_AFTER) or Link.Stalled() then return end
+        -- A companion that isn't answering at all won't answer a nudge or a check-in either.
+        if Link.Stalled() then return end
+        if not (state.queueSince and now - state.queueSince > NUDGE_AFTER) then
+            local quietFor = CHECKIN_AFTER[math.min((state.checkins or 0) + 1, #CHECKIN_AFTER)]
+            if now - math.max(state.inboxAt or 0, state.checkinAt or 0) < quietFor then return end
+            state.checkinAt, state.checkins = now, (state.checkins or 0) + 1
+            loadNextSlot("a check-in after a quiet spell")
+            state.syncUntil = GetTime() + SYNC_SECONDS
+            Link.Render()
+            return
+        end
     end
     -- No signal yet (or none on this client, or a command waits too long): load slots on
     -- a schedule, and tell the companion where we are after each one. Loads nothing
