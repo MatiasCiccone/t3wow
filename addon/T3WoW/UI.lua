@@ -163,8 +163,10 @@ local SIZE = {
     row = LIST_WIDTH - 26, -- a thread row's width
     bubbleX = 12, bubbleY = 8, -- the padding inside a message bubble
     card = 14, -- the padding inside the question's card
-    settings = 280, -- the settings panel's width
-    field = 112, -- where a labelled control (a dropdown, the slider) starts in Settings
+    settings = 300, -- the settings panel's width
+    -- Where a labelled control (a dropdown, the slider) starts in Settings: past the widest
+    -- label, "Stay on screen", which T3's Inter draws about 104 wide.
+    field = 132,
 }
 -- The window is drawn in the theme (Theme.lua): a panel with a title bar and a footer, the
 -- thread list down the left.
