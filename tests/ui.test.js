@@ -715,6 +715,33 @@ return "ok"
 `);
 });
 
+test("a reply that arrives while Working… shows leaves one Working…, not a second one under the reply", () => {
+  run(SHOWN + `
+local function shownCount(pattern)
+  local n = 0
+  for _, fs in ipairs(fontStrings) do
+    if not fs.hidden and type(fs.text) == "string" and fs.text:find(pattern) then n = n + 1 end
+  end
+  return n
+end
+-- An answer picked from the options sends no echo, so Working… is drawn with a gap before it.
+local thread = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }
+local items = { { r = "u", x = "Add a tray option" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "running", items = items } })
+UI.Select(thread)
+assert(shownCount("Working…") == 1, "Working… missing")
+items = { items[1], { r = "a", x = "Building both on the same branch." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "running", items = items } })
+assert(shownCount("Working…") == 1, shownCount("Working…") .. " Working… lines")
+assert(below(shownString("Working…"), shownString("Building both")), "Working… isn't below the reply")
+-- The run finishes with no new message: Working… goes.
+thread.s = "completed"
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(shownCount("Working…") == 0, shownCount("Working…") .. " Working… lines after the run finished")
+return "ok"
+`);
+});
+
 // Scroll frames that keep their offset and child height, with a 300 px view; the
 // conversation's one is the frame the copy box hides with. A child's top is at TOP (0
 // unless a test sets it).
