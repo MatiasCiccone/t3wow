@@ -266,7 +266,14 @@ pub struct LinkState {
     /// The image slots named in updates to the game process `wow_key`: it may have loaded
     /// them, and keeps what it loaded until it quits, so they aren't written again until then.
     pub images_shown: Vec<u32>,
+    /// The threads New Thread started from the game, oldest first, at most `STARTED_KEPT`.
+    /// They start through T3's tools, so T3 records them as an agent's, like the delegated
+    /// threads its sidebar leaves out; only this says they're yours.
+    pub started_threads: Vec<String>,
 }
+
+/// How many threads started from the game are remembered.
+const STARTED_KEPT: usize = 500;
 
 /// A picture in an image slot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -295,6 +302,7 @@ impl Default for LinkState {
             login: None,
             images: BTreeMap::new(),
             images_shown: Vec::new(),
+            started_threads: Vec::new(),
         }
     }
 }
@@ -1126,6 +1134,17 @@ impl Bridge {
         }
     }
 
+    /// A thread New Thread started from the game: yours, though T3 records it as an agent's.
+    fn remember_started(&mut self, id: &str) {
+        let started = &mut self.link.started_threads;
+        if !started.iter().any(|known| known == id) {
+            started.push(id.to_string());
+            let excess = started.len().saturating_sub(STARTED_KEPT);
+            started.drain(..excess);
+            self.save_state();
+        }
+    }
+
     fn log(&self, message: &str) {
         (self.log)(message);
     }
@@ -1397,6 +1416,7 @@ impl Bridge {
                     self.remember_sent(&draft, &env, new_id.as_deref().unwrap_or(""), &message);
                     self.note(&format!("Started \"{title}\"."));
                     if let Some(new_id) = new_id {
+                        self.remember_started(&new_id);
                         self.view = Some(View { env: env.clone(), id: new_id.clone(), depth: 1 });
                         started = Some(new_id);
                     }
@@ -3077,8 +3097,9 @@ impl Bridge {
                     entry["sn"] = json!(true);
                 }
                 // An agent made it: with no launcher found (delegate_task leaves no sender),
-                // the game keeps it out of Open while it's idle, as T3's sidebar does.
-                if t["createdBy"] == "agent" {
+                // the game keeps it out of Open while it's idle, as T3's sidebar does. One
+                // started from the game is yours, whatever T3 recorded.
+                if t["createdBy"] == "agent" && !self.link.started_threads.iter().any(|known| known == str_of(&t["threadId"])) {
                     entry["ag"] = json!(true);
                 }
                 if let Some(launcher) = t["launcher"].as_str() {

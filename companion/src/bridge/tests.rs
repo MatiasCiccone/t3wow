@@ -493,6 +493,56 @@ fn the_list_follows_t3s_sidebar() {
     }
 }
 
+/// Whether the update to the game says an agent made this thread.
+fn marked_agent_made(rig: &Rig, id: &str) -> bool {
+    let snapshot = rig.bridge.snapshot();
+    let thread = snapshot["threads"].as_array().unwrap().iter().find(|t| t["id"] == id).cloned();
+    thread.unwrap_or_else(|| panic!("{id} isn't listed"))["ag"] == true
+}
+
+#[test]
+fn a_thread_started_from_the_game_stays_yours_after_a_restart() {
+    let dir = std::env::temp_dir().join(format!("t3wow-started-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("state.json");
+    // T3 records what its tools launch as an agent's, whoever asked.
+    let listed = [
+        json!({ "threadId": "new1", "projectId": "p1", "title": "Mine", "status": "completed", "createdBy": "agent", "updatedAt": "2026-11-06T10:00:00Z" }),
+        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "updatedAt": "2026-11-06T10:00:00Z" }),
+    ];
+
+    let mut rig = Rig::new(3_000_000);
+    rig.bridge.state_file = Some(state.clone());
+    rig.t3.threads.lock().unwrap().extend(listed.clone());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "new", "p": "p1", "m": "Mine" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_launch").len(), 1);
+    assert!(!marked_agent_made(&rig, "new1"), "a thread started from the game counts as an agent's");
+    assert!(marked_agent_made(&rig, "delegated"), "a delegated thread stopped counting as an agent's");
+
+    // After a restart, from the state file.
+    let saved: LinkState = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    let mut restarted = Rig::new(3_000_000);
+    restarted.bridge.link.started_threads = saved.started_threads;
+    restarted.t3.threads.lock().unwrap().extend(listed);
+    restarted.bridge.tick();
+    assert!(!marked_agent_made(&restarted, "new1"), "forgotten after a restart");
+    assert!(marked_agent_made(&restarted, "delegated"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_the_latest_started_threads_are_remembered() {
+    let mut rig = Rig::new(3_000_000);
+    rig.bridge.link.started_threads = (0..STARTED_KEPT).map(|n| format!("old{n}")).collect();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "new", "p": "p1", "m": "Mine" }] }));
+    rig.bridge.tick();
+    let started = &rig.bridge.link.started_threads;
+    assert_eq!(started.len(), STARTED_KEPT);
+    assert_eq!(started[0], "old1");
+    assert_eq!(started[STARTED_KEPT - 1], "new1");
+}
+
 #[test]
 fn signals_follow_the_clock_between_updates_and_carry_on_after_reload() {
     let mut rig = Rig::new(3_000_000);
