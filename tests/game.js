@@ -72,7 +72,7 @@ end
 -- getters answer 0 (sizes, scroll ranges).
 frames = {}
 local function frame(kind, name)
-  local f = { scripts = {}, shown = true, text = "", enabled = true, kind = kind }
+  local f = { scripts = {}, shown = true, text = "", enabled = true, kind = kind, name = name }
   function f:SetScript(event, fn) self.scripts[event] = fn end
   function f:GetScript(event) return self.scripts[event] end
   function f:CreateFontString() return fontString() end

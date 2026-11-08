@@ -6,7 +6,7 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 ## What it does
 
-**Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar: Open, Working, Snoozed and Settled. Each title shows the machine and project under it. Threads an agent started appear indented under the thread that started them, as in T3.
+**Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar: Open, Working, Snoozed and Settled. Each title shows the machine and project under it. Threads an agent started appear indented under the thread that started them, as in T3. **Search**, over the list, narrows it as you type to threads whose title, project or machine matches; Enter opens the first one.
 
 ![The T3 WoW window with the thread list and a conversation](https://media.forgecdn.net/attachments/2159/857/window-png.png)
 
