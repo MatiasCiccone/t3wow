@@ -193,6 +193,30 @@ end
 frame:Hide()
 tinsert(UISpecialFrames, "T3WoWFrame")
 
+-- Escape closes a popup over the window and leaves the window open. The game hides every
+-- frame in UISpecialFrames at once, and listing a frame in UIMenus doesn't help: 1.60's
+-- Escape goes on to UISpecialFrames after hiding it. So while it shows, a popup holds the
+-- window's place in that list. Only one shows at a time: each covers the screen with a
+-- click catcher. Call this after setting the popup's OnHide, on a popup that starts hidden.
+local function popupTakesEscape(popup)
+    local name = popup:GetName()
+    -- In place, as the game may be going through the list when a popup hides.
+    local function swap(from, to)
+        for i, listed in ipairs(UISpecialFrames) do
+            if listed == from then
+                UISpecialFrames[i] = to
+                return
+            end
+        end
+    end
+    local onHide = popup:GetScript("OnHide")
+    popup:SetScript("OnShow", function() swap("T3WoWFrame", name) end)
+    popup:SetScript("OnHide", function(self)
+        swap(name, "T3WoWFrame")
+        if onHide then onHide(self) end
+    end)
+end
+
 local title = frame:CreateFontString(nil, "OVERLAY")
 title:SetFontObject(Skin.fonts.title)
 title:SetPoint("LEFT", frame, "TOPLEFT", 14, -SIZE.title / 2)
@@ -270,9 +294,6 @@ do
     list:EnableMouse(true)
     list:Hide()
     Skin.Box(list, { shape = "control", fill = "card", ring = "border", ringLayer = "BORDER" })
-    -- Escape closes it, and only it, as with the game's menus (UIMenus); a client without
-    -- that table closes it with the window.
-    tinsert(type(UIMenus) == "table" and UIMenus or UISpecialFrames, "T3WoWDropdownList")
     local scroll, child = makeScroll(list, 100)
     scroll:SetPoint("TOPLEFT", PAD, -PAD)
     -- A click anywhere else closes it, as the game's menus do.
@@ -290,6 +311,7 @@ do
         catcher:Hide()
         owner = nil
     end)
+    popupTakesEscape(list)
 
     local function row(index)
         local r = rows[index]
@@ -1282,9 +1304,8 @@ do
                 typingIn = nil
                 if box and frame:IsShown() then box:SetFocus() end
             end)
-            -- Escape closes it, and only it, as with the game's menus (UIMenus); a client
-            -- without that table closes it with the window.
-            tinsert(type(UIMenus) == "table" and UIMenus or UISpecialFrames, "T3WoWPictureZoom")
+            popupTakesEscape(zoom)
+            zoom:Hide()
         end
         local room = math.min(UIParent:GetWidth() * 0.92, (UIParent:GetHeight() * 0.88) * (tonumber(im.w) or 1) / math.max(1, tonumber(im.h) or 1))
         local width, height = fit(im, room, zoom, 2)
@@ -2224,7 +2245,6 @@ do
     popover:SetPoint("BOTTOMRIGHT", permissionMenu, "TOPRIGHT", 0, 4)
     Skin.Box(popover, { shape = "panel", fill = "card", ring = "border", ringLayer = "BORDER" })
     popover:Hide()
-    tinsert(type(UIMenus) == "table" and UIMenus or UISpecialFrames, "T3WoWPermissions")
     -- A click anywhere else closes it, as with the dropdown lists.
     local catcher = CreateFrame("Button", nil, UIParent)
     catcher:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -2234,6 +2254,7 @@ do
     catcher:SetScript("OnClick", function() popover:Hide() end)
     catcher:Hide()
     popover:SetScript("OnHide", function() catcher:Hide() end)
+    popupTakesEscape(popover)
 
     local heading = popover:CreateFontString(nil, "OVERLAY")
     heading:SetFontObject(Skin.fonts.muted)

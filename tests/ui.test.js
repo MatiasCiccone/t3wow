@@ -1386,13 +1386,37 @@ local chip = pasteChips()[1]
 chip.scripts.OnClick(chip, "LeftButton")
 assert(T3WoWPictureZoom.shown, "not enlarged")
 assert(cleared == 1 and focus == nil, "the box being typed in would take the Escape")
-local function listed(list) for _, name in ipairs(list) do if name == "T3WoWPictureZoom" then return true end end end
-assert(listed(UIMenus), "Escape wouldn't close it first, as a menu")
-assert(not listed(UISpecialFrames), "Escape would close it with the window")
-T3WoWPictureZoom:Hide()
+T3WoWFrame:Show()
+CloseSpecialWindows()
+assert(not T3WoWPictureZoom.shown, "Escape didn't close it")
+assert(T3WoWFrame.shown, "Escape closed the window with it")
 assert(restored == 1 and focus == box, "the box didn't get its focus back")
+CloseSpecialWindows()
+assert(not T3WoWFrame.shown, "the next Escape didn't close the window")
 return "ok"
-`, { before: `UIMenus = {}` });
+`);
+});
+
+test("Escape over a dropdown list or the permissions popover closes only it", () => {
+  run(SELECTOR_HELPERS + `
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG })
+click("New Thread")
+T3WoWFrame:Show()
+openPermissions()
+assert(T3WoWPermissions.shown, "didn't open")
+CloseSpecialWindows()
+assert(not T3WoWPermissions.shown, "Escape didn't close the popover")
+assert(T3WoWFrame.shown, "Escape closed the window with the popover")
+local dd = T3WoWMachineMenu
+dd.scripts.OnClick(dd, "LeftButton")
+assert(T3WoWDropdownList.shown, "didn't open")
+CloseSpecialWindows()
+assert(not T3WoWDropdownList.shown, "Escape didn't close the list")
+assert(T3WoWFrame.shown, "Escape closed the window with the list")
+CloseSpecialWindows()
+assert(not T3WoWFrame.shown, "the next Escape didn't close the window")
+return "ok"
+`);
 });
 
 test("Ctrl+V asks for an image only from a companion that pastes, and a refused paste says why", () => {
