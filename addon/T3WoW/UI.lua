@@ -476,6 +476,8 @@ local function row(index)
         r.dot.proxy:SetSize(6, 6)
         r.age = r:CreateFontString(nil, "OVERLAY")
         r.age:SetFontObject(Skin.fonts.small)
+        r.pr = r:CreateFontString(nil, "OVERLAY")
+        r.pr:SetFontObject(Skin.fonts.small)
         r:SetScript("OnClick", function(self) UI.Select(self.thread) end)
         r:SetScript("OnEnter", rowTooltip)
         r:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -486,17 +488,22 @@ local function row(index)
 end
 
 -- Comfortable: title and status pill, machine · project and age under them. Compact: a
--- status dot, the title and the age on one line.
-local function layoutRow(r, compact)
+-- status dot, the title and the age on one line. Either way a linked pull request's number
+-- sits just before the age, and the text before it is what gets cut short.
+local function layoutRow(r, compact, hasPr)
     r.title:ClearAllPoints()
     r.sub:ClearAllPoints()
     r.age:ClearAllPoints()
     r.status:ClearAllPoints()
     r.dot:ClearAllPoints()
+    r.pr:ClearAllPoints()
+    r.pr:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
+    r.pr:SetShown(hasPr)
+    local beforeAge = hasPr and r.pr or r.age
     if compact then
         r.dot:SetPoint("LEFT", r, "LEFT", 9, 0)
         r.title:SetPoint("LEFT", 22, 0)
-        r.title:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
+        r.title:SetPoint("RIGHT", beforeAge, "LEFT", -6, 0)
         r.age:SetPoint("RIGHT", -8, 0)
     else
         r.status:SetPoint("TOPRIGHT", r, "TOPRIGHT", -8, -6)
@@ -504,7 +511,7 @@ local function layoutRow(r, compact)
         r.title:SetPoint("RIGHT", r.status.box.proxy, "LEFT", -6, 0)
         r.age:SetPoint("BOTTOMRIGHT", -8, 7)
         r.sub:SetPoint("BOTTOMLEFT", 10, 7)
-        r.sub:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
+        r.sub:SetPoint("RIGHT", beforeAge, "LEFT", -6, 0)
     end
     r.sub:SetShown(not compact)
     r.status:SetShown(not compact)
@@ -604,7 +611,8 @@ local function renderList()
                 rowIndex = rowIndex + 1
                 local r = row(rowIndex)
                 r.thread = t
-                layoutRow(r, compact)
+                layoutRow(r, compact, t.pr ~= nil)
+                r.pr:SetText(t.pr or "")
                 r.title:SetText(t.t ~= "" and t.t or "Untitled")
                 local e = env(t.e)
                 r.sub:SetText(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
