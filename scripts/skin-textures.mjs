@@ -90,4 +90,10 @@ strokes("shield-off.tga", 2.4, [
   [[16, 4.5], [25.5, 8], [25.5, 15.5], [23.5, 21], [16, 27.5], [8.5, 21], [6.5, 15.5], [6.5, 8], [16, 4.5]],
   [[5, 5], [27, 27]],
 ]);
+// A picture struck through: said where an image couldn't be loaded.
+strokes("image-off.tga", 2.2, [
+  [[6, 8], [26, 8], [26, 24], [6, 24], [6, 8]],
+  [[7, 23], [13, 16], [18, 21], [21, 18], [25, 22]],
+  [[5, 5], [27, 27]],
+]);
 console.log("skin textures written to addon/T3WoW/Media");

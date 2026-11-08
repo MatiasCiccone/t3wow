@@ -1279,6 +1279,38 @@ do
         return true
     end
 
+    -- Where a picture couldn't be loaded (its file was emptied, by a reinstall say): a small
+    -- card saying so, yours against the right edge.
+    function Pictures.Lost(fs, mine)
+        local PAD, ICON, GAP = 8, 16, 6
+        if not rawget(fs, "lostBox") then
+            fs.lostBox = Skin.Box(messageChild, { shape = "panel", fill = "card", ring = "border", free = true, sub = -8 })
+            fs.lostIcon = Skin.Glyph(messageChild, "image-off", ICON, "muted", "OVERLAY")
+        end
+        local icon = fs.lostIcon
+        local full = messageWidth() - 8
+        fs.bubble:Hide()
+        fs:SetFontObject(Skin.fonts.muted)
+        fs:SetWidth(full)
+        fs:SetText("Image couldn't be loaded")
+        local textWidth = math.ceil(fs:GetStringWidth() or 0) + 1
+        fs:SetWidth(textWidth)
+        local width = PAD + ICON + GAP + textWidth + PAD
+        flow.gap = flow.gap + PAD
+        place(icon, (mine and (full + 4 - width) or 4) + PAD, PAD + 18)
+        -- The game finds a new file only when it starts: one started before this version
+        -- draws no icon rather than a square. Faded, not hidden: the text hangs from it.
+        local file = not icon.GetTextureFilePath or icon:GetTextureFilePath()
+        icon:SetAlpha((file ~= nil and file ~= "") and 1 or 0)
+        fs:ClearAllPoints()
+        fs:SetPoint("LEFT", icon, "RIGHT", GAP, 0)
+        fs:Show()
+        fs.lostBox:ClearAllPoints()
+        fs.lostBox:SetPoint("TOPLEFT", icon, "TOPLEFT", -PAD, PAD)
+        fs.lostBox:SetPoint("BOTTOMRIGHT", icon, "BOTTOMLEFT", width - PAD, -PAD)
+        fs.lostBox:Show()
+    end
+
     -- A picture enlarged over the screen, up to twice its own size; a click or Escape
     -- closes it.
     local zoom, typingIn
@@ -1761,6 +1793,10 @@ function renderView()
             fs.head:Hide()
             fs.state:Hide()
         end
+        if rawget(fs, "lostBox") then
+            fs.lostBox:Hide()
+            fs.lostIcon:Hide()
+        end
     end
     Mono.Release()
     Pictures.Release()
@@ -1827,9 +1863,12 @@ function renderView()
         local fs = messageString(i)
         if item.ho then Handoff.Place(item.ho) end
         local card = type(item.d) == "table"
+        local lost = not card and item.lost == 1
         local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
         if card then
             placeCard(fs, item.d)
+        elseif lost then
+            Pictures.Lost(fs, item.r == "u")
         elseif not picture then
             placeMessage(fs, item.x, item.r == "u", item.g)
         end
@@ -1837,7 +1876,8 @@ function renderView()
         fs.hit.copyText = item.x
         -- A picture enlarges instead.
         fs.hit.picture = picture and item.im or false
-        fs.hit:Show()
+        -- A picture that couldn't be loaded has nothing to enlarge or copy.
+        fs.hit:SetShown(not lost)
     end
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may

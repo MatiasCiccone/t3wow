@@ -2109,12 +2109,15 @@ fn a_picture_whose_file_is_gone_is_forgotten_at_start() {
     for n in [1, 2] {
         link.images.insert(n, ImageSlot { key: format!("page{n}"), w: 7, h: 3, used: 1 });
     }
+    // An image you sent stays listed even so: nothing can draw it again, and its message
+    // says it couldn't be loaded.
+    link.images.insert(3, ImageSlot { key: "sent:mac:t1:m1:0".into(), w: 7, h: 3, used: 1 });
     std::fs::write(&state, serde_json::to_string(&link).unwrap()).unwrap();
     // Only slot 2's file still holds its picture (a reinstall blanked the rest).
     let written = Arc::new(Mutex::new(Written::default()));
     written.lock().unwrap().images.insert(2, b"tga".to_vec());
     let bridge = Bridge::new(FakeT3::new(), Box::new(FakeSlots(written)), Some(state), Box::new(|_| {}), Box::new(|| 0));
-    assert_eq!(bridge.link.images.keys().copied().collect::<Vec<_>>(), vec![2]);
+    assert_eq!(bridge.link.images.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2311,6 +2314,58 @@ fn a_sent_image_shows_under_its_own_message_and_not_under_older_words_like_it() 
     rig.bridge.tick();
     assert_eq!(view_items(&rig)[2]["im"]["f"], 2);
     assert!(rig.bridge.link.images_shown.contains(&2), "named to the new game process");
+}
+
+#[test]
+fn a_sent_image_whose_file_was_emptied_says_so_and_its_slot_is_never_named() {
+    let (mut rig, presses) = paste_rig(60_000_000, 4, 4, 100);
+    rig.bridge.set_painter(Some(Box::new(FakePainter::default())));
+    rig.t3.messages.lock().unwrap().insert("t1".into(), Vec::new());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    press(&rig, &presses);
+    rig.advance(200);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "mac:t1" }] }));
+    rig.bridge.tick();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "" }] }));
+    rig.bridge.tick();
+    let new = json!({ "position": 0, "messageId": "mcp:new", "type": "user_message", "text": "", "updatedAt": "1970-01-01T16:40:10Z" });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![new]);
+    rig.t3.set("completed", "1970-01-01T16:40:11Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(view_items(&rig)[0]["im"]["f"], 2);
+
+    // A reinstall empties the file while the companion runs, with the thread unchanged in
+    // T3; then a new game process.
+    rig.written.lock().unwrap().images.remove(&2);
+    rig.bridge.republish();
+    rig.bridge.on_capture(CaptureMessage::Wow(Some("456@2".into())));
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items, vec![json!({ "r": "u", "x": "|cff808080[Pasted image] (couldn't be loaded)|r", "lost": 1 })], "no empty bubble, and no slot named");
+    assert!(!rig.bridge.link.images_shown.contains(&2), "the game must never ask for the blank file");
+    // The new game's window connects, and the update reaches it.
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "im": 1, "q": [] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert!(rig.written.lock().unwrap().slots.values().any(|lua| lua.contains("lost=1")), "the update says so");
+}
+
+#[test]
+fn a_page_whose_file_was_emptied_is_drawn_again_in_another_slot() {
+    let (mut rig, painter) = picture_rig(61_000_000, "<p>chart</p>");
+    rig.bridge.tick();
+    assert_eq!(view_items(&rig)[1]["im"]["f"], 1);
+
+    // Emptied while this game process may already have asked for slot 1: it isn't used again.
+    rig.written.lock().unwrap().images.remove(&1);
+    rig.t3.set("completed", "2026-11-06T10:00:09Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(painter.calls().len(), 2);
+    assert_eq!(view_items(&rig)[1]["im"]["f"], 2);
 }
 
 #[test]
