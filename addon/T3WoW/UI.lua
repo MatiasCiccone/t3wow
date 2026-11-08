@@ -1191,7 +1191,8 @@ local scrollToEnd = false
 local function fit(stickToBottom)
     local top, bottom = messageChild:GetTop(), flow.last and flow.last:GetBottom()
     -- The space under the last piece counts: a bubble or the question's card reaches into it.
-    if top and bottom then messageChild:SetHeight(math.max(top - bottom + math.max(8, flow.gap or 0), 1)) end
+    if top and bottom then messageChild:SetHeight(math.max(top - bottom + math.max(8, flow.gap or 0), 1))
+    elseif not flow.last then messageChild:SetHeight(math.max(flow.gap or 0, 1)) end
     messageScroll:UpdateScrollChildRect()
     if stickToBottom then messageScroll:SetVerticalScroll(messageScroll:GetVerticalScrollRange()) end
 end
@@ -1475,6 +1476,7 @@ function renderView()
     if not view then
         flowStart(0)
         placeMessage(messageString(1), "|cff" .. Skin.Hex("dim") .. "Loading…|r", false)
+        fit(true)
         return
     end
     flowStart(0)

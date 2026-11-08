@@ -76,7 +76,7 @@ Link.Init()
 UI.Toggle()
 `;
 
-const run = (script) => runGame(UI_HELPERS + script, { ui: true });
+const run = (script, options) => runGame(UI_HELPERS + script, { ui: true, ...options });
 
 test("a thread stays selected by its machine's id when the machine list changes", () => {
   run(`
@@ -524,6 +524,50 @@ assert(below(agent, you), "the reply isn't below your message")
 assert(below(working, agent), "Working… isn't below the reply")
 return "ok"
 `);
+});
+
+// Scroll frames that keep their offset and child height, with a 300 px view; the
+// conversation's one is the frame the copy box hides with.
+const SCROLLING = `
+local createFrame = CreateFrame
+function CreateFrame(kind, ...)
+  local f = createFrame(kind, ...)
+  if kind == "ScrollFrame" then
+    f.offset = 0
+    function f:SetScrollChild(child)
+      self.child = child
+      function child:SetHeight(h) self.h = h end
+    end
+    function f:GetVerticalScrollRange() return math.max(0, (rawget(self.child, "h") or 0) - 300) end
+    function f:SetVerticalScroll(v) self.offset = v end
+    function f:GetVerticalScroll() return self.offset end
+    function f:HookScript(event) if event == "OnHide" then messageScroll = self end end
+  end
+  return f
+end
+`;
+
+test("a thread opens at the top of its own messages, not where the last long thread was scrolled", () => {
+  run(`
+local long = { e = 1, id = "t1", t = "Long", s = "completed", set = false, at = time(), p = "" }
+local fresh = { e = 1, id = "t2", t = "Fresh", s = "running", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { long, fresh }, view = { e = 1, id = "t1", t = "Long", s = "completed", items = { { r = "a", x = "Hi" } } } })
+UI.Select(long)
+-- As the game lays out a long conversation, read at its end.
+messageScroll.child.h = 5000
+messageScroll:SetVerticalScroll(4700)
+-- Its messages aren't in yet: Loading… shows at the top.
+UI.Select(fresh)
+assert(messageScroll.offset == 0, "loading scrolled to " .. messageScroll.offset)
+assert(messageScroll.child.h < 300, "loading left the old height " .. messageScroll.child.h)
+-- In, but nothing to draw.
+fresh.s = "completed"
+inboxWith(ENVS, { threads = { long, fresh }, view = { e = 1, id = "t2", t = "Fresh", s = "completed", items = {} } })
+messageScroll.child.h, messageScroll.offset = 5000, 4700
+UI.Refresh()
+assert(messageScroll.child.h < 300 and messageScroll.offset == 0, "empty thread kept " .. messageScroll.child.h .. "/" .. messageScroll.offset)
+return "ok"
+`, { before: SCROLLING });
 });
 
 test("a picture draws from its image slot among the messages, and a click enlarges it instead of copying", () => {
