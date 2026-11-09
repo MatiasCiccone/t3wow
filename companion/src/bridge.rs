@@ -51,8 +51,9 @@ fn working(status: &str) -> bool {
     WORKING.contains(&status)
 }
 
-/// The status a thread gets while its agent watches a pull request after its run ended:
-/// T3's sidebar files it under Working as "Waiting", though its own status says it ended.
+/// The status a thread gets while its agent watches a pull request or waits on a subagent
+/// after its run ended: T3's sidebar files it under Working as "Waiting", though its own
+/// status says it ended.
 const WATCHING: &str = "watching";
 
 /// Working, or watching a pull request: either way the thread isn't done yet.
@@ -64,11 +65,20 @@ fn active(status: &str) -> bool {
 /// without waiting on you, with a pull request not yet merged or closed. Only such threads
 /// are asked whether they watch one.
 fn may_watch(thread: &Value) -> bool {
+    run_over(thread) && thread["pullRequests"].as_array().is_some_and(|prs| prs.iter().any(pull_request_open))
+}
+
+/// Open on the sidebar, with its run ended and not waiting on you.
+fn run_over(thread: &Value) -> bool {
     let status = str_of(&thread["status"]);
-    thread["settled"] != true
-        && !working(status)
-        && !needs_you(status)
-        && thread["pullRequests"].as_array().is_some_and(|prs| prs.iter().any(pull_request_open))
+    thread["settled"] != true && !working(status) && !needs_you(status)
+}
+
+/// The threads with a subagent in a list of threads still going. Forks have a parent too,
+/// but it doesn't wait on them.
+fn waiting_parents(list: &Value) -> HashSet<String> {
+    let threads = list["threads"].as_array().into_iter().flatten();
+    threads.filter(|t| t["relationshipToParent"] == "subagent").filter_map(|t| t["parentThreadId"].as_str().map(str::to_string)).collect()
 }
 
 fn pull_request_open(pr: &Value) -> bool {
@@ -618,6 +628,8 @@ pub struct Bridge {
     watches: HashMap<String, Watch>,
     /// The thread that launched each agent-launched thread (None: unknown), read once.
     launchers: HashMap<String, Origin>,
+    /// Per machine, the threads the last read found waiting on a subagent.
+    delegating: HashMap<String, HashSet<String>>,
     /// Each working thread's current run and when it started, read once per run: T3's
     /// lists don't say.
     run_starts: HashMap<String, (String, i64)>,
@@ -1424,6 +1436,8 @@ enum Step {
     Machine(String, ThreadLists),
     Question(usize),
     QuestionKind(usize, i64),
+    /// Which of its threads wait on a subagent still going.
+    Delegates,
     Watch(usize),
     Launcher(usize),
     RunStart(usize),
@@ -1605,6 +1619,7 @@ impl Bridge {
             watches: HashMap::new(),
             listed_envs: HashSet::new(),
             launchers: HashMap::new(),
+            delegating: HashMap::new(),
             run_starts: HashMap::new(),
             commands: VecDeque::new(),
             queued: HashMap::new(),
@@ -1752,6 +1767,7 @@ impl Bridge {
         self.pending_counts.clear();
         self.watches.clear();
         self.launchers.clear();
+        self.delegating.clear();
         self.listed_envs.clear();
         self.stopping.clear();
     }
@@ -2427,6 +2443,7 @@ impl Bridge {
             Step::Machine(env, result) => self.take_lists(env, result),
             Step::Question(i) => self.check_question(i),
             Step::QuestionKind(i, read_at) => self.check_waiting_on(i, read_at),
+            Step::Delegates => self.check_delegates(),
             Step::Watch(i) => self.check_watch(i),
             Step::Launcher(i) => self.find_launcher(i),
             Step::RunStart(i) => self.read_run_start(i),
@@ -2569,6 +2586,7 @@ impl Bridge {
             Ok((mut threads, settled_total, more)) => {
                 threads.iter_mut().for_each(read_as_working_if_waiting);
                 let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
+                steps.extend(threads.iter().any(run_over).then_some(Step::Delegates));
                 steps.extend((0..threads.len()).filter(|i| may_watch(&threads[*i])).map(Step::Watch));
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
                 steps.extend((0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::RunStart));
@@ -2673,6 +2691,31 @@ impl Bridge {
             }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
             Err(T3Error::Other(message)) => self.keep_last_waiting(i, key, &message),
+        }
+        Ok(())
+    }
+
+    /// A thread whose run ended with a subagent still going is waiting on it (a delegated
+    /// review, say): it shows as "watching" until T3 wakes it. No time left in this poll, or
+    /// no answer: the last one stands.
+    fn check_delegates(&mut self) -> Result<(), T3Error> {
+        let Some(env) = self.listed_mut().map(|l| l.env.clone()) else { return Ok(()) };
+        if !self.out_of_time() {
+            let statuses = ["preparing", "queued", "starting", "running", "waiting"];
+            let args = with_args(json!({ "allProjects": true, "includeSubagents": true, "statuses": statuses, "limit": 100 }), &self.env_arg(&env));
+            match self.client.call("t3_thread_list", args) {
+                Ok(list) => {
+                    self.delegating.insert(env.clone(), waiting_parents(&list));
+                }
+                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                Err(T3Error::Other(message)) => self.log(&format!("subagents ({env}): {message}")),
+            }
+        }
+        let parents = self.delegating.get(&env).cloned().unwrap_or_default();
+        if let Some(listed) = self.listed_mut() {
+            for thread in listed.threads.iter_mut().filter(|t| run_over(t) && parents.contains(str_of(&t["threadId"]))) {
+                thread["status"] = json!(WATCHING);
+            }
         }
         Ok(())
     }
@@ -2929,6 +2972,7 @@ impl Bridge {
         self.pending_counts.retain(|key, _| linked(env_of(key)));
         self.watches.retain(|key, _| linked(env_of(key)));
         self.launchers.retain(|key, _| linked(env_of(key)));
+        self.delegating.retain(|env, _| linked(env));
         self.list_errors.retain(|env, _| linked(env));
         if self.view.as_ref().is_some_and(|v| !linked(&v.env)) {
             self.view = None;
