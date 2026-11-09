@@ -219,7 +219,7 @@ impl T3 for FakeT3 {
                 };
                 let all = activity.map(cut).or_else(|| self.messages.lock().unwrap().get(&id).cloned()).unwrap_or_else(|| {
                     vec![
-                        json!({ "position": 0, "type": "user_message", "text": "hi", "senderThreadId": self.thread(&args["threadId"])["sender"] }),
+                        json!({ "position": 0, "type": "user_message", "text": self.thread(&args["threadId"])["opening"].as_str().unwrap_or("hi"), "senderThreadId": self.thread(&args["threadId"])["sender"] }),
                         json!({ "position": 1, "type": "assistant_message", "text": "**done**" }),
                     ]
                 });
@@ -538,8 +538,10 @@ fn the_list_follows_t3s_sidebar() {
     rig.t3.threads.lock().unwrap().extend([
         json!({ "threadId": "child", "projectId": "p1", "title": "Review", "status": "completed", "parentThreadId": "t1", "updatedAt": "2026-11-06T10:00:00Z" }),
         json!({ "threadId": "launched", "projectId": "p1", "title": "Test it", "status": "completed", "createdBy": "agent", "sender": "t1", "updatedAt": "2026-11-06T10:00:00Z" }),
-        // delegate_task's threads: an agent made them, but their first message names no sender.
-        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "updatedAt": "2026-11-06T10:00:00Z" }),
+        // A task from a linked machine: its first message names no sender, and T3's sidebar leaves it out.
+        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "opening": "Act as the research sub-agent for this task.\n\nLook.", "updatedAt": "2026-11-06T10:00:00Z" }),
+        // Launched over T3's tools with no thread behind it: T3 records an agent, and lists it.
+        json!({ "threadId": "tool", "projectId": "p1", "title": "Research it", "status": "completed", "createdBy": "agent", "opening": "Research only: figure it out", "updatedAt": "2026-11-06T10:00:00Z" }),
         json!({ "threadId": "nap", "projectId": "p1", "title": "Later", "status": "completed", "snoozed": true, "updatedAt": "2026-11-06T10:00:00Z" }),
     ]);
     rig.bridge.tick();
@@ -552,11 +554,11 @@ fn the_list_follows_t3s_sidebar() {
         .map(|t| (t["id"].as_str().unwrap().to_string(), t["sn"] == true, str_of(&t["par"]).to_string(), t["ag"] == true))
         .collect();
     // Subagents stay out; a thread an agent launched comes under the thread that launched it,
-    // and says an agent made it, so the game knows it has no row of its own when no launcher is found.
+    // and a delegated task says so, so the game gives it no row of its own while it's idle.
     let row = |id: &str, sn: bool, par: &str, ag: bool| (id.to_string(), sn, par.to_string(), ag);
     assert_eq!(
         ids,
-        vec![row("t1", false, "", false), row("launched", false, "t1", true), row("delegated", false, "", true), row("nap", true, "", false)]
+        vec![row("t1", false, "", false), row("launched", false, "t1", true), row("delegated", false, "", true), row("tool", false, "", false), row("nap", true, "", false)]
     );
 
     // The launcher is read once, not on every poll.
@@ -583,8 +585,8 @@ fn a_thread_started_from_the_game_stays_yours_after_a_restart() {
     let state = dir.join("state.json");
     // T3 records what its tools launch as an agent's, whoever asked.
     let listed = [
-        json!({ "threadId": "new1", "projectId": "p1", "title": "Mine", "status": "completed", "createdBy": "agent", "updatedAt": "2026-11-06T10:00:00Z" }),
-        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "updatedAt": "2026-11-06T10:00:00Z" }),
+        json!({ "threadId": "new1", "projectId": "p1", "title": "Mine", "status": "completed", "createdBy": "agent", "opening": "Act as the research sub-agent for this task.", "updatedAt": "2026-11-06T10:00:00Z" }),
+        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "opening": "Act as the research sub-agent for this task.", "updatedAt": "2026-11-06T10:00:00Z" }),
     ];
 
     let mut rig = Rig::new(3_000_000);
