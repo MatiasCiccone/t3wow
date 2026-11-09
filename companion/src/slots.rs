@@ -33,6 +33,25 @@ fn signal_file(n: u32) -> String {
     format!("{n:04}.ttf")
 }
 
+/// Loads the slot's `Inbox.lua`. Addon managers fingerprint a folder from its toc and the
+/// files those list, but follow only self-closing `<Script/>` tags. With this open tag they
+/// never reach `Inbox.lua`, so every slot keeps one fixed fingerprint whatever it holds.
+const SLOT_XML: &str = "<Ui xmlns=\"http://www.blizzard.com/wow/ui/\">\n\t<Script file=\"Inbox.lua\"></Script>\n</Ui>\n";
+
+/// A slot's toc: the same for every slot, which is why it doesn't say the slot's number.
+fn slot_toc(interface: &str) -> String {
+    [
+        format!("## Interface: {interface}"),
+        "## Title: |cff808080T3 WoW slot|r".into(),
+        "## Notes: Carries T3 Code updates into the game. Keep enabled.".into(),
+        "## LoadOnDemand: 1".into(),
+        format!("## Dependencies: {ADDON}"),
+        "Slot.xml".into(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
 /// The addon, embedded in the companion so the exe is all anyone needs.
 pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("T3WoW.toc", include_bytes!("../../addon/T3WoW/T3WoW.toc")),
@@ -134,6 +153,8 @@ pub struct Repair {
     pub addon: Option<String>,
     /// Files that did not exist before (the game only sees them after a full restart).
     pub created: u32,
+    /// Slot tocs rewritten from an older layout (these too need a full restart).
+    pub slots_moved: u32,
 }
 
 pub struct Slots {
@@ -239,9 +260,10 @@ impl Slots {
     }
 
     /// Creates the slot addons, blank signal files and probe files. With `reset`, existing
-    /// ones are blanked too (a fresh install); without, only missing ones are created.
-    /// Returns how many files did not exist before.
-    pub fn write_support(&self, reset: bool) -> io::Result<u32> {
+    /// ones are blanked too (a fresh install); without, only missing ones are created and
+    /// slot tocs from an older layout are brought up to date.
+    /// Returns how many files did not exist before and how many slot tocs were brought up to date.
+    pub fn write_support(&self, reset: bool) -> io::Result<(u32, u32)> {
         let mut created = 0;
         let mut put = |path: PathBuf, data: &[u8]| -> io::Result<()> {
             let exists = path.exists();
@@ -281,23 +303,33 @@ impl Slots {
         put(probe.join("valid.tga"), &tiny_tga())?;
         put(probe.join("flip.tga"), b"")?;
         put(probe.join("valid2.ttf"), &self.alt_font.clone().unwrap_or_default())?;
+        let mut moved = 0;
         for n in 1..=SLOT_COUNT {
             let dir = self.addons_dir.join(slot_name(n));
             fs::create_dir_all(&dir)?;
-            let toc = [
-                format!("## Interface: {}", self.interface),
-                format!("## Title: |cff808080T3 WoW slot {n:03}|r"),
-                "## Notes: Carries T3 Code updates into the game. Keep enabled.".into(),
-                "## LoadOnDemand: 1".into(),
-                format!("## Dependencies: {ADDON}"),
-                "Inbox.lua".into(),
-                String::new(),
-            ]
-            .join("\n");
-            put(dir.join(format!("{}.toc", slot_name(n))), toc.as_bytes())?;
             put(dir.join("Inbox.lua"), b"")?;
+            // Before the toc, so a write that fails can't leave a toc listing a file that isn't there.
+            put(dir.join("Slot.xml"), SLOT_XML.as_bytes())?;
+            let toc = dir.join(format!("{}.toc", slot_name(n)));
+            put(toc.clone(), slot_toc(&self.interface).as_bytes())?;
+            if self.bring_slot_toc_up_to_date(&toc)? {
+                moved += 1;
+            }
         }
-        Ok(created)
+        Ok((created, moved))
+    }
+
+    /// Rewrites a slot's toc from an older layout, keeping the interface version it has.
+    /// True when it changed.
+    fn bring_slot_toc_up_to_date(&self, toc: &Path) -> io::Result<bool> {
+        let Ok(text) = fs::read_to_string(toc) else { return Ok(false) };
+        let interface = text.lines().find_map(|line| line.strip_prefix("## Interface:")).map_or(self.interface.as_str(), str::trim);
+        let current = slot_toc(interface);
+        if text == current {
+            return Ok(false);
+        }
+        write_whole(toc, current.as_bytes())?;
+        Ok(true)
     }
 
     pub fn install(&self) -> io::Result<()> {
@@ -341,8 +373,9 @@ impl Slots {
                 std::cmp::Ordering::Less => None,
             },
         };
-        created += self.write_support(false)?;
-        Ok(Repair { addon, created })
+        let (made, slots_moved) = self.write_support(false)?;
+        created += made;
+        Ok(Repair { addon, created, slots_moved })
     }
 
     /// Whether the addon's toc or the files the companion makes (signal, probe and image
@@ -351,7 +384,8 @@ impl Slots {
     pub fn missing_files(&self) -> bool {
         let sig = self.addon_dir.join("sig");
         let img = self.addon_dir.join("img");
-        let slot_toc = |n: u32| self.addons_dir.join(slot_name(n)).join(format!("{}.toc", slot_name(n)));
+        let toc_file = |n: u32| self.addons_dir.join(slot_name(n)).join(format!("{}.toc", slot_name(n)));
+        let xml_file = |n: u32| self.addons_dir.join(slot_name(n)).join("Slot.xml");
         [
             self.addon_dir.join(format!("{ADDON}.toc")),
             sig.join(signal_file(1)),
@@ -359,8 +393,10 @@ impl Slots {
             self.addon_dir.join("ctl").join("probe").join("valid.ttf"),
             img.join(IMAGE_SENTINEL),
             img.join(image_file(IMAGE_COUNT)),
-            slot_toc(1),
-            slot_toc(SLOT_COUNT),
+            toc_file(1),
+            toc_file(SLOT_COUNT),
+            xml_file(1),
+            xml_file(SLOT_COUNT),
         ]
         .iter()
         .any(|path| !path.exists())
@@ -480,6 +516,19 @@ impl SlotWriter for Slots {
     }
 }
 
+/// Turns an install's slots back into what companions before `Slot.xml` wrote.
+#[cfg(test)]
+pub fn make_slots_old(addons_dir: &Path, interface: &str) {
+    for n in 1..=SLOT_COUNT {
+        let dir = addons_dir.join(slot_name(n));
+        let _ = fs::remove_file(dir.join("Slot.xml"));
+        let toc = format!(
+            "## Interface: {interface}\n## Title: |cff808080T3 WoW slot {n:03}|r\n## Notes: Carries T3 Code updates into the game. Keep enabled.\n## LoadOnDemand: 1\n## Dependencies: {ADDON}\nInbox.lua\n"
+        );
+        fs::write(dir.join(format!("{}.toc", slot_name(n))), toc).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,8 +585,9 @@ mod tests {
         fs::remove_file(dir.join("T3WoW/sig/0042.ttf")).unwrap();
         let second = slots.repair().unwrap();
         assert_eq!(second.addon, None);
-        assert_eq!(second.created, 3);
+        assert_eq!(second.created, 4);
         assert!(dir.join(slot_name(7)).join("Inbox.lua").exists());
+        assert!(dir.join(slot_name(7)).join("Slot.xml").exists());
 
         // An older addon gets the shipped one, with this game's interface version.
         let toc = dir.join("T3WoW/T3WoW.toc");
@@ -547,6 +597,88 @@ mod tests {
         // The game is told the version it would load now.
         assert_eq!(slots.addon_version(), Some(shipped_version()));
         assert!(fs::read_to_string(&toc).unwrap().contains("## Interface: 16001"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn slot_file(dir: &Path, n: u32, file: &str) -> PathBuf {
+        dir.join(slot_name(n)).join(file)
+    }
+
+    fn slot_toc_file(dir: &Path, n: u32) -> PathBuf {
+        slot_file(dir, n, &format!("{}.toc", slot_name(n)))
+    }
+
+    #[test]
+    fn every_slot_looks_the_same_to_an_addon_manager_whatever_its_update_holds() {
+        let dir = temp_dir("fingerprint");
+        let mut slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        let toc = fs::read(slot_toc_file(&dir, 1)).unwrap();
+        let xml = fs::read(slot_file(&dir, 1, "Slot.xml")).unwrap();
+        let toc_text = String::from_utf8_lossy(&toc).into_owned();
+        assert!(toc_text.lines().any(|line| line == "Slot.xml"), "{toc_text}");
+        assert!(!toc_text.contains("Inbox.lua"), "a listed Inbox.lua changes the fingerprint with every update: {toc_text}");
+        assert!(toc_text.contains("## Dependencies: T3WoW"), "{toc_text}");
+        assert!(toc_text.contains("## LoadOnDemand: 1"), "{toc_text}");
+
+        // Scanners follow only self-closing <Script/> tags, so this one has to stay open.
+        let xml_text = String::from_utf8_lossy(&xml).into_owned();
+        assert!(xml_text.contains(r#"<Script file="Inbox.lua"></Script>"#), "{xml_text}");
+        assert!(!xml_text.contains("/>"), "{xml_text}");
+
+        for n in 2..=SLOT_COUNT {
+            assert_eq!(fs::read(slot_toc_file(&dir, n)).unwrap(), toc, "slot {n}'s toc");
+            assert_eq!(fs::read(slot_file(&dir, n, "Slot.xml")).unwrap(), xml, "slot {n}'s Slot.xml");
+        }
+
+        // An update rewrites Inbox.lua and nothing the scanners read.
+        slots.write_slot(9, "T3WoW_Inbox = { lid = \"new\" }").unwrap();
+        assert_eq!(fs::read(slot_toc_file(&dir, 9)).unwrap(), toc);
+        assert_eq!(fs::read(slot_file(&dir, 9, "Slot.xml")).unwrap(), xml);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_repair_moves_an_old_install_to_slot_xml_and_keeps_its_updates_and_interface() {
+        let dir = temp_dir("slot-xml-upgrade");
+        let slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        make_slots_old(&dir, "16002");
+        let inbox = slot_file(&dir, 5, "Inbox.lua");
+        fs::write(&inbox, "T3WoW_Inbox = { slot = 5 }").unwrap();
+
+        let repair = slots.repair().unwrap();
+        assert_eq!((repair.created, repair.slots_moved), (SLOT_COUNT, SLOT_COUNT), "one Slot.xml and one toc per slot");
+        for n in [1, 5, SLOT_COUNT] {
+            let toc = fs::read_to_string(slot_toc_file(&dir, n)).unwrap();
+            assert!(toc.lines().any(|line| line == "Slot.xml") && !toc.contains("Inbox.lua"), "slot {n}: {toc}");
+            assert!(toc.starts_with("## Interface: 16002\n"), "the install keeps the interface it had: {toc}");
+            assert!(slot_file(&dir, n, "Slot.xml").exists());
+        }
+        assert_eq!(fs::read_to_string(&inbox).unwrap(), "T3WoW_Inbox = { slot = 5 }", "the slot's update stays");
+
+        // Done once: the next start of the companion finds nothing to do.
+        let again = slots.repair().unwrap();
+        assert_eq!((again.addon, again.created, again.slots_moved), (None, 0, 0));
+
+        // Stopped partway last time: this slot has its Slot.xml, only its toc is old.
+        fs::write(slot_toc_file(&dir, 8), "## Interface: 16002\n## Title: slot 8\nInbox.lua\n").unwrap();
+        let finished = slots.repair().unwrap();
+        assert_eq!((finished.created, finished.slots_moved), (0, 1));
+        assert_eq!(fs::read(slot_toc_file(&dir, 8)).unwrap(), fs::read(slot_toc_file(&dir, 1)).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slot_that_lost_its_slot_xml_counts_as_missing_files() {
+        let dir = temp_dir("slot-xml-missing");
+        let slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        assert!(!slots.missing_files());
+        fs::remove_file(slot_file(&dir, SLOT_COUNT, "Slot.xml")).unwrap();
+        assert!(slots.missing_files());
+        assert_eq!(slots.repair().unwrap().created, 1);
+        assert!(!slots.missing_files());
         let _ = fs::remove_dir_all(&dir);
     }
 
