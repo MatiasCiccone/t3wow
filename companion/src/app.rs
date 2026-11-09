@@ -377,6 +377,11 @@ pub fn watch_for_updates(app: Arc<App>) {
     }
 }
 
+/// T3's provider caches, when the T3 in use is the one on this PC (no saved origin).
+fn local_provider_caches() -> Option<PathBuf> {
+    Config::load().origin.is_none().then(|| crate::config::t3_home().join("caches"))
+}
+
 fn restart_notice_file() -> PathBuf {
     config_dir().join("restart-notice.json")
 }
@@ -591,6 +596,7 @@ pub fn run(app: Arc<App>) {
         Box::new(now_ms),
     );
     bridge.set_trust(Config::load().trust());
+    bridge.set_provider_caches(local_provider_caches());
     // Another T3 than the game's updates came from last time (`login --origin` while the
     // companion was off): the game drops the previous one's threads.
     bridge.set_login(&key);
@@ -696,6 +702,7 @@ pub fn run(app: Arc<App>) {
                 (key, origin) = (found.key, found.origin);
                 client = Arc::new(McpClient::new(&origin, &token));
                 bridge.set_client(client.clone());
+                bridge.set_provider_caches(local_provider_caches());
                 if switched {
                     bridge.set_login(&key);
                     signed_out = token.is_empty();

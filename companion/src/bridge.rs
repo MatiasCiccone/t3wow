@@ -225,6 +225,38 @@ fn compact_providers(capabilities: &Value) -> Vec<Value> {
     providers
 }
 
+/// The most a provider lists in the game's picker.
+const PICKS_KEPT: usize = 300;
+
+/// What a provider's composer lists, from T3's cache of it, as the game's picker shows it:
+/// `n` the name, `d` a short description, `c` when `/name` runs it, `s` when `$name` does. A
+/// name T3 couldn't parse back out of a message is left out.
+fn compact_picks(cache: &Value) -> Vec<Value> {
+    let typable = |name: &str| !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || ":_-".contains(c));
+    let listed = |key: &str| {
+        let items = cache[key].as_array().map_or(&[][..], Vec::as_slice);
+        items.iter().filter(|item| typable(str_of(&item["name"])) && item["enabled"] != false).cloned().collect::<Vec<Value>>()
+    };
+    let (commands, skills) = (listed("slashCommands"), listed("skills"));
+    let is_in = |items: &[Value], name: &str| items.iter().any(|item| str_of(&item["name"]) == name);
+    let mut picks: Vec<Value> = Vec::new();
+    for item in commands.iter().chain(&skills).take(PICKS_KEPT) {
+        let name = str_of(&item["name"]);
+        if picks.iter().any(|pick| pick["n"] == name) {
+            continue;
+        }
+        let mut pick = json!({ "n": name, "d": plain(str_of(&item["description"]), 60) });
+        if is_in(&commands, name) {
+            pick["c"] = json!(true);
+        }
+        if is_in(&skills, name) {
+            pick["s"] = json!(true);
+        }
+        picks.push(pick);
+    }
+    picks
+}
+
 /// What the game calls the models it knows. T3 labels only some of them (GPT-6.1 Terra has a
 /// label, gpt-6.1-sol doesn't), which reads unevenly side by side.
 const MODEL_NAMES: [(&str, &str); 10] = [
@@ -472,6 +504,9 @@ pub struct Bridge {
     new_worktrees: BTreeMap<String, bool>,
     /// What each machine offers for the model and effort selectors.
     catalogs: BTreeMap<String, Catalog>,
+    /// T3's folder of provider caches, while the T3 in use is the one on this PC: MCP doesn't
+    /// list skills and commands, and only this PC's are on this disk.
+    provider_caches: Option<PathBuf>,
     settled_totals: BTreeMap<String, u64>,
     /// Per machine: which of its three lists have more threads than were listed.
     list_more: BTreeMap<String, [bool; LIST_COUNT]>,
@@ -584,6 +619,8 @@ struct ScanCache {
     upto: Option<u64>,
     pages: Vec<FoundPage>,
     cards: Vec<FoundCard>,
+    /// Where the thread's context was compacted (T3 draws a line there).
+    compactions: Vec<u64>,
 }
 
 /// A task the open thread delegated, as its activity shows it (T3 draws it as a card).
@@ -855,6 +892,8 @@ struct Catalog {
     providers: Vec<Value>,
     /// The permissions a new thread gets when none is picked.
     mode: Option<String>,
+    /// What each provider's composer lists (`{ pv, c: compact_picks }`). Only this PC's T3.
+    picks: Vec<Value>,
 }
 
 enum Step {
@@ -1032,6 +1071,7 @@ impl Bridge {
             projects: BTreeMap::new(),
             new_worktrees: BTreeMap::new(),
             catalogs: BTreeMap::new(),
+            provider_caches: None,
             settled_totals: BTreeMap::new(),
             list_more: BTreeMap::new(),
             list_limits: LIST_LIMITS,
@@ -1095,6 +1135,10 @@ impl Bridge {
     }
 
     /// Applies the tray's "Commands from the game" from the next command on.
+    pub fn set_provider_caches(&mut self, dir: Option<PathBuf>) {
+        self.provider_caches = dir;
+    }
+
     pub fn set_trust(&mut self, trust: Trust) {
         if trust != self.trust {
             self.log(&format!("Commands from the game: {}", trust.label()));
@@ -2316,13 +2360,43 @@ impl Bridge {
         match self.client.call("orchestrator_capabilities", Value::Object(self.env_arg(env))) {
             Ok(capabilities) => {
                 let mode = capabilities["runtimeMode"].as_str().map(str::to_string);
-                self.catalogs.insert(env.to_string(), Catalog { read_at, providers: compact_providers(&capabilities), mode });
+                let providers = compact_providers(&capabilities);
+                let picks = self.read_picks(env, &providers);
+                self.catalogs.insert(env.to_string(), Catalog { read_at, providers, mode, picks });
             }
             Err(error) => {
                 self.log(&format!("models ({}): {error}", if env.is_empty() { "local" } else { env }));
                 self.catalogs.entry(env.to_string()).or_default().read_at = read_at;
             }
         }
+    }
+
+    /// What this PC's providers list in their composers. A cache that can't be read just now
+    /// (T3 may be rewriting it) keeps what it last listed.
+    fn read_picks(&self, env: &str, providers: &[Value]) -> Vec<Value> {
+        let Some(dir) = self.provider_caches.as_ref().filter(|_| self.env_arg(env).is_empty()) else {
+            return Vec::new();
+        };
+        let known = self.catalogs.get(env).map_or(&[][..], |catalog| catalog.picks.as_slice());
+        let mut picks = Vec::new();
+        for provider in providers {
+            let id = str_of(&provider["id"]);
+            // It names a file, so nothing that could leave the folder.
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)) {
+                continue;
+            }
+            let cache = std::fs::read_to_string(dir.join(format!("{id}.json"))).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            match cache {
+                Some(cache) => {
+                    let listed = compact_picks(&cache);
+                    if !listed.is_empty() {
+                        picks.push(json!({ "pv": id, "c": listed }));
+                    }
+                }
+                None => picks.extend(known.iter().find(|pick| pick["pv"] == id).cloned()),
+            }
+        }
+        picks
     }
 
     /// A model as the game names it: what the machine calls it, else its id.
@@ -2728,7 +2802,7 @@ impl Bridge {
         let View { env, id, .. } = read.view.clone();
         let mut cache = match self.scan.take().filter(|c| c.env == env && c.id == id && c.from <= first) {
             Some(cache) => cache,
-            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new() },
+            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new() },
         };
         let mut args = json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 200 });
         if let Some(after) = cache.upto.or(first.checked_sub(1)) {
@@ -2754,8 +2828,10 @@ impl Bridge {
                     None => {}
                 }
             }
-            if item["type"] == "dynamic_tool" && is_page_item(str_of(&item["text"])) {
+            let compaction = item["type"] == "compaction";
+            if compaction || (item["type"] == "dynamic_tool" && is_page_item(str_of(&item["text"]))) {
                 match str_of(&item["status"]) {
+                    "completed" if compaction => cache.compactions.push(position),
                     "completed" => {
                         let item_id = str_of(&item["itemId"]).to_string();
                         if !item_id.is_empty() && !cache.pages.iter().any(|p| p.item_id == item_id) {
@@ -2763,7 +2839,7 @@ impl Bridge {
                         }
                     }
                     "failed" | "declined" | "cancelled" | "interrupted" | "error" => {}
-                    // Still being shown (unless it has been at it for ages): look again next time.
+                    // Still under way (unless it has been at it for ages): look again next time.
                     _ if now - iso_seconds(str_of(&item["updatedAt"])) * 1000 < 600_000 => {
                         waiting = true;
                         break;
@@ -2998,6 +3074,9 @@ impl Bridge {
             let first = self.view_read().and_then(|r| r.positions.first().copied()).unwrap_or(u64::MAX);
             for card in self.scan.iter().flat_map(|s| s.cards.iter()).filter(|c| c.position >= first) {
                 placed.push((card.position * 2, card.shown()));
+            }
+            for position in self.scan.iter().flat_map(|s| s.compactions.iter()).filter(|p| **p >= first) {
+                placed.push((position * 2, json!({ "r": "a", "x": "Context compacted", "rule": 1 })));
             }
         }
         let Some(read) = self.view_read() else { return };
@@ -3290,6 +3369,17 @@ impl Bridge {
         }
         if !models.is_empty() {
             out.insert("models".into(), json!(models));
+        }
+        let mut picks: Vec<Value> = Vec::new();
+        for (env, catalog) in self.catalogs.iter().filter(|(env, _)| env_index(env) > 0) {
+            for provider in &catalog.picks {
+                let mut entry = provider.clone();
+                entry["e"] = json!(env_index(env));
+                picks.push(entry);
+            }
+        }
+        if !picks.is_empty() {
+            out.insert("picks".into(), json!(picks));
         }
         out.insert("view".into(), view.unwrap_or(Value::Null));
         out.insert("notes".into(), json!(self.notes));

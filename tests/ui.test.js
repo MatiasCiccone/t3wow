@@ -42,7 +42,7 @@ function inboxWith(envs, extra)
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
   data.more = extra and extra.more
   data.att, data.pi = extra and extra.att, extra and extra.pi
-  data.sel, data.models = extra and extra.sel, extra and extra.models
+  data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -1187,6 +1187,31 @@ return table.concat({
   assert.deepEqual(four.split("\n"), ["…", "─", "…"]);
 });
 
+test("inline code stays on the line of the text around it", () => {
+  run(SHOWN + `
+function shownExactly(wanted)
+  for _, fs in ipairs(fontStrings) do
+    -- Laid out in the message: the string that measures widths holds the same words.
+    if not fs.hidden and fs.text == wanted and fs.point and fs.point[5] then return fs end
+  end
+end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+rawset(T3WoWFrame, "GetWidth", function() return 1600 end)
+-- Spaces before the code, code first, and only a space between two pieces of code.
+local g = { "1. \\1/dep\\2 then \\1a\\2 \\1b\\2 end" }
+local items = { { r = "a", x = "1. /dep then a b end", g = g } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local top = shownExactly("1.").point[5]
+for _, piece in ipairs({ "/dep", "then", "a", "b", "end" }) do
+  -- Each font is centered on the line, so a pixel or two apart; a line down is 17 or more.
+  assert(math.abs(shownExactly(piece).point[5] - top) < 5, piece .. " went to another line")
+end
+assert(shownExactly("end").point[4] > shownExactly("1.").point[4], "laid out over itself")
+return "ok"
+`);
+});
+
 test("code, inline code and tables are drawn in the monospace font, and copying still takes the text", () => {
   run(SHOWN + `
 local mono, text = ns.Skin.fonts.mono, ns.Skin.fonts.text
@@ -1883,6 +1908,19 @@ update({ { r = "a", x = "before" }, { r = "u", x = "after" } })
 assert(not showing("Context handoff"), "still drawn")
 update({ { r = "a", x = "before" }, { r = "u", x = "after", ho = "Claude Haiku > Codex Sol" } })
 assert(showing("Context handoff"), "not drawn again")
+-- A compaction is the same line, between the messages, with nothing to click or copy.
+update({ { r = "a", x = "earlier" }, { r = "a", x = "Context compacted", rule = 1 }, { r = "a", x = "later" } })
+assert(showing("Context compacted"), "no line for the compaction")
+local rule, earlier, later
+for _, fs in ipairs(fontStrings) do
+  if fs.shown and fs.text == "Context compacted" then assert(not rule, "drawn twice"); rule = fs end
+  if fs.shown and fs.text == "earlier" then earlier = fs end
+  if fs.shown and fs.text == "later" then later = fs end
+end
+assert(rule.point[2] == earlier and later.point[2] == rule, "not between its messages")
+for _, f in ipairs(frames) do
+  assert(not (f.kind == "Button" and f.shown and rawget(f, "copyText") == "Context compacted"), "the line can be clicked to copy")
+end
 return "ok"
 `);
 });
@@ -1939,6 +1977,169 @@ openPermissions()
 local segment = segments()[1]
 assert(segment.short.hidden == false and not segment.glyph.shown, "should fall back to its word")
 assert(not T3WoWPermissionMenu.icon.shown, "no square on the chip")
+return "ok"
+`);
+});
+
+// What this PC's providers list, as inbox.picks carries it.
+const PICKER_HELPERS = `
+PICKS = {
+  { e = 1, pv = "claudeAgent", c = {
+    { n = "compact", d = "Summarize the conversation", c = true },
+    { n = "vercel:deploy", d = "Deploy the project", c = true, s = true },
+    { n = "review", d = "Review the diff", c = true, s = true },
+  } },
+  { e = 1, pv = "codex", c = { { n = "imagegen", d = "Make an image", s = true } } },
+}
+ENVS = { { id = "local", name = "PC", ok = true }, { id = "mac", name = "Mac", ok = true }, { id = "off", name = "Off", ok = false } }
+THREADS = { { e = 1, id = "t1", t = "Here", s = "completed", set = false, at = time(), p = "" }, { e = 2, id = "t2", t = "There", s = "completed", set = false, at = time(), p = "" } }
+function openThread(index, pv)
+  local t = THREADS[index]
+  local view = { e = t.e, id = t.id, t = t.t, s = "completed", items = {}, cfg = { pv = pv or "claudeAgent", m = "opus" } }
+  inboxWith(ENVS, { sel = true, threads = THREADS, picks = PICKS })
+  UI.Select({ e = t.e, id = t.id })
+  inboxWith(ENVS, { sel = true, threads = THREADS, picks = PICKS, view = view })
+end
+function write(text)
+  local box = composer()
+  box.text = text
+  box.scripts.OnTextChanged(box, true)
+end
+function press(script, ...) local box = composer(); box.scripts[script](box, ...) end
+function pickerRows()
+  local out = {}
+  for _, f in ipairs(frames) do
+    if f.parent == T3WoWPicker and f.kind == "Button" and f.shown then out[#out + 1] = f end
+  end
+  return out
+end
+function listed()
+  local out = {}
+  for _, f in ipairs(pickerRows()) do out[#out + 1] = f.label:GetText() end
+  return table.concat(out, " ")
+end
+function highlighted()
+  for _, f in ipairs(pickerRows()) do
+    if f.lit.shown then return f.label:GetText() end
+  end
+end
+`;
+
+test("/ at the start lists the thread's provider, and Enter picks before it sends", () => {
+  run(PICKER_HELPERS + `
+openThread(1)
+write("/")
+assert(T3WoWPicker.shown and listed() == "/compact /review /vercel:deploy", listed())
+write("/DEP")
+assert(listed() == "/vercel:deploy", "contains what you typed, whatever its case")
+press("OnEnterPressed")
+assert(typed() == "/vercel:deploy ", typed())
+assert(not T3WoWPicker.shown and #queue() == 0, "picking isn't sending")
+typeText("/vercel:deploy to prod")
+press("OnEnterPressed")
+assert(sent().t == "send" and sent().m == "/vercel:deploy to prod", "the second Enter sends")
+-- Further in, a skill is written as T3 runs it from anywhere; a path is no query.
+write("see /")
+assert(listed() == "/compact $review $vercel:deploy", listed())
+write("see /dep")
+press("OnEnterPressed")
+assert(typed() == "see $vercel:deploy ", typed())
+write("/tmp/x")
+assert(not T3WoWPicker.shown, "a path")
+openThread(1, "codex")
+write("/")
+assert(listed() == "$imagegen", "what only runs as a skill is written as one: " .. listed())
+return "ok"
+`);
+});
+
+test("$ lists skills anywhere in a message, and the keys move through the list", () => {
+  run(PICKER_HELPERS + `
+openThread(1)
+write("please use $")
+assert(listed() == "$review $vercel:deploy", listed())
+assert(highlighted() == "$review", highlighted())
+press("OnKeyDown", "DOWN")
+assert(highlighted() == "$vercel:deploy", highlighted())
+press("OnKeyDown", "UP")
+assert(highlighted() == "$review", highlighted())
+press("OnKeyDown", "UP")
+assert(highlighted() == "$vercel:deploy", "wraps around")
+press("OnKeyDown", "DOWN")
+assert(highlighted() == "$review", highlighted())
+press("OnKeyDown", "DOWN")
+assert(highlighted() == "$vercel:deploy", highlighted())
+press("OnEnterPressed")
+assert(typed() == "please use $vercel:deploy ", typed())
+write("$")
+press("OnKeyDown", "LEFT")
+assert(not T3WoWPicker.shown, "the cursor left the end")
+-- Tab completes with the highlighted one, and does nothing with no list open.
+write("please use $")
+press("OnKeyDown", "DOWN")
+press("OnTabPressed")
+assert(typed() == "please use $vercel:deploy ", typed())
+assert(not T3WoWPicker.shown and #queue() == 0, "completing isn't sending")
+press("OnTabPressed")
+assert(typed() == "please use $vercel:deploy ", typed())
+-- Escape closes the list and keeps the text; nothing that matches closes it too.
+write("$re")
+press("OnEscapePressed")
+assert(not T3WoWPicker.shown and typed() == "$re", "Escape")
+write("$nothing")
+assert(not T3WoWPicker.shown, "no match")
+-- Another thread leaves it behind.
+write("$")
+assert(T3WoWPicker.shown)
+UI.Select({ e = 2, id = "t2" })
+assert(not T3WoWPicker.shown, "still open on another thread")
+return "ok"
+`);
+});
+
+test("@ names another machine in the box and sends T3's reference to it", () => {
+  run(PICKER_HELPERS + `
+openThread(1)
+write("deploy from @")
+assert(listed() == "@Mac", "the others that answer: " .. listed())
+press("OnEnterPressed")
+assert(typed() == "deploy from @Mac ", typed())
+typeText("deploy from @Mac and mail@Mac")
+press("OnEnterPressed")
+assert(sent().m == "deploy from [Mac](t3-context://v1/environment/environment_mac) and mail@Mac", sent().m)
+-- A thread on a linked machine: its agent may not reach the others.
+openThread(2)
+write("@")
+assert(not T3WoWPicker.shown, "offered from a linked machine")
+typeText("ask @Mac")
+press("OnEnterPressed")
+assert(sent().m == "ask @Mac", sent().m)
+return "ok"
+`);
+});
+
+test("without the companion's list only machines are offered, and refilling the box opens nothing", () => {
+  run(PICKER_HELPERS + `
+inboxWith(ENVS, { threads = THREADS })
+UI.Select({ e = 1, id = "t1" })
+write("/")
+assert(not T3WoWPicker.shown, "no list to show")
+press("OnEnterPressed")
+assert(sent().m == "/", "Enter still sends")
+write("@")
+assert(listed() == "@Mac", listed())
+local box = composer()
+box.text = "$"
+box.scripts.OnTextChanged(box, false)
+assert(not T3WoWPicker.shown, "opened for text the game put back")
+-- A click on a row takes the focus for a moment, and the list stays for it.
+write("@")
+rawset(box, "HasFocus", function() return true end)
+box.scripts.OnEditFocusLost(box)
+assert(T3WoWPicker.shown, "closed under the click")
+rawset(box, "HasFocus", function() return false end)
+box.scripts.OnEditFocusLost(box)
+assert(not T3WoWPicker.shown, "stayed open after you left the box")
 return "ok"
 `);
 });
