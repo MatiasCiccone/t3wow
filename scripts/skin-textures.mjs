@@ -93,12 +93,15 @@ strokes("shield-off.tga", 2.4, [
 // Snooze: a clock face (a 48-sided polygon) and its hands.
 const face = Array.from({ length: 49 }, (_, i) => [16 + 10.5 * Math.cos((i * Math.PI) / 24), 16 + 10.5 * Math.sin((i * Math.PI) / 24)]);
 strokes("clock.tga", 2.4, [face, [[16, 9.5], [16, 16], [20.5, 19]]]);
+// A thread back from a snooze: T3's alarm clock, with its bells and feet.
+const alarmFace = Array.from({ length: 49 }, (_, i) => [16 + 10.5 * Math.cos((i * Math.PI) / 24), 17.5 + 10.5 * Math.sin((i * Math.PI) / 24)]);
+strokes("alarm.tga", 2.4, [alarmFace, [[16, 12], [16, 17.5], [19, 20]], [[6.7, 4], [2.7, 8]], [[25.3, 4], [29.3, 8]], [[8.5, 25], [5.3, 28]], [[23.5, 25], [26.7, 28]]]);
 // A thread waiting on your input: a question mark in a circle.
 const hook = Array.from({ length: 25 }, (_, i) => [16 + 3.6 * Math.cos(Math.PI + (i * Math.PI * 1.3) / 24), 12.6 + 3.6 * Math.sin(Math.PI + (i * Math.PI * 1.3) / 24)]);
 strokes("question.tga", 2.4, [face, [...hook, [16, 18]], [[16, 22], [16, 22.4]]]);
 // The window's three actions. Refresh: a circle nearly closed, with its arrowhead at the top right.
-const arc = Array.from({ length: 41 }, (_, i) => { const a = ((30 + (i * 300) / 40) * Math.PI) / 180; return [16 + 9.5 * Math.cos(a), 16 + 9.5 * Math.sin(a)]; });
-strokes("refresh.tga", 2.4, [arc, [[25.5, 5], [25.5, 11.5], [19, 11.5]]]);
+const refreshArc = Array.from({ length: 41 }, (_, i) => { const a = ((30 + (i * 300) / 40) * Math.PI) / 180; return [16 + 9.5 * Math.cos(a), 16 + 9.5 * Math.sin(a)]; });
+strokes("refresh.tga", 2.4, [refreshArc, [[25.5, 5], [25.5, 11.5], [19, 11.5]]]);
 // New Thread: a page, open at the top right, with a pen over it.
 strokes("compose.tga", 2.4, [
   [[15, 6.5], [8.5, 6.5], [6, 9], [6, 23.5], [8.5, 26], [23, 26], [25.5, 23.5], [25.5, 17]],

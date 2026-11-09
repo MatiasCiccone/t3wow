@@ -627,7 +627,8 @@ end
 local function layoutRow(r, compact, hasPr, hasMore)
     r.isCompact, r.hasPr, r.hasMore = compact, hasPr, hasMore
     local hasProject = not compact and (r.thread.p or "") ~= ""
-    local showStatus = not compact and (not UI.AtRest[r.thread.s] or UI.RowStatus(r.thread) == UI.DONE)
+    local rowStatus = UI.RowStatus(r.thread)
+    local showStatus = not compact and (not UI.AtRest[r.thread.s] or rowStatus == UI.DONE or rowStatus == UI.WOKE)
     r.project:ClearAllPoints()
     r.title:ClearAllPoints()
     r.sub:ClearAllPoints()
@@ -887,8 +888,20 @@ function UI.Unread()
     return T3WoWDB.unread
 end
 
+-- A snoozed thread that came back and you haven't opened since: T3's Woke. T3's tools don't
+-- say when a thread woke or what you've read, so this is what the game saw snoozed and then
+-- awake: a thread it never saw snoozed can't say Woke, and opening one in T3 doesn't clear it.
+UI.WOKE = { "Woke", "fbbf24", "alarm" }
+function UI.Woke()
+    T3WoWDB = T3WoWDB or {}
+    T3WoWDB.woke = T3WoWDB.woke or {}
+    return T3WoWDB.woke
+end
+
 function UI.RowStatus(t)
-    if t.s == "completed" and not t.set and UI.Unread()[UI.Waits.Key(envIdOf(t.e), t.id)] then return UI.DONE end
+    local key = UI.Waits.Key(envIdOf(t.e), t.id)
+    if UI.AtRest[t.s] and UI.Woke()[key] then return UI.WOKE end
+    if t.s == "completed" and not t.set and UI.Unread()[key] then return UI.DONE end
     return STATUS[t.s] or { t.s or "?", "a0a0a0" }
 end
 
@@ -923,6 +936,40 @@ function UI.TrackUnread(data)
         if not now[key] then unread[key] = nil end
     end
     T3WoWDB.lastStatus = now
+end
+
+-- Which threads just woke. The companion reads each machine's lists in turn, so for a moment
+-- a thread can be in two of them (still snoozed wins) or in none: T3WoWDB.snoozed holds it
+-- until a list says it's awake, and across a logout, as it may wake meanwhile.
+function UI.TrackWoke(data)
+    local threads = data.threads or {}
+    if #threads == 0 then return end
+    T3WoWDB = T3WoWDB or {}
+    T3WoWDB.snoozed = T3WoWDB.snoozed or {}
+    local snoozed, woke, listed, asleep = T3WoWDB.snoozed, UI.Woke(), {}, {}
+    local function envIdFor(t) return data.envs and data.envs[t.e] and data.envs[t.e].id end
+    for _, t in ipairs(threads) do
+        local id = envIdFor(t)
+        if id then
+            local key = UI.Waits.Key(id, t.id)
+            listed[key] = true
+            asleep[key] = asleep[key] or t.sn
+        end
+    end
+    for _, t in ipairs(threads) do
+        local id = envIdFor(t)
+        local key = id and UI.Waits.Key(id, t.id)
+        if key and asleep[key] then
+            snoozed[key], woke[key] = true, nil
+        elseif key then
+            if snoozed[key] and not UI.Waits.Reading(id, t.id) then woke[key] = true end
+            snoozed[key] = nil
+            if t.set then woke[key] = nil end
+        end
+    end
+    for key in pairs(woke) do
+        if not listed[key] then woke[key] = nil end
+    end
 end
 
 -- Show more, at the end of a group with more threads than the companion listed: the next
@@ -1020,7 +1067,10 @@ local function renderList()
                 rowIndex = rowIndex + 1
                 local r = row(rowIndex, parent)
                 r.thread = t
-                if selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e) then UI.Unread()[UI.Waits.Key(selected.env, t.id)] = nil end
+                if selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e) then
+                    local key = UI.Waits.Key(selected.env, t.id)
+                    UI.Unread()[key], UI.Woke()[key] = nil, nil
+                end
                 UI.RowActions.Refresh(r)
                 layoutRow(r, compact, PullRequests.FillRow(r, t))
                 r.title:SetText(t.t ~= "" and t.t or "Untitled")
@@ -4357,6 +4407,7 @@ function UI.OnInbox(data)
     announce(data)
     inbox = data
     UI.TrackUnread(data)
+    UI.TrackWoke(data)
     UI.Waits.CatchUp(data)
     if not restartSaid and restartNote() then
         restartSaid = true
@@ -4383,7 +4434,7 @@ function UI.ForgetLogin()
     announced = false
     UI.Waits.caughtUp = {}
     T3WoWDB.seenWaiting = nil
-    T3WoWDB.unread, T3WoWDB.lastStatus = nil, nil
+    T3WoWDB.unread, T3WoWDB.lastStatus, T3WoWDB.snoozed, T3WoWDB.woke = nil, nil, nil, nil
     while #toasts > 0 do removeToast(toasts[#toasts]) end
     UI.Refresh()
 end
