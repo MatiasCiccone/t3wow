@@ -2144,8 +2144,9 @@ function renderView()
         fs.hit.copyText = item.x
         -- A picture enlarges instead.
         fs.hit.picture = picture and item.im or false
-        -- A picture that couldn't be loaded has nothing to enlarge or copy.
-        fs.hit:SetShown(not lost and not rule)
+        -- A picture that couldn't be loaded has nothing to enlarge or copy; a delegated
+        -- task's card isn't a message to copy.
+        fs.hit:SetShown(not lost and not rule and not card)
     end
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may

@@ -1247,10 +1247,8 @@ assert(state.text:find(tostring(time()), 1, true), "no time it ended: " .. state
 assert(below(head, shownString("review it")), "not below the message before it")
 assert(below(body, head), "the result isn't under the title")
 assert(below(shownString("Back after"), body), "the next message isn't below the card")
--- Clicking it copies the text.
-local hit
-for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "copyText") == card.x then hit = f end end
-assert(hit, "the card can't be clicked to copy")
+-- It has nothing to click: it doesn't open in the copy box.
+for _, f in ipairs(frames) do assert(not (f.kind == "Button" and f.shown and rawget(f, "copyText") == card.x), "the card can be clicked to copy") end
 -- Still running: no result yet, and the next message hangs from the title.
 card.d = { t = "Sol review (round 1)", s = "running", b = "" }
 inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
@@ -1262,6 +1260,9 @@ items = { { r = "u", x = "review it" }, { r = "a", x = "Plain again" }, { r = "a
 inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
 assert(not shownString("Sol review") and not shownString("cffffd100Working"), "the card stayed")
 assert(shownString("Plain again").fontObject == ns.Skin.fonts.text, "a message after a card is muted")
+local copyable = false
+for _, f in ipairs(frames) do copyable = copyable or (f.kind == "Button" and f.shown and rawget(f, "copyText") == "Plain again") end
+assert(copyable, "a message after a card can't be clicked to copy")
 return "ok"
 `);
 });
