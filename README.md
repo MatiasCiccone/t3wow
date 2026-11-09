@@ -6,9 +6,9 @@ T3 Code inside World of Warcraft: Forever. You bring your harnesses to T3 Code; 
 
 An in-game window lists your T3 threads from every machine your T3 Code reaches (this PC and its linked environments), shows a thread's conversation, and lets you message it, answer an agent's questions, start a new thread, stop a run, and settle or unsettle a thread. When a thread finishes, fails or needs you, a notification slides in.
 
-<p align="center"><img src="assets/screenshots/theme-t3.png" alt="The T3 WoW window in the T3 theme: a thread whose agent asks two questions, with option chips and Submit answer, beside Settings and three notifications" width="720"></p>
+<p align="center"><img src="assets/screenshots/theme-t3.png" alt="The T3 WoW window in the T3 theme: a thread whose agent asks a question, with its options and Submit answer, beside Settings and three notifications" width="720"></p>
 
-The Flat and Classic themes and the compact thread list are in [`assets/screenshots`](assets/screenshots). These images are rendered from the themes' colors, fonts and sizes, not captured in the game.
+The Flat and Classic themes and the compact thread list are in [`assets/screenshots`](assets/screenshots). These images are drawn from the addon's own `Theme.lua` and `UI.lua` by `npm run screenshots`, with made-up threads, not captured in the game.
 
 ## What you need
 
@@ -162,11 +162,12 @@ Needs Node.js 20+ (for the addon's tests and the release scripts) and Rust 1.90 
 npm ci
 npm test            # the addon's Lua (in fengari), release signing, and the companion (cargo test)
 npm run build:exe   # dist/t3wow.exe, Windows only
+npm run screenshots # redraws assets/screenshots from the addon's code (needs Chrome)
 ```
 
 - `addon/T3WoW`: the addon (Lua). `tests/` runs it in a Lua VM: the link and the window against a simulated game, and the contract with the companion. It also checks the release signing scripts against the signed release the companion's tests verify.
 - `companion/`: the companion (Rust): screen capture (`capture.rs`), the T3 client and sign-in (`t3.rs`), settings and saved sign-ins (`config.rs`), the bridge (`bridge.rs`), pictures for the game (`render.rs`: pages drawn with headless Edge, TGA files), the addon files (`slots.rs`, with the addon embedded), updates (`updater.rs`), the tray (`tray.rs`, with its notifications and status from `app.rs`) and the tray's address box (`dialog.rs`, a plain Win32 dialog). `companion/tests/fixtures` holds the frames, inbox files and a signed release both sides are tested against.
-- `scripts/`: the exe build, the release key scripts, the release signing wizard, and `skin-textures.mjs`, which draws the addon's theme textures (`addon/T3WoW/Media/*.tga`; run it after changing a shape).
+- `scripts/`: the exe build, the release key scripts, the release signing wizard, and `skin-textures.mjs`, which draws the addon's theme textures (`addon/T3WoW/Media/*.tga`; run it after changing a shape). `scripts/screenshots/` runs the real addon against a pretend game with layout and draws `assets/screenshots`; run it before a release, and edit `scene.lua` for what the shots show. None of it ships.
 - `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400).
 
 `cargo test -- --ignored` in `companion/` also runs the test that draws with the real Edge (Windows with Edge or Chrome only).
