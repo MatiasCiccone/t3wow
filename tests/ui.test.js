@@ -2970,6 +2970,89 @@ return "ok"
 `);
 });
 
+test("a thread back from a snooze says Woke until it's opened, as in T3", () => {
+  run(`
+local envs = { { id = "local", name = "PC", ok = true } }
+local function make(id, extra)
+  local t = { e = 1, id = id, t = "Thread " .. id, s = "completed", set = false, at = time(), p = "web" }
+  for k, v in pairs(extra or {}) do t[k] = v end
+  return t
+end
+local function rowOf(id)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "thread") and f.thread.id == id and f.shown then return f end
+  end
+end
+local thread = make("t1", { sn = true })
+inboxWith(envs, { threads = { thread } })
+assert(not UI.Woke()["local:t1"], "Woke while still snoozed")
+
+thread.sn = nil
+inboxWith(envs, { threads = { thread } })
+local row = rowOf("t1")
+assert(row.status.label == "Woke" and row.status.hexColor == "fbbf24" and row.status.iconName == "alarm", row.status.label)
+assert(row.status.box.shown and row.age.hidden, "Woke isn't in the status's place")
+
+-- A run says what it's doing; Woke comes back after it, ahead of Done.
+thread.s = "running"
+inboxWith(envs, { threads = { thread } })
+assert(rowOf("t1").status.label == "Working", rowOf("t1").status.label)
+thread.s = "completed"
+inboxWith(envs, { threads = { thread } })
+assert(rowOf("t1").status.label == "Woke", rowOf("t1").status.label)
+
+UI.Select(thread)
+row = rowOf("t1")
+assert(row.status.box.shown == false and not row.age.hidden, "still Woke once opened")
+
+-- A thread never seen snoozed isn't news.
+local other = make("t2")
+inboxWith(envs, { threads = { other } })
+assert(rowOf("t2").status.box.shown == false, "Woke on a thread that never slept")
+
+-- The lists are read in turn, so a thread can be in two for a moment: snoozed wins.
+local awake, asleep = make("t3"), make("t3", { sn = true })
+inboxWith(envs, { threads = { asleep } })
+inboxWith(envs, { threads = { awake, asleep } })
+assert(not UI.Woke()["local:t3"], "woke on a stale list")
+-- And it can be in neither for a moment: it's remembered until the Open list has it.
+inboxWith(envs, { threads = { other } })
+inboxWith(envs, { threads = { other, awake } })
+assert(UI.Woke()["local:t3"], "forgotten between lists")
+
+-- What was snoozed when the game closed is still known, however it woke meanwhile.
+local night = make("t4", { sn = true })
+inboxWith(envs, { threads = { night } })
+assert(T3WoWDB.snoozed["local:t4"], "not saved")
+
+-- Settling or snoozing it again ends the Woke.
+local settled = make("t5", { sn = true })
+inboxWith(envs, { threads = { settled } })
+settled.sn = nil
+inboxWith(envs, { threads = { settled } })
+assert(UI.Woke()["local:t5"], "didn't wake")
+settled.set = true
+inboxWith(envs, { threads = { settled } })
+assert(not UI.Woke()["local:t5"], "Woke on a settled thread")
+local again = make("t6", { sn = true })
+inboxWith(envs, { threads = { again } })
+again.sn = nil
+inboxWith(envs, { threads = { again } })
+again.sn = true
+inboxWith(envs, { threads = { again } })
+assert(not UI.Woke()["local:t6"], "Woke on a snoozed thread")
+
+-- Waking while you're reading it isn't news.
+local reading = make("t7", { sn = true })
+inboxWith(envs, { threads = { reading } })
+reading.sn = nil
+UI.Select(reading)
+inboxWith(envs, { threads = { reading }, view = { e = 1, id = "t7", t = "Thread", s = "completed", items = {} } })
+assert(not UI.Woke()["local:t7"], "Woke on the thread being read")
+return "ok"
+`);
+});
+
 test("the header leaves the status to the list", () => {
   run(`
 local thread = { e = 1, id = "t1", t = "Thread", s = "failed", set = false, at = time(), p = "" }
