@@ -119,4 +119,23 @@ strokes("image-off.tga", 2.2, [
   [[7, 23], [13, 16], [18, 21], [21, 18], [25, 22]],
   [[5, 5], [27, 27]],
 ]);
+// A speech bubble, its tail at the bottom left: a question you were asked.
+const bubble = Array.from({ length: 45 }, (_, i) => [16 + 11 * Math.cos(((150 + (330 * i) / 44) * Math.PI) / 180), 15 + 11 * Math.sin(((150 + (330 * i) / 44) * Math.PI) / 180)]);
+strokes("message.tga", 2.4, [[...bubble, [6.5, 27], bubble[0]]]);
+// What a row of an agent's work did: tools, commands, thinking.
+const along = 0.7071;
+const head = [[1, 1], [-1, 1], [-1, -1], [1, -1], [1, 1]].map(([a, b]) => [19.5 + along * (8 * a + 3.5 * b), 11.5 + along * (8 * a - 3.5 * b)]);
+strokes("hammer.tga", 2.4, [head, [[6, 26], [17, 14]]]);
+strokes("terminal.tga", 2.6, [[[6.5, 9.5], [13, 16], [6.5, 22.5]], [[16, 23.5], [26, 23.5]]]);
+const arc = (cx, cy, r, from, to) => Array.from({ length: 13 }, (_, i) => {
+  const a = ((from + ((to - from) * i) / 12) * Math.PI) / 180;
+  return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+});
+const lobes = [[16, 5.5], ...arc(12, 9.5, 4.8, 300, 150), ...arc(8.8, 16, 4.8, 235, 125), ...arc(12, 22.5, 4.8, 210, 60), [16, 27]];
+strokes("brain.tga", 2.2, [lobes, lobes.map(([x, y]) => [32 - x, y]), [[16, 5.5], [16, 27]]]);
+// Reading files, and searching the web.
+const lid = (side) => Array.from({ length: 25 }, (_, i) => [3.5 + i * (25 / 24), 16 + side * 9.5 * Math.sin((i * Math.PI) / 24)]);
+strokes("eye.tga", 2.3, [lid(-1), lid(1), arc(16, 16, 3.8, 0, 360)]);
+const meridian = Array.from({ length: 49 }, (_, i) => [16 + 5.5 * Math.cos((i * Math.PI) / 24), 16 + 11.5 * Math.sin((i * Math.PI) / 24)]);
+strokes("globe.tga", 2.2, [arc(16, 16, 11.5, 0, 360), meridian, [[4.5, 16], [27.5, 16]]]);
 console.log("skin textures written to addon/T3WoW/Media");

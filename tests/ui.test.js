@@ -1296,8 +1296,191 @@ return tostring(Link.Images()) .. " " .. drawn[#drawn]`,
   const on = frameWith("");
   assert.ok(on.startsWith("true ") && on.includes('"im":1'), on);
   assert.ok(on.includes('"dc":1'), "the companion isn't told the game draws delegated tasks as cards");
+  assert.ok(on.includes('"wk":1'), "the companion isn't told the game draws what an agent did as rows");
   const off = frameWith(`missingTextures[ROOT .. "img\\\\here.tga"] = true`);
   assert.ok(off.startsWith("false ") && !off.includes('"im"'), off);
+});
+
+test("what the agent did shows as a collapsed row whose contents are fetched once, on the first click", () => {
+  const out = run(SHOWN + `
+local sent = {}
+Link.Send = function(command) if command.t == "detail" then sent[#sent + 1] = command end end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local row = { r = "a", x = "Read 1 file and ran 1 command", w = { p = 3, l = 5 } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "before" }, row, { r = "a", x = "after" } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+assert(shownString("Read 1 file and ran 1 command"), "no row")
+assert(not shownString("Loading"), "open before any click")
+local hit
+for _, f in ipairs(frames) do if type(f.work) == "table" and f.shown then hit = f end end
+assert(hit and hit.work.l == 5, "the row can't be clicked")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(sent[1] and sent[1].t == "detail" and sent[1].id == "t1" and sent[1].p == 3 and sent[1].l == 5, "not fetched on click")
+assert(shownString("Loading"), "says nothing while it is fetched")
+-- It arrives, and is drawn dimmed.
+local details = { { l = 5, b = { "Read a.lua", { c = "the file" } } } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = view.items, det = details } })
+assert(shownString("Read a.lua").text:find("^|cff"), "not dimmed")
+assert(shownString("the file"), "no code box")
+assert(not shownString("Loading"), "still loading")
+-- Closing and opening it again costs nothing, and an update without it keeps it.
+hit.scripts.OnClick(hit, "LeftButton")
+assert(not shownString("the file"), "didn't collapse")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(shownString("the file"), "didn't open again")
+assert(#sent == 1, "fetched twice")
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(shownString("the file"), "lost on the next update")
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("a group of rows sits as far from the message above it as from the one below", () => {
+  const out = run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "before" }, { r = "a", x = "First row", w = { p = 1, l = 1 } }, { r = "a", x = "Second row", w = { p = 2, l = 2 } }, { r = "a", x = "after" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local function gapAbove(region) return -region.point[5] end
+local first, second = shownString("First row").point[2], shownString("Second row").point[2]
+assert(gapAbove(first) == 14, "above the group: " .. tostring(gapAbove(first)))
+assert(gapAbove(second) == 10, "between rows: " .. tostring(gapAbove(second)))
+assert(gapAbove(shownString("after")) == 14, "below the group: " .. tostring(gapAbove(shownString("after"))))
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("a finished turn folds under its Worked for row until that is clicked", () => {
+  const out = run(SHOWN + `
+local sent = {}
+Link.Send = function(command) if command.t == "detail" then sent[#sent + 1] = command end end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = {
+  { r = "u", x = "go" },
+  { r = "a", x = "Worked for 2m 47s", w = { l = "f2", fold = 1 } },
+  { r = "a", x = "working on it", f = "f2" },
+  { r = "a", x = "all done" },
+}
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+assert(shownString("Worked for 2m 47s"), "no fold row")
+assert(shownString("all done"), "the last message is hidden")
+assert(not shownString("working on it"), "not folded")
+local hit
+for _, f in ipairs(frames) do if type(f.work) == "table" and f.work.fold and f.shown then hit = f end end
+assert(hit, "the row can't be clicked")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(shownString("working on it"), "didn't open")
+assert(#sent == 0, "opening a fold fetched something")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(not shownString("working on it"), "didn't close")
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("a question row has its bubble, your answer in the strong font and the time", () => {
+  const out = run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "Merge it now?", w = { p = 3, l = 4, q = { a = "not yet", at = 1234 } } } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local question, answer, clock = shownString("Merge it now"), shownString("not yet"), shownString("1234")
+assert(question and answer and clock, "a piece is missing")
+assert(answer.fontObject == ns.Skin.fonts.strong, "the answer isn't in the strong font")
+assert(question.point[2].texturePath:find("message"), "no bubble: " .. tostring(question.point[2].texturePath))
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("each row's icon says what it was, and a game started before the icons draws none", () => {
+  const out = run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = {
+  { r = "a", x = "Thought about it", w = { p = 1, l = 1, k = "b" } },
+  { r = "a", x = "Ran 2 commands", w = { p = 2, l = 3, k = "c" } },
+  { r = "a", x = "Used 1 tool", w = { p = 4, l = 4, k = "t" } },
+}
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local function icon(text) return shownString(text).point[2] end
+assert(icon("Thought about it").texturePath:find("brain"), "no brain")
+assert(icon("Ran 2 commands").texturePath:find("terminal"), "no terminal")
+assert(icon("Used 1 tool").texturePath:find("hammer"), "no hammer")
+for k, name in pairs({ r = "eye", e = "pencil", s = "search", w = "globe" }) do
+  local shown = { { r = "a", x = "A row of " .. k, w = { p = 1, l = 1, k = k } } }
+  inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = shown } })
+  assert(icon("A row of " .. k).texturePath:find(name), "no " .. name)
+end
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("a question still waiting is a row saying so, with nothing to open", () => {
+  const out = run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "Input requested", w = { p = 3, l = 4, k = "q", still = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = items } })
+UI.Select(thread)
+local row = shownString("Input requested")
+assert(row and row.point[2].texturePath:find("message"), "no bubble")
+for _, f in ipairs(frames) do
+  assert(not (type(f.work) == "table" and f.work.still and f.shown), "it can be clicked")
+end
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("the turn still going says for how long at its top, instead of Working at the end", () => {
+  const out = run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }
+local items = { { r = "u", x = "go" }, { r = "a", x = "Working…", w = { l = "live", live = time() - 65, still = 1 } }, { r = "a", x = "on it" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "running", items = items } })
+UI.Select(thread)
+local row = shownString("Working for 1m 5s")
+assert(row, "no row saying for how long")
+assert(not shownString("Working…"), "Working… as well")
+for _, f in ipairs(frames) do
+  assert(not (type(f.work) == "table" and f.work.live and f.shown), "it can be clicked")
+end
+-- The clock moves on its own, with nothing new from the companion.
+UI.Work.liveSince = time() - 5
+UI.Work.Tick()
+assert(row.text == "Working for 5s", row.text)
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
+test("a row that couldn't be read is fetched again the next time it opens", () => {
+  const out = run(SHOWN + `
+local sent = {}
+Link.Send = function(command) if command.t == "detail" then sent[#sent + 1] = command end end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "A row", w = { p = 1, l = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local hit
+for _, f in ipairs(frames) do if type(f.work) == "table" and f.shown then hit = f end end
+hit.scripts.OnClick(hit, "LeftButton")
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items, det = { { l = 1, bad = 1, b = { "Couldn't read this" } } } } })
+assert(shownString("Couldn't read this"), "the failure isn't shown")
+hit.scripts.OnClick(hit, "LeftButton")
+hit.scripts.OnClick(hit, "LeftButton")
+assert(#sent == 2, "not tried again")
+-- The old failure can still arrive first: the answer after it counts.
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items, det = { { l = 1, bad = 1, b = { "Still failing" } } } } })
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items, det = { { l = 1, b = { "It worked" } } } } })
+assert(shownString("It worked"), "the answer after a stale failure was ignored")
+return "ok"
+`);
+  assert.equal(out, "ok");
 });
 
 test("clicking a message opens it highlighted in a read-only copy box, without game text codes", () => {
