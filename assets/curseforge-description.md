@@ -8,28 +8,42 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow-releases/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
 
+## Made for T3 Code 0.17.0
+
+**T3 WoW is developed and tested against the stable release of T3 Code, version 0.17.0.** On any other version, including pre-release builds, parts of it may not work.
+
 ## Highlights
 
+- **T3's layout, in the game.** The thread list, message box, questions and status pills follow T3's own client.
 - **Paste a screenshot to your agent.** Copy an image, press Ctrl+V in the message box, and it goes with your next message. Click it to see it bigger, before or after you send it.
 - **Switch models without leaving the game.** Pick the model and effort right in the message box, and move a thread to another provider mid-conversation.
 - **Launch agents between pulls.** Start a thread on any linked machine, with its project, model, effort, permissions and a worktree of its own.
+- **Commands, skills and machines as you type.** Start a word with / or $ or @ and pick from the list.
 - **Never miss a finished run.** A notification slides in with T3 Code's own sound when a thread finishes, fails or needs you. Click it to open that thread.
-- **See what your agents made.** Charts and mockups they show appear as pictures right in the conversation.
-- **Keep an eye on your pull requests.** Each thread shows its linked PR, colored by whether it's open, merged or closed. Click one in an open thread to open it in your browser.
+- **See what your agents did and made.** Their work between messages shows as collapsed rows, and the charts and mockups they show appear as pictures right in the conversation.
+- **Keep an eye on your pull requests.** Each thread shows its linked PR, colored by whether it's open, merged or closed. Click one to open it in your browser.
 
 ## What it does
 
-**Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar: Open, Working, Snoozed and Settled. Each title shows the machine and project under it. Threads an agent started appear indented under the thread that started them, as in T3. **Search**, over the list, narrows it as you type to threads whose title, project or machine matches; Enter opens the first one. Each row shows the thread's linked pull request, green when open, purple when merged and red when closed. An open thread's header shows the branch its checkout is on and lists its pull requests; click one to open it in your browser.
+**Your threads, as in T3.** The window lists your T3 Code threads from this PC and from any machines linked to it, grouped like T3's sidebar. Open runs down from the top, and Working, Snoozed and Settled sit at the bottom and grow upward as you open them. Each row shows the project, the title and the machine. Threads an agent started appear indented under the thread that started them. **Search**, over the list, narrows it as you type to threads whose title, project or machine matches; Enter opens the first one. The mouse's side buttons go back and forward through the threads you've opened.
 
-**Read and reply.** Pick a thread to read its conversation. Type in the box and press Enter to message it (Shift+Enter for a new line). The box keeps the keyboard so you can type the next message; Escape gives it back to the game. If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. To send an image, copy it (a screenshot, an image from a browser) and press Ctrl+V in the box: it shows small above the box, where a click enlarges it, and goes with your next message, in a thread or a new one. Once sent, it shows small under your message, and a click enlarges it there too. Images attached in T3 itself don't show in the game. **Stop** interrupts a run, and **Settle** / **Unsettle** moves a thread between Open and Settled. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
+**What a row tells you.** The top right shows the thread's status while it has one: Working with how long it has run, Waiting, Input, Approval, Failed, Woke when it came back from a snooze, or Done when it finished and you haven't opened it in the game. Otherwise it shows the thread's age. Across from the machine is its pull request, green when open, purple when merged and red when closed; click it to open it in your browser, or hover +2 and the like to pick from several. Hover a row for **Settle** (**Unsettle** on a settled thread) and **Snooze**, which asks for 1 hour, 4 hours, 1 day or 1 week. On a snoozed thread the clock wakes it. A thread that needs you offers only **Settle**, and a settled one only **Unsettle**.
 
-**Pick the model.** Inside the message box sit the model, its effort and the permissions, as in T3. In an open thread, picking a model or an effort changes it right away, on any provider the machine runs, and a move to another provider shows as a line in the conversation. A thread keeps the permissions it started with; to change them, use T3.
+**Read and reply.** Pick a thread to read its conversation. Its header shows the branch its checkout is on and lists its pull requests. Type in the box and press Enter to message it (Shift+Enter for a new line). The box keeps the keyboard so you can type the next message; Escape gives it back to the game. If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. During a run, the box's button is **Stop**, and it becomes **Send** as soon as you type or paste something.
 
-**Start threads.** **New Thread** asks for the machine, the project, and whether the thread runs in a new worktree or the current checkout, then starts a thread with your message as its task and opens it. You can pick its model, effort and permissions too; whatever you leave alone stays T3's default.
+**See the work.** What an agent did between its messages (thinking, tool calls, questions you answered) shows as dimmed rows, collapsed as in T3; click one to open it. A finished turn folds under **Worked for**, leaving its last message in view. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
+
+**Paste images.** Copy an image (a screenshot, an image from a browser) and press Ctrl+V in the box: it shows small above the box, where a click enlarges it, and goes with your next message, in a thread or a new one. Once sent, it shows small under your message, and a click enlarges it there too. Images attached in T3 itself don't show in the game.
+
+**Pick the model.** Inside the message box sit the model and its effort, as in T3. In an open thread, picking either changes it right away, on any provider the machine runs, and a move to another provider shows as a line in the conversation. A thread keeps the permissions it started with; to change them, use T3.
+
+**Type less.** Start a word with / for the provider's commands and skills, $ for its skills, or @ for your other machines. The arrow keys move through the list, and Tab or Enter picks. Commands and skills are listed for the T3 running on this PC. **Scripts**, at the top right of a thread whose project has saved scripts in T3, lists them; picking one asks the thread's agent to run it.
+
+**Start threads.** The pencil beside Search opens **New Thread** in the middle of the window, as in T3: pick the project, write your message, and choose the machine under the box. A project's thread also asks whether it runs in a new worktree or the current checkout. You can pick its model, effort and permissions too; whatever you leave alone stays T3's default.
 
 **Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Submit answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
 
-**Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it.
+**Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it. After a reload or a login, a thread still waiting on you gets a notification again, without the sound, unless its notification already ran its time or was clicked.
 
 **Approvals.** You can approve a command or an edit only in T3. By design, T3 doesn't take approvals from anywhere else. A thread waiting for one shows **Approve in T3**, and its **Open in T3** button opens T3 on that thread. **Stop** cancels the run from the game.
 
@@ -45,7 +59,7 @@ The window comes in three themes with the same layout. Only the colors, fonts an
 
 ## Settings
 
-Right-click the minimap button, type /t3 settings, or press **Settings** in the window.
+Right-click the minimap button, type /t3 settings, or press the gear at the bottom left of the window.
 
 - **Theme** picks T3, Flat or Classic, and **Compact thread list** fits each thread on one line. Both apply at once.
 - Turn the line in chat, the sound and the on-screen notification on or off.
@@ -63,7 +77,7 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 ## What you need
 
 - Windows, with WoW: Forever in windowed or borderless windowed mode (exclusive fullscreen blocks screen capture).
-- T3 Code desktop running on the same PC, or on another machine this PC can reach over the network (run t3wow.exe login --origin http://<host>:<port> once to point the companion at it). Threads on other machines also appear when you link those machines to T3.
+- T3 Code desktop 0.17.0, the stable release, running on the same PC or on another machine this PC can reach over the network (run t3wow.exe login --origin http://<host>:<port> once to point the companion at it). Threads on other machines also appear when you link those machines to T3.
 - The T3 WoW companion, t3wow.exe, from https://github.com/MatiasCiccone/t3wow-releases.
 
 ## Setting up
@@ -81,7 +95,7 @@ Any addon you install can draw the same strip of squares T3 WoW draws, and the c
 
 - **Full** (the default): everything the window offers.
 - **No new threads**: everything but starting threads.
-- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Stop, Settle or Snooze).
+- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Scripts, Stop, Settle, Snooze or Wake).
 
 It applies at once. The window greys out what the setting blocks and says why. Install addons you trust, or pick a stricter setting.
 
@@ -107,5 +121,6 @@ Each UI session has 200 updates, and the companion only spends one when somethin
 - If you see "Waiting for the companion…", check that T3 WoW is running in the tray, that the game is windowed, and that nothing covers the top-left corner. **Open log** in the tray menu shows what the companion sees.
 - If you see "Slot addons blocked", enable the T3 WoW slot addons in the AddOns list. If a game patch changed the interface version, choose Match WoW's interface version in the companion's tray menu, then restart WoW.
 - If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu.
+- If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.17.0.
 
 T3 WoW is MIT licensed.
