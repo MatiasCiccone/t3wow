@@ -1,6 +1,6 @@
 {
   "name": "t3wow",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "license": "MIT",
   "private": true,
   "description": "T3 Code inside World of Warcraft: Forever.",
@@ -11,7 +11,8 @@
   "scripts": {
     "test": "node --test tests/*.test.js && cargo test --manifest-path companion/Cargo.toml",
     "test:addon": "node --test tests/*.test.js",
-    "build:exe": "node scripts/build-exe.mjs"
+    "build:exe": "node scripts/build-exe.mjs",
+    "screenshots": "node scripts/screenshots/render.mjs"
   },
   "devDependencies": {
     "fengari": "^0.1.5"
