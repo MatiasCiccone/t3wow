@@ -551,6 +551,76 @@ function Pill:SetShown(shown)
 end
 function Pill:Width() return self.box.proxy:GetWidth() or 0 end
 
+-- ---------------------------------------------------------------- tooltips
+-- The addon's tooltip, used like the game's: SetOwner, AddLine, Show, Hide. The first line
+-- is the headline, the rest are quieter, and long lines wrap. Like the game's, it hides with
+-- its owner. It stays at its default frame level, under the strip Link.lua draws in this strata.
+local TIP_WIDTH, TIP_PAD, TIP_LINE_GAP = 280, 8, 3
+local TIP_ANCHORS = {
+    ANCHOR_RIGHT = { "BOTTOMLEFT", "TOPRIGHT", 0, 4 },
+    ANCHOR_LEFT = { "BOTTOMRIGHT", "TOPLEFT", 0, 4 },
+    ANCHOR_TOP = { "BOTTOM", "TOP", 0, 4 },
+    ANCHOR_BOTTOM = { "TOP", "BOTTOM", 0, -4 },
+}
+
+local tip = CreateFrame("Frame", "T3WoWTooltip", UIParent)
+tip:SetFrameStrata("TOOLTIP")
+tip:SetClampedToScreen(true)
+Skin.Box(tip, { shape = "panel", fill = "card", ring = "border", ringLayer = "BORDER" })
+tip:SetScript("OnUpdate", function(self)
+    if not self.owner:IsVisible() then self:Hide() end
+end)
+tip:Hide()
+
+local tipLines, tipCount = {}, 0
+
+local Tooltip = {}
+Skin.Tooltip = Tooltip
+
+function Tooltip:SetOwner(owner, anchor)
+    for i = 1, tipCount do tipLines[i]:Hide() end
+    tipCount = 0
+    local a = TIP_ANCHORS[anchor]
+    tip.owner = owner
+    tip:ClearAllPoints()
+    tip:SetPoint(a[1], owner, a[2], a[3], a[4])
+end
+
+function Tooltip:AddLine(text)
+    tipCount = tipCount + 1
+    local line = tipLines[tipCount]
+    if not line then
+        line = tip:CreateFontString(nil, "OVERLAY")
+        line:SetFontObject(tipCount == 1 and Skin.fonts.text or Skin.fonts.muted)
+        line:SetJustifyH("LEFT")
+        line:SetNonSpaceWrap(true)
+        tipLines[tipCount] = line
+    end
+    line:SetWidth(TIP_WIDTH)
+    line:SetText(text)
+    line:Show()
+end
+
+-- Sizes the box to its lines, as narrow as the longest one allows.
+function Tooltip:Show()
+    local width, height = 0, TIP_PAD
+    for i = 1, tipCount do
+        width = math.max(width, math.ceil((tipLines[i]:GetStringWidth() or 0) + 1))
+    end
+    width = math.min(TIP_WIDTH, width)
+    for i = 1, tipCount do
+        local line = tipLines[i]
+        line:SetWidth(width)
+        line:ClearAllPoints()
+        line:SetPoint("TOPLEFT", tip, "TOPLEFT", TIP_PAD, -height)
+        height = height + (line:GetStringHeight() or 0) + (i < tipCount and TIP_LINE_GAP or 0)
+    end
+    tip:SetSize(width + 2 * TIP_PAD, height + TIP_PAD)
+    tip:Show()
+end
+
+function Tooltip:Hide() tip:Hide() end
+
 -- ---------------------------------------------------------------- applying a theme
 
 local listeners = {}

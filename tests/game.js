@@ -90,6 +90,7 @@ local function frame(kind, name)
   end
   function f:SetShown(shown) if shown then self:Show() else self:Hide() end end
   function f:IsShown() return self.shown end
+  function f:IsVisible() return self.shown end
   function f:SetText(text) self.text = text or "" end
   function f:GetText() return self.text end
   function f:Insert(text) self.text = self.text .. text end
@@ -138,7 +139,6 @@ function CloseSpecialWindows()
 end
 tinsert = table.insert
 unpack = unpack or table.unpack
-GameTooltip = frame()
 ChatFontNormal = {}
 C_Timer = { After = function(_, fn) fn() end }
 function IsShiftKeyDown() return false end

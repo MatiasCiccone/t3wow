@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { runGame } from "./game.js";
+import { read, runGame } from "./game.js";
 
 // A JSON value as a Lua literal (control characters as decimal escapes).
 const luaValue = (v) =>
@@ -1711,6 +1711,33 @@ inboxWith(ENVS, { pi = true, threads = { THREAD }, att = att })
 ctrlV()
 assert(#queue() == 0)
 assert(showing("A message takes 8 images at most"))
+return "ok"
+`);
+});
+
+test("tooltips are the addon's own, and hide with what they describe", () => {
+  assert.doesNotMatch(read("UI.lua") + read("Theme.lua"), /GameTooltip/);
+  run(`
+local grip
+for _, f in ipairs(frames) do
+  if rawget(f, "glyph") and f.scripts.OnMouseDown then grip = f end
+end
+grip.scripts.OnEnter(grip)
+assert(T3WoWTooltip.shown, "not shown")
+assert(showing("^Drag to resize$") and showing("^Right%-click to reset the size$"), "its lines are missing")
+grip.scripts.OnLeave(grip)
+assert(not T3WoWTooltip.shown, "still up after the mouse left")
+-- A shorter tooltip leaves nothing behind of a longer one.
+local tooltip = ns.Skin.Tooltip
+grip.scripts.OnEnter(grip)
+tooltip:SetOwner(grip, "ANCHOR_TOP")
+tooltip:AddLine("Only this")
+tooltip:Show()
+assert(showing("^Only this$"), "the new line is missing")
+assert(not showing("Right%-click to reset the size"), "a line of the last tooltip stayed")
+grip:Hide()
+tick(0.25)
+assert(not T3WoWTooltip.shown, "outlived its owner")
 return "ok"
 `);
 });

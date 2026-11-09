@@ -30,12 +30,24 @@ local function fillTooltip(tooltip)
         for _, t in ipairs(inbox.threads) do
             if not t.set and WORKING[t.s] then working = working + 1 end
         end
-        tooltip:AddLine(working == 1 and "1 thread working" or (working .. " threads working"), 1, 1, 1)
+        tooltip:AddLine(working == 1 and "1 thread working" or (working .. " threads working"))
     else
-        tooltip:AddLine("Waiting for the companion", 0.6, 0.6, 0.6)
+        tooltip:AddLine("Waiting for the companion")
     end
-    tooltip:AddLine("Click to open, right-click for settings", 0.6, 0.6, 0.6)
+    tooltip:AddLine("Click to open, right-click for settings")
 end
+
+-- The game's tooltip stands in when Theme.lua didn't load (see the top of UI.lua).
+local function currentTooltip() return ns.Skin and ns.Skin.Tooltip or GameTooltip end
+
+local function showTooltip(owner)
+    local tooltip = currentTooltip()
+    tooltip:SetOwner(owner, "ANCHOR_LEFT")
+    fillTooltip(tooltip)
+    tooltip:Show()
+end
+
+local function hideTooltip() currentTooltip():Hide() end
 
 local function ownButton(settings)
     local button = CreateFrame("Button", "T3WoWMinimapButton", Minimap)
@@ -74,12 +86,8 @@ local function ownButton(settings)
     button:SetScript("OnDragStart", function(self) self:SetScript("OnUpdate", follow) end)
     button:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
     button:SetScript("OnClick", onClick)
-    button:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-        fillTooltip(GameTooltip)
-        GameTooltip:Show()
-    end)
-    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    button:SetScript("OnEnter", showTooltip)
+    button:SetScript("OnLeave", hideTooltip)
     place()
     button:SetShown(not settings.hide)
     return button
@@ -99,7 +107,9 @@ function minimap.Init()
             label = LDB_NAME,
             icon = ICON,
             OnClick = onClick,
-            OnTooltipShow = fillTooltip,
+            -- Not OnTooltipShow: LibDBIcon would fill the game's tooltip with that.
+            OnEnter = showTooltip,
+            OnLeave = hideTooltip,
         })
         if not DBIcon:IsRegistered(LDB_NAME) then DBIcon:Register(LDB_NAME, launcher, settings) end
         minimap.Show = function(shown)

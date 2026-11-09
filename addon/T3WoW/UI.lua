@@ -66,12 +66,12 @@ function PullRequests.NewLink(parent, owner)
     end)
     link:SetScript("OnEnter", function(self)
         local state = PullRequests.STATE[self.pr.s]
-        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        GameTooltip:AddLine(state and (self.pr.n .. " · " .. state[1]) or self.pr.n, 1, 1, 1)
-        if self.pr.u then GameTooltip:AddLine("Click to open in your browser", 0.7, 0.7, 0.7) end
-        GameTooltip:Show()
+        Skin.Tooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        Skin.Tooltip:AddLine(state and (self.pr.n .. " · " .. state[1]) or self.pr.n)
+        if self.pr.u then Skin.Tooltip:AddLine("Click to open in your browser") end
+        Skin.Tooltip:Show()
     end)
-    link:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    link:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
     return link
 end
 
@@ -299,11 +299,11 @@ do
     hit:SetScript("OnDragStart", function() frame:StartMoving() end)
     hit:SetScript("OnDragStop", function() frame:GetScript("OnDragStop")(frame) end)
     hit:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        GameTooltip:AddLine("Click to Reload UI")
-        GameTooltip:Show()
+        Skin.Tooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        Skin.Tooltip:AddLine("Click to Reload UI")
+        Skin.Tooltip:Show()
     end)
-    hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    hit:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
     hit:Hide()
 end
 
@@ -499,11 +499,11 @@ local function rowTooltip(self)
     local t = self.thread
     if not t or not compactList() then return end
     local e = env(t.e)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:AddLine(t.t ~= "" and t.t or "Untitled", 1, 1, 1)
-    GameTooltip:AddLine(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""), 0.7, 0.7, 0.7)
-    GameTooltip:AddLine(statusText(t.s))
-    GameTooltip:Show()
+    Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
+    Skin.Tooltip:AddLine(t.t ~= "" and t.t or "Untitled")
+    Skin.Tooltip:AddLine(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
+    Skin.Tooltip:AddLine(statusText(t.s))
+    Skin.Tooltip:Show()
 end
 
 local function row(index)
@@ -530,7 +530,7 @@ local function row(index)
         r.prMore:SetScript("OnEnter", function(self) PullRequests.ShowAll(self, r.thread) end)
         r:SetScript("OnClick", function(self) UI.Select(self.thread) end)
         r:SetScript("OnEnter", rowTooltip)
-        r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        r:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
         Skin.Hover(r)
         rows[index] = r
     end
@@ -962,11 +962,11 @@ local function messageString(index)
             openCopy(self.copyText)
         end)
         hit:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
-            GameTooltip:Show()
+            Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
+            Skin.Tooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
+            Skin.Tooltip:Show()
         end)
-        hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        hit:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
         hit:HookScript("OnEnter", function() if not fs.bubble.shown then fs.hover:Show() end end)
         hit:HookScript("OnLeave", function() fs.hover:Hide() end)
         hit:HookScript("OnHide", function() fs.hover:Hide() end)
@@ -1827,12 +1827,12 @@ local function askButton(index)
         end)
         b:HookScript("OnEnter", function(self)
             if self.desc and self.desc ~= "" and self.desc ~= self.label then
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText(self.desc, 1, 1, 1, 1, true)
-                GameTooltip:Show()
+                Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
+                Skin.Tooltip:AddLine(self.desc)
+                Skin.Tooltip:Show()
             end
         end)
-        b:HookScript("OnLeave", function() GameTooltip:Hide() end)
+        b:HookScript("OnLeave", function() Skin.Tooltip:Hide() end)
         askButtons[index] = b
     end
     return b
@@ -2242,11 +2242,11 @@ do
     local pasteChips = {}
 
     local function chipTooltip(self)
-        GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:SetText(format("Pasted image, %d x %d", tonumber(self.image.w) or 0, tonumber(self.image.h) or 0))
-        if type(self.image.bf) == "number" then GameTooltip:AddLine("Click to enlarge") end
-        GameTooltip:AddLine("It goes with your next message. × takes it back.", 1, 1, 1, true)
-        GameTooltip:Show()
+        Skin.Tooltip:SetOwner(self, "ANCHOR_TOP")
+        Skin.Tooltip:AddLine(format("Pasted image, %d x %d", tonumber(self.image.w) or 0, tonumber(self.image.h) or 0))
+        if type(self.image.bf) == "number" then Skin.Tooltip:AddLine("Click to enlarge") end
+        Skin.Tooltip:AddLine("It goes with your next message. × takes it back.")
+        Skin.Tooltip:Show()
     end
 
     -- Enlarges the large picture the companion keeps of it (bf, bw, bh: its image slot and
@@ -2275,7 +2275,7 @@ do
         chip.remove:SetSize(18, 18)
         chip.remove:SetPoint("TOPRIGHT", 4, 4)
         chip:SetScript("OnEnter", chipTooltip)
-        chip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        chip:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
         chip:SetScript("OnClick", chipClick)
         pasteChips[index] = chip
         return chip
@@ -3786,14 +3786,14 @@ grip:SetScript("OnMouseUp", Sizing.Stop)
 grip:SetScript("OnHide", Sizing.Stop)
 grip:SetScript("OnEnter", function(self)
     Skin.SetGlyphColor(self.glyph, "text")
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:AddLine("Drag to resize")
-    GameTooltip:AddLine("Right-click to reset the size", 0.7, 0.7, 0.7)
-    GameTooltip:Show()
+    Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
+    Skin.Tooltip:AddLine("Drag to resize")
+    Skin.Tooltip:AddLine("Right-click to reset the size")
+    Skin.Tooltip:Show()
 end)
 grip:SetScript("OnLeave", function(self)
     Skin.SetGlyphColor(self.glyph, "dim")
-    GameTooltip:Hide()
+    Skin.Tooltip:Hide()
 end)
 grip:RegisterForClicks("RightButtonUp")
 grip:SetScript("OnClick", function()
