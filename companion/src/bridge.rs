@@ -665,6 +665,31 @@ const LOGIN_FREE: [&str; 4] = ["hello", "ui", "probe", "refresh"];
 /// Why such a command was refused, for the game window.
 const OTHER_LOGIN: &str = "not sent: T3 WoW has switched to another T3, and this was meant for the previous one";
 
+/// Limits on a command that comes in parts; keep in step with addon/T3WoW/Codec.lua. The
+/// JSON limit also caps what a bad frame can make the companion inflate.
+const MAX_PARTS: u64 = 16;
+const MAX_LONG_JSON: usize = 64_000;
+/// Stands in for a long command whose parts joined into nothing readable.
+const GARBLED: &str = "garbled";
+const GARBLED_REASON: &str = "T3 WoW couldn't read that long message: send it again";
+
+/// The parts seen so far of the long command the game is drawing. The game sends one at a
+/// time, so this is all that's kept, whatever another addon draws on the strip.
+struct LongCommand {
+    from: (String, String, u64),
+    zlib: bool,
+    parts: Vec<Option<Vec<u8>>>,
+}
+
+/// The command in a long command's joined bytes.
+fn read_long_command(body: &[u8], zlib: bool, s: u64) -> Value {
+    let inflated = if zlib { miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(body, MAX_LONG_JSON).ok() } else { None };
+    let text = if zlib { inflated.as_deref() } else { (body.len() <= MAX_LONG_JSON).then_some(body) };
+    text.and_then(|text| serde_json::from_slice::<Value>(text).ok())
+        .filter(|command| command["s"].as_u64() == Some(s))
+        .unwrap_or_else(|| json!({ "s": s, "t": GARBLED }))
+}
+
 /// A new stamp for the game's updates (8 hex digits, random).
 fn new_login_stamp() -> String {
     let mut bytes = [0u8; 4];
@@ -900,6 +925,7 @@ pub struct Bridge {
     started_ms: i64,
     /// When the frame that brought the command being run was read (epoch ms).
     command_seen_at: i64,
+    long_command: Option<LongCommand>,
 }
 
 /// The pages an agent showed (html_render) in the open thread, found by reading its
@@ -1962,6 +1988,7 @@ impl Bridge {
             pasted_count: 0,
             started_ms,
             command_seen_at: 0,
+            long_command: None,
         }
     }
 
@@ -2182,8 +2209,10 @@ impl Bridge {
                 }
             }
             CaptureMessage::Strip(cells, at) => {
-                if let Some(payload) = decode_cells(&cells).and_then(|frame| serde_json::from_str::<Value>(&frame.payload).ok()) {
-                    self.on_frame(&payload, at);
+                if let Some(frame) = decode_cells(&cells) {
+                    if let Ok(header) = serde_json::from_str::<Value>(&frame.payload) {
+                        self.on_frame(&header, frame.part, at);
+                    }
                 }
             }
         }
@@ -2205,8 +2234,30 @@ impl Bridge {
         }
     }
 
-    /// A frame from the game's strip, read at `at` (epoch ms).
-    pub fn on_frame(&mut self, frame: &Value, at: i64) {
+    /// Keeps one part of a long command (`pt` says which). When that was the last one
+    /// missing, returns the whole command.
+    fn take_part(&mut self, k: &str, u: &str, pt: &Value, part: Vec<u8>, seen: u64) -> Option<Value> {
+        let (s, index, count) = (pt["s"].as_u64()?, pt["i"].as_u64()?, pt["n"].as_u64()?);
+        if s <= seen || count > MAX_PARTS || index == 0 || index > count {
+            return None;
+        }
+        let (from, zlib) = ((k.to_string(), u.to_string(), s), pt["z"] == 1);
+        if self.long_command.as_ref().is_none_or(|long| long.from != from || long.zlib != zlib || long.parts.len() as u64 != count) {
+            self.long_command = Some(LongCommand { from, zlib, parts: vec![None; count as usize] });
+        }
+        let long = self.long_command.as_mut()?;
+        long.parts[index as usize - 1] = Some(part);
+        if long.parts.iter().any(Option::is_none) {
+            return None;
+        }
+        let long = self.long_command.take()?;
+        let body: Vec<u8> = long.parts.into_iter().flatten().flatten().collect();
+        Some(read_long_command(&body, zlib, s))
+    }
+
+    /// A frame from the game's strip, read at `at` (epoch ms), with the raw bytes of a part
+    /// of a long command if it has one.
+    pub fn on_frame(&mut self, frame: &Value, part: Option<Vec<u8>>, at: i64) {
         let (Some(k), Some(u)) = (frame["k"].as_str(), frame["u"].as_str()) else { return };
         // An addon that can show pictures says so in every frame.
         let images_ok = frame["im"] == 1;
@@ -2249,7 +2300,7 @@ impl Bridge {
             // The game's command numbers live in its saved variables, which a crash rolls
             // back: start counting from what this session sends. A command run twice this
             // way reaches T3 with the same clientRequestId, which T3 ignores.
-            if let Some(lowest) = frame["q"].as_array().into_iter().flatten().filter_map(|c| c["s"].as_u64()).min() {
+            if let Some(lowest) = frame["q"].as_array().into_iter().flatten().filter_map(|c| c["s"].as_u64()).chain(frame["pt"]["s"].as_u64()).min() {
                 self.link.acked.insert(k.to_string(), lowest.saturating_sub(1));
             }
             self.queued.remove(k);
@@ -2286,7 +2337,8 @@ impl Bridge {
             self.link.polling = Some(polling);
         }
         let seen = self.link.acked.get(k).copied().unwrap_or(0).max(self.queued.get(k).copied().unwrap_or(0));
-        for command in frame["q"].as_array().into_iter().flatten() {
+        let long = part.and_then(|part| self.take_part(k, u, &frame["pt"], part, seen));
+        for command in frame["q"].as_array().into_iter().flatten().chain(long.iter()) {
             let s = command["s"].as_u64().unwrap_or(0);
             if s <= seen {
                 continue;
@@ -2319,6 +2371,10 @@ impl Bridge {
         let id = str_of(&command["id"]).to_string();
         let message = str_of(&command["m"]).to_string();
         let kind = str_of(&command["t"]).to_string();
+        if kind == GARBLED {
+            self.log("A long message from the game couldn't be read");
+            return Some(json!({ "s": command["s"], "ok": false, "x": GARBLED_REASON }));
+        }
         // The command's number plus a hash of it: the same command sent again (after a
         // /reload) is ignored by T3, while a new one that reuses a number after a crash isn't.
         let request_id = format!("t3wow:{client_key}:{}:{:08x}", command["s"], hash_of(&command) as u32);
@@ -4705,6 +4761,8 @@ impl Bridge {
         // The T3 sign-in this is from: the game drops what it had from another one.
         out.insert("lid".into(), json!(self.link.login));
         out.insert("ack".into(), json!(client_key.as_ref().and_then(|k| self.link.acked.get(k)).copied().unwrap_or(0)));
+        // This companion reads long commands in parts: the addon only draws them if it says so.
+        out.insert("lm".into(), json!(1));
         let envs: Vec<Value> = self
             .envs
             .iter()

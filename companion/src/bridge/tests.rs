@@ -4607,4 +4607,189 @@ fn a_new_ui_session_gets_every_part() {
     assert_eq!(parts_in(&rig, 4), (true, true, String::new()), "{}", rig.slot(4));
 }
 
+// ---- long commands in parts ----
+
+/// A frame carrying part `index` of `count` of long command `s`.
+fn part_frame(index: usize, count: usize, s: u64, zlib: bool, session: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut pt = json!({ "i": index, "n": count, "s": s });
+    if zlib {
+        pt["z"] = json!(1);
+    }
+    let header = json!({ "k": "c1", "u": session, "n": 0, "l": 1, "p": 1, "pt": pt });
+    crate::codec::encode_part_frame(index as u16, &header.to_string(), bytes)
+}
+
+fn send_parts(rig: &mut Rig, cells: Vec<u8>) {
+    let at = *rig.clock.lock().unwrap();
+    rig.bridge.on_capture(CaptureMessage::Strip(cells, at));
+}
+
+/// `command` as the JSON the addon cuts up, in parts of `size` bytes.
+fn cut(command: &Value, size: usize) -> Vec<Vec<u8>> {
+    command.to_string().into_bytes().chunks(size).map(<[u8]>::to_vec).collect()
+}
+
+#[test]
+fn long_commands_drawn_by_the_addon_arrive_whole_and_once() {
+    let fixture: Value = serde_json::from_str(include_str!("../../tests/fixtures/parts.json")).unwrap();
+    for long in fixture["long"].as_array().unwrap() {
+        let mut rig = Rig::new(40_000_000);
+        // Round and round, as the game draws them until the ack, and starting anywhere.
+        for _ in 0..3 {
+            for frame in long["frames"].as_array().unwrap().iter().rev() {
+                let cells = frame["cells"].as_str().unwrap().bytes().map(|b| b - b'0').collect();
+                send_parts(&mut rig, cells);
+            }
+        }
+        rig.bridge.tick();
+        let sends = rig.t3.calls_to("t3_thread_send");
+        assert_eq!(sends.len(), 1, "{}", long["name"]);
+        assert_eq!(sends[0]["message"], long["command"]["m"], "{}", long["name"]);
+        // One update answers the whole message, the same as for a short one.
+        let s = long["command"]["s"].as_u64().unwrap();
+        assert_eq!(rig.bridge.link.acked["c1"], s);
+        let mut short = Rig::new(40_000_000);
+        short.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "p": 1, "q": [{ "s": s, "t": "send", "id": "t1", "m": "hi" }] }));
+        short.bridge.tick();
+        assert_eq!(rig.written.lock().unwrap().slots.len(), short.written.lock().unwrap().slots.len());
+        assert_eq!(rig.raised(), short.raised());
+    }
+}
+
+#[test]
+fn a_cut_through_a_letter_is_joined_before_it_is_read() {
+    let mut rig = Rig::new(41_000_000);
+    let message = "€".repeat(3000);
+    let command = json!({ "s": 1, "t": "send", "id": "t1", "m": message });
+    let parts = cut(&command, 2591);
+    assert!(std::str::from_utf8(&parts[0]).is_err(), "the cut should land inside a letter");
+    let count = parts.len();
+    for (i, part) in parts.iter().enumerate() {
+        send_parts(&mut rig, part_frame(i + 1, count, 1, false, "ui1", part));
+    }
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send")[0]["message"], json!(message));
+}
+
+#[test]
+fn parts_read_after_a_companion_restart_still_make_the_message() {
+    let mut rig = Rig::new(42_000_000);
+    let command = json!({ "s": 1, "t": "send", "id": "t1", "m": "x".repeat(6000) });
+    let parts = cut(&command, 2591);
+    let count = parts.len();
+    send_parts(&mut rig, part_frame(1, count, 1, false, "ui1", &parts[0]));
+    // A restarted companion has only what it saved, and that has no parts in it.
+    rig.bridge.long_command = None;
+    rig.bridge.queued.clear();
+    for (i, part) in parts.iter().enumerate() {
+        send_parts(&mut rig, part_frame(i + 1, count, 1, false, "ui1", part));
+    }
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+}
+
+#[test]
+fn a_reload_mid_send_starts_over_and_t3_can_tell_it_is_the_same_message() {
+    let mut rig = Rig::new(43_000_000);
+    let command = json!({ "s": 5, "t": "send", "id": "t1", "m": "y".repeat(6000) });
+    let parts = cut(&command, 2591);
+    let count = parts.len();
+    // All but the last part, then a /reload: the new session's parts can't mix with the old.
+    for (i, part) in parts[..count - 1].iter().enumerate() {
+        send_parts(&mut rig, part_frame(i + 1, count, 5, false, "ui1", part));
+    }
+    send_parts(&mut rig, part_frame(count, count, 5, false, "ui2", &parts[count - 1]));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty(), "joined parts across UI sessions");
+    for (i, part) in parts.iter().enumerate() {
+        send_parts(&mut rig, part_frame(i + 1, count, 5, false, "ui2", part));
+    }
+    rig.bridge.tick();
+    let first = rig.t3.calls_to("t3_thread_send");
+    assert_eq!(first.len(), 1);
+    assert_eq!(rig.bridge.link.acked["c1"], 5);
+
+    // Run, but the ack never reached the game before another /reload: drawn again, it goes
+    // to T3 with the same request id, which T3 ignores.
+    for (i, part) in parts.iter().enumerate() {
+        send_parts(&mut rig, part_frame(i + 1, count, 5, false, "ui3", part));
+    }
+    rig.advance(5000);
+    rig.bridge.tick();
+    let sends = rig.t3.calls_to("t3_thread_send");
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[0]["clientRequestId"], sends[1]["clientRequestId"]);
+}
+
+#[test]
+fn after_a_crash_rolls_numbers_back_a_long_command_still_runs() {
+    let mut rig = Rig::new(44_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 9, "t": "send", "id": "t1", "m": "before" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.link.acked["c1"], 9);
+    // The new session's first frame is a part numbered below what was acked.
+    let command = json!({ "s": 2, "t": "send", "id": "t1", "m": "z".repeat(6000) });
+    let parts = cut(&command, 2591);
+    let count = parts.len();
+    for (i, part) in parts.iter().enumerate() {
+        send_parts(&mut rig, part_frame(i + 1, count, 2, false, "ui2", part));
+    }
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 2);
+    assert_eq!(rig.bridge.link.acked["c1"], 2);
+}
+
+#[test]
+fn unreadable_parts_come_back_as_a_failure_so_the_game_stops_drawing_them() {
+    for (zlib, bytes) in [(true, b"not zlib at all".to_vec()), (false, b"{not json".to_vec())] {
+        let mut rig = Rig::new(45_000_000);
+        send_parts(&mut rig, part_frame(1, 1, 3, zlib, "ui1", &bytes));
+        rig.bridge.tick();
+        assert!(rig.t3.calls_to("t3_thread_send").is_empty());
+        assert_eq!(rig.bridge.link.acked["c1"], 3);
+        let inbox = rig.slot(1);
+        assert!(inbox.contains("read that long message"), "{inbox}");
+    }
+}
+
+#[test]
+fn a_small_part_cannot_inflate_past_the_cap() {
+    let bomb = miniz_oxide::deflate::compress_to_vec_zlib(&vec![b' '; 2_000_000], 6);
+    assert!(bomb.len() < 2591, "the bomb fits in a frame ({} bytes)", bomb.len());
+    let mut rig = Rig::new(46_000_000);
+    send_parts(&mut rig, part_frame(1, 1, 3, true, "ui1", &bomb));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty());
+    assert!(rig.slot(1).contains("read that long message"));
+}
+
+#[test]
+fn a_part_with_impossible_numbers_is_ignored() {
+    let mut rig = Rig::new(47_000_000);
+    for cells in [part_frame(1, 17, 1, false, "ui1", b"x"), part_frame(0, 2, 1, false, "ui1", b"x"), part_frame(3, 2, 1, false, "ui1", b"x")] {
+        send_parts(&mut rig, cells);
+    }
+    assert!(rig.bridge.long_command.is_none());
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.link.acked.get("c1").copied().unwrap_or(0), 0);
+}
+
+#[test]
+fn a_part_for_a_command_already_handled_is_ignored() {
+    let mut rig = Rig::new(48_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 4, "t": "send", "id": "t1", "m": "done" }] }));
+    rig.bridge.tick();
+    send_parts(&mut rig, part_frame(1, 2, 4, false, "ui1", b"x"));
+    assert!(rig.bridge.long_command.is_none());
+}
+
+#[test]
+fn every_update_says_long_commands_are_welcome() {
+    let mut rig = Rig::new(49_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "hello", "o": false }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("lm=1"), "{}", rig.slot(1));
+}
+
 mod live;

@@ -2289,8 +2289,9 @@ local function sendAnswer(text)
         return true
     end
     local command = { t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers }
-    if not ns.Link.Fits(command) then
-        UI.Notice("That answer is too long to send from the game: shorten it.")
+    local fits, why = ns.Link.Fits(command)
+    if not fits then
+        UI.Notice(why or "That answer is too long to send from the game: shorten it.")
         return false -- what you typed stays
     end
     local s = ns.Link.Send(command)
@@ -2969,7 +2970,7 @@ input:SetScript("OnEditFocusLost", function()
         if not input:HasFocus() then UI.Picker.Close() end
     end)
 end)
-input:SetMaxBytes(2400)
+input:SetMaxBytes(16000)
 inputScroll:SetScrollChild(input)
 input:SetScript("OnEscapePressed", function(self)
     if not UI.Picker.Close() then self:ClearFocus() end
@@ -3711,8 +3712,9 @@ local function sendCurrent()
         and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = UI.Picker.Expand(text),
             pv = selected.pv, md = selected.m, ef = selected.ef, rm = selected.rm }
         or { t = "send", e = selected.env, id = selected.id, m = UI.Picker.Expand(text), fc = fresh or nil }
-    if not ns.Link.Fits(command) then
-        UI.Notice("That message is too long to send from the game: shorten it.")
+    local fits, why = ns.Link.Fits(command)
+    if not fits then
+        UI.Notice(why or "That message is too long to send from the game: shorten it.")
         return
     end
     local s = ns.Link.Send(command)
