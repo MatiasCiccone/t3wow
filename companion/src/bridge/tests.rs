@@ -182,6 +182,9 @@ impl T3 for FakeT3 {
             }
             "t3_thread_list" => {
                 let mut threads = if args["settled"] == true { self.settled.lock().unwrap().clone() } else { self.threads.lock().unwrap().clone() };
+                if let Some(statuses) = args["statuses"].as_array() {
+                    threads.retain(|t| statuses.contains(&t["status"]));
+                }
                 // Like T3, the list has no pending-question count or branch: only a thread read does.
                 for t in &mut threads {
                     t.as_object_mut().unwrap().remove("pendingRequestCount");
@@ -566,7 +569,7 @@ fn the_list_follows_t3s_sidebar() {
     rig.advance(15_000);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_read").len(), reads);
-    for args in rig.t3.calls_to("t3_thread_list") {
+    for args in rig.t3.calls_to("t3_thread_list").into_iter().filter(|a| a["statuses"].is_null()) {
         assert_eq!(args["includeSubagents"], false);
     }
 }
@@ -810,6 +813,40 @@ fn a_thread_watching_its_pull_request_shows_as_watching_and_notifies_when_the_wa
     rig.advance(WATCH_RECHECK_MS);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("list_thread_pull_requests").len(), asked);
+}
+
+#[test]
+fn a_thread_waiting_on_a_subagent_shows_as_watching_and_notifies_when_it_ends() {
+    let mut rig = Rig::new(6_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains("s=\"running\""), "{}", rig.slot(1));
+
+    // The agent delegated a review and its run ended: T3 says "completed".
+    rig.t3.threads.lock().unwrap().push(json!({ "threadId": "kid", "projectId": "p1", "title": "Review", "status": "running", "parentThreadId": "t1", "relationshipToParent": "subagent", "updatedAt": "2026-11-06T10:01:00Z" }));
+    rig.t3.set("completed", "2026-11-06T10:01:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("id=\"t1\",t=\"Fix tests\",s=\"watching\""), "{inbox}");
+    assert!(!inbox.contains("t=\"Fix tests\",s=\"completed\"}"), "notified while it still waits: {inbox}");
+
+    // The subagent ended and nothing woke the thread: it finished.
+    rig.t3.threads.lock().unwrap()[1]["status"] = json!("completed");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains("id=\"t1\",t=\"Fix tests\",s=\"completed\""), "{latest}");
+    assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "an alert: {latest}");
+}
+
+#[test]
+fn a_running_fork_doesnt_make_the_thread_it_came_from_wait() {
+    let list = json!({ "threads": [
+        { "threadId": "fork", "status": "running", "parentThreadId": "t1", "relationshipToParent": "fork" },
+        { "threadId": "kid", "status": "running", "parentThreadId": "t2", "relationshipToParent": "subagent" },
+    ] });
+    assert_eq!(waiting_parents(&list), HashSet::from(["t2".to_string()]));
 }
 
 #[test]
