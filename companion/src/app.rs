@@ -566,6 +566,9 @@ fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) 
 pub fn run(app: Arc<App>) {
     let (control_tx, control_rx) = channel::<Control>();
     *app.control.lock().unwrap() = Some(control_tx);
+    // Here and not in the loop below: it blocks until the prompt is answered.
+    #[cfg(target_os = "macos")]
+    crate::keychain::read_at_startup();
 
     // 1. The WoW folder.
     let wow_dir = loop {
@@ -576,6 +579,12 @@ pub fn run(app: Arc<App>) {
                 Config::update(|c| c.wow_dir = Some(dir.to_string_lossy().into_owned()));
             }
             break dir;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(problem) = crate::keychain::blocked() {
+            app.set(format!("T3: {problem}"), "WoW: Forever folder not found: choose it from this menu", true, false);
+            wait(&app, &control_rx, 5, None);
+            continue;
         }
         app.set("T3: waiting", "WoW: Forever folder not found: choose it from this menu", true, Config::load().token().is_some());
         wait(&app, &control_rx, 5, None);
@@ -610,6 +619,13 @@ pub fn run(app: Arc<App>) {
     //    terminal `login` or the tray's T3 server menu is picked up too.
     let mut asked = false;
     let (mut key, origin, token) = loop {
+        // The sign-in is saved but out of reach: it says so, and the browser stays shut.
+        #[cfg(target_os = "macos")]
+        if let Some(problem) = crate::keychain::blocked() {
+            app.set(format!("T3: {problem}"), "WoW: waiting for the sign-in", true, false);
+            wait(&app, &control_rx, 5, Some(&slots));
+            continue;
+        }
         match t3::target() {
             Some(t3::Target { key, origin, token: Some(token) }) => break (key, origin, token),
             Some(_) => {
@@ -954,7 +970,7 @@ mod tests {
     fn repair_addon_files_from_the_tray_puts_back_only_whats_missing() {
         let dir = std::env::temp_dir().join(format!("t3wow-repair-tray-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let slots = Slots::new(&dir, "16001");
+        let slots = Slots::with_fixture_fonts(&dir, "16001");
         slots.install().unwrap();
         let app = App::new();
         let (tx, rx) = channel();
