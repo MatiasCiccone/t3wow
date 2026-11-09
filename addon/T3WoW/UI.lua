@@ -3045,6 +3045,7 @@ refresh:SetPoint("BOTTOMLEFT", 12, 10)
 local newThread = button(frame, "New Thread", 110, function()
     local first = inbox and inbox.envs and inbox.envs[1]
     selected = { new = true, env = first and first.id or "" }
+    UI.History.pending = nil
     ns.Link.Send({ t = "open" })
     UI.Refresh()
     input:SetFocus()
@@ -3180,6 +3181,41 @@ local function settings()
 end
 
 local selectThread -- defined with the API below
+
+-- The threads opened since the UI loaded, which the mouse's side buttons step through as
+-- they do in T3. Works like a browser's history, except that New Thread isn't a stop.
+-- On UI, not a local of its own: the file has all of Lua's 200 locals in one chunk.
+UI.History = { list = {}, at = 0 }
+
+function UI.History.Visit(envId, threadId)
+    UI.History.pending = nil -- a thread opened any other way wins over presses still waiting
+    local here = UI.History.list[UI.History.at]
+    if here and here.env == envId and here.id == threadId then return end
+    for i = #UI.History.list, UI.History.at + 1, -1 do UI.History.list[i] = nil end
+    UI.History.at = UI.History.at + 1
+    UI.History.list[UI.History.at] = { env = envId, id = threadId }
+end
+
+-- Quick presses add up: only the thread they end on is opened, once they stop, so the
+-- companion isn't asked for each one on the way.
+function UI.History.Step(step)
+    -- From the composer, Back is the thread you left for it, which is still the current stop.
+    local pending = UI.History.pending
+    local leaving = step < 0 and composing() and not pending
+    local to = (pending and pending.to or UI.History.at) + (leaving and 0 or step)
+    if not UI.History.list[to] then return end
+    UI.History.pending = { to = to, due = GetTime() + 0.25 }
+end
+
+-- Every frame: opens the thread the presses ended on, once they've stopped.
+function UI.History.Land()
+    local pending = UI.History.pending
+    if not pending or GetTime() < pending.due then return end
+    UI.History.at, UI.History.pending = pending.to, nil
+    local stop = UI.History.list[pending.to]
+    if selected and not selected.new and selected.env == stop.env and selected.id == stop.id then return end
+    selectThread(stop.env, stop.id) -- its Visit finds this is already the current stop
+end
 
 function UI.OpenThread(threadId, envId)
     frame:Show()
@@ -3747,6 +3783,7 @@ local function takeOutcomes(data)
             if o.ok then
                 if sent.kind == "new" and o.id and selected and selected.new then
                     selected = { env = o.env or selected.env, id = o.id }
+                    UI.History.Visit(selected.env, selected.id)
                     scrollToEnd = true
                 end
             else
@@ -3768,6 +3805,7 @@ local function takeOutcomes(data)
             if sent.kind == "new" and type(data.ack) == "number" and data.ack >= s then
                 awaiting[s] = nil
                 selected = { env = envIdOf(data.view.e) or selected.env, id = data.view.id }
+                UI.History.Visit(selected.env, selected.id)
                 scrollToEnd = true
                 break
             end
@@ -3801,6 +3839,7 @@ end
 -- "connected to T3" again once the new one's update is in.
 function UI.ForgetLogin()
     inbox, selected, echo, notice, stopping = nil, nil, nil, nil, nil
+    UI.History.list, UI.History.at, UI.History.pending = {}, 0, nil
     copyBox:Hide()
     awaiting = {}
     askState.k, askState.picks, askState.sent, askState.sentAt = nil, {}, nil, nil
@@ -3821,6 +3860,7 @@ function UI.IsShown() return frame:IsShown() end
 
 function selectThread(envId, threadId)
     selected = { env = envId, id = threadId }
+    UI.History.Visit(envId, threadId)
     scrollToEnd = true
     copyBox:Hide()
     ns.Link.Send({ t = "open", e = envId, id = threadId })
@@ -3940,8 +3980,19 @@ frame:SetScript("OnShow", function()
 end)
 frame:SetScript("OnHide", function() ns.Link.Send({ t = "ui", o = false }) end)
 
+-- The mouse's side buttons, with the pointer on the window. This is the game-wide click
+-- event because the rows and the message box keep clicks from the window's OnMouseDown.
+frame:RegisterEvent("GLOBAL_MOUSE_DOWN")
+frame:SetScript("OnEvent", function(_, _, mouse)
+    local step = (mouse == "Button4" and -1) or (mouse == "Button5" and 1)
+    if not step or not frame:IsVisible() or not frame:IsMouseOver() then return end
+    if T3WoWPictureZoom and T3WoWPictureZoom:IsShown() then return end -- it covers the window
+    UI.History.Step(step)
+end)
+
 local ticker = 0
 frame:SetScript("OnUpdate", function(_, delta)
+    UI.History.Land()
     ticker = ticker + delta
     if ticker < 1 then return end
     ticker = 0
