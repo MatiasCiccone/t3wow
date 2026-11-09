@@ -53,6 +53,7 @@ pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("Media/grip.tga", include_bytes!("../../addon/T3WoW/Media/grip.tga")),
     ("Media/search.tga", include_bytes!("../../addon/T3WoW/Media/search.tga")),
     ("Media/clock.tga", include_bytes!("../../addon/T3WoW/Media/clock.tga")),
+    ("Media/alarm.tga", include_bytes!("../../addon/T3WoW/Media/alarm.tga")),
     ("Media/question.tga", include_bytes!("../../addon/T3WoW/Media/question.tga")),
     ("Media/refresh.tga", include_bytes!("../../addon/T3WoW/Media/refresh.tga")),
     ("Media/compose.tga", include_bytes!("../../addon/T3WoW/Media/compose.tga")),
