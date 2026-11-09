@@ -75,6 +75,10 @@ local function frame(kind, name)
   local f = { scripts = {}, shown = true, text = "", enabled = true, kind = kind, name = name }
   function f:SetScript(event, fn) self.scripts[event] = fn end
   function f:GetScript(event) return self.scripts[event] end
+  function f:HookScript(event, fn)
+    local before = self.scripts[event]
+    self.scripts[event] = before and function(...) before(...); fn(...) end or fn
+  end
   function f:CreateFontString() return fontString() end
   function f:CreateTexture() return frame("Texture") end
   function f:GetName() return self.name end

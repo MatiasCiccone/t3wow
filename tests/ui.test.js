@@ -766,6 +766,78 @@ return "ok"
 `);
 });
 
+test("a thread's saved scripts are listed, say the agent runs them, and picking one asks for it", () => {
+  run(`
+local NAME, menu = "T3WoWScriptsMenu", T3WoWScriptsMenu
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+assert(not menu.shown, "shown before the read")
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Hi" } },
+  scr = { { id = "dev", n = "serve app" }, { id = "lint", n = "check all" } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(menu.shown, "hidden with scripts to show")
+assert(menu.enabled, "off with nothing blocking it")
+local INFO = "Asks this thread's agent, not T3's terminal"
+assert(menuTexts(NAME) == INFO .. "|serve app|check all", menuTexts(NAME))
+assert(menuEntries(NAME)[1].pick == nil, "the info line can be picked")
+pick(NAME, "check all")
+assert(sent().t == "script" and sent().id == "t1" and sent().sc == "lint", "didn't ask for it")
+
+menu.scripts.OnEnter(menu)
+assert(showing("not in T3's terminal"), "the tooltip doesn't say how it differs")
+menu.scripts.OnLeave(menu)
+assert(not T3WoWTooltip.shown, "the tooltip stayed up")
+
+-- The agent is waiting on you: nothing is sent past its question.
+view.ask = { k = "k1", qs = { { h = "Pick", q = "Which?", m = false, o = { { l = "A", d = "" } } } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+pick(NAME, "serve app")
+assert(#queue() == 0, "sent past the question")
+view.ask = nil
+
+-- Read-only: greyed out, and the tooltip says why.
+inboxWith(ENVS, { threads = { thread }, view = view, trust = "readonly" })
+assert(menu.enabled == false, "open under Read-only")
+menu.scripts.OnEnter(menu)
+assert(showing("Read%-only"), "the tooltip doesn't say why it's off")
+
+-- A pull request stays at the panel's edge, though the title's edge moves in for the button.
+local function prOffset()
+  for _, f in ipairs(frames) do
+    if type(f.pr) == "table" and f.pr.n == "#7" and f.shown then return f.point[4] end
+  end
+end
+view.prs = { { n = "#7", s = "open", u = "https://example.test/7" } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(prOffset() == 100, "the pull request moved in with the title: " .. tostring(prOffset()))
+
+-- A project with none, and New Thread: nothing to show.
+view.scr = nil
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(not menu.shown, "shown with no scripts")
+assert(prOffset() == 0, "the pull request kept the button's room: " .. tostring(prOffset()))
+return "ok"
+`);
+});
+
+test("a thread on another machine says its scripts aren't available", () => {
+  run(`
+local NAME, menu = "T3WoWScriptsMenu", T3WoWScriptsMenu
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = {}, sna = true } })
+assert(menu.shown, "no sign of why there are no scripts")
+local entries = menuEntries(NAME)
+assert(#entries == 1 and entries[1].text == "Not available for threads on another machine", menuTexts(NAME))
+assert(entries[1].pick == nil, "the message can be picked")
+menu.scripts.OnEnter(menu)
+assert(showing("that machine's settings"), "the tooltip doesn't say why")
+return "ok"
+`);
+});
+
 test("Search narrows the list to threads matching every word, opens groups on their matches, and Escape clears it", () => {
   run(`
 local function count(label)
