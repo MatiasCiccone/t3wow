@@ -585,9 +585,9 @@ test("a row shows its linked pull request, and a row reused for a thread with no
   for (const db of [`{ client = "c1", seq = 0, queue = {} }`, `{ client = "c1", seq = 0, queue = {}, settings = { compact = true } }`]) {
     run(`
 inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Linked", s = "completed", set = false, at = time(), p = "", pr = "#46 +1" } } })
-assert(showing("^#46 %+1$"), "no pull request on the row")
+assert(showing("^#46$") and showing("^%+1$"), "no pull request on the row")
 inboxWith(ENVS, { threads = { { e = 1, id = "t2", t = "Unlinked", s = "completed", set = false, at = time(), p = "" } } })
-assert(not showing("#46"), "the row kept the last thread's pull request")
+assert(not showing("#46") and not showing("^%+1$"), "the row kept the last thread's pull request")
 return "ok"
 `, { db });
   }
@@ -599,16 +599,121 @@ local function rowWith(ps)
   inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Linked", s = "completed", set = false, at = time(), p = "", pr = "#46 +1", ps = ps } } })
 end
 rowWith("merged")
-assert(showing("^|cffa371f7#46|r %+1$"), "merged isn't purple")
+assert(showing("^|cffa371f7#46|r$"), "merged isn't purple")
+assert(showing("^%+1$"), "the +1 isn't left plain")
 rowWith("open")
-assert(showing("^|cff40c040#46|r %+1$"), "open isn't green")
+assert(showing("^|cff40c040#46|r$"), "open isn't green")
 rowWith("closed")
-assert(showing("^|cffff4040#46|r %+1$"), "closed isn't red")
+assert(showing("^|cffff4040#46|r$"), "closed isn't red")
 -- A state this version doesn't know, or an older companion that sends none.
 rowWith("something-new")
-assert(showing("^#46 %+1$"), "an unknown state was colored")
+assert(showing("^#46$"), "an unknown state was colored")
 rowWith(nil)
-assert(showing("^#46 %+1$"), "no state was colored")
+assert(showing("^#46$"), "no state was colored")
+return "ok"
+`);
+});
+
+const ROW_LINKS = `
+local PRS = {
+  { n = "#46", s = "open", u = "https://github.com/o/r/pull/46" },
+  { n = "#41", s = "merged", u = "https://github.com/o/r/pull/41" },
+  { n = "#47", s = "open" },
+}
+local thread = { e = 2, id = "t1", t = "Linked", s = "completed", set = false, at = time(), p = "", pr = "#46 +2", ps = "open", prs = PRS }
+function showRow(t) inboxWith(ENVS, { threads = { t or thread } }) end
+-- The button in the list showing this text.
+function button(text)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and f.shown and rawget(f, "label") and f.label.text == text then return f end
+  end
+end
+function entries()
+  local out = {}
+  for _, e in ipairs(T3WoWPullRequests.entries) do
+    if e.shown then out[#out + 1] = e end
+  end
+  return out
+end
+function hoverMore() local b = button("+3"); b.scripts.OnEnter(b); return b end
+`;
+
+test("a row with one pull request shows its number, and clicking it opens it on that thread's machine", () => {
+  run(`${ROW_LINKS}
+thread.pr, thread.prs = "#46", { PRS[1] }
+showRow()
+local number = button("|cff40c040#46|r")
+assert(number.mouse == true, "the number can't be clicked")
+number.scripts.OnClick(number, "LeftButton")
+assert(sent().t == "pr" and sent().e == "mac" and sent().id == "t1" and sent().u == PRS[1].u, "didn't ask to open it")
+
+-- With no page to open, or from an older companion that lists none, a click is the row's.
+showRow({ e = 1, id = "t2", t = "No page", s = "completed", set = false, at = time(), p = "", pr = "#9", ps = "open", prs = { { n = "#9", s = "open" } } })
+assert(button("|cff40c040#9|r").mouse == false, "a number with no page takes the click")
+showRow({ e = 1, id = "t3", t = "Older", s = "completed", set = false, at = time(), p = "", pr = "#8 +1", ps = "open" })
+assert(button("|cff40c040#8|r").mouse == false, "a number with no link takes the click")
+assert(button("+1").mouse == false, "a +1 with nothing to list takes the hover")
+return "ok"
+`);
+});
+
+test("a row with several pull requests shows only their total, and hovering it lists them all to click", () => {
+  run(`${ROW_LINKS}
+showRow()
+assert(not T3WoWPullRequests.shown, "open before the hover")
+assert(button("+3").mouse == true, "the +3 doesn't react")
+assert(not showing("#46"), "a number shows beside the total")
+hoverMore()
+assert(T3WoWPullRequests.shown, "didn't open")
+assert(#entries() == 3, "should list all of them: " .. #entries())
+assert(showing("^|cff40c040#46|r  |cff%x+Open|r$"), "#46 isn't listed open")
+assert(showing("^|cffa371f7#41|r  |cff%x+Merged|r$"), "#41 isn't listed merged")
+assert(entries()[3].enabled == false, "one with no web page can be clicked")
+entries()[2].scripts.OnClick(entries()[2], "LeftButton")
+assert(sent().t == "pr" and sent().e == "mac" and sent().id == "t1" and sent().u == PRS[2].u, "didn't ask to open #41")
+assert(not T3WoWPullRequests.shown, "stayed open after the click")
+return "ok"
+`);
+});
+
+test("a row's list of pull requests stays while the pointer is on it or its +total, and through updates", () => {
+  run(`${ROW_LINKS}
+showRow()
+local more = hoverMore()
+local popup = T3WoWPullRequests
+more.IsMouseOver = function() return true end
+tick(1)
+assert(popup.shown, "closed under the pointer")
+-- Crossing to the list.
+more.IsMouseOver = function() return false end
+popup.IsMouseOver = function() return true end
+tick(1)
+assert(popup.shown, "closed on the way to it")
+
+-- An update while it's open: it stays, and shows what's new.
+PRS[2].s = "closed"
+showRow()
+assert(popup.shown, "an update closed it")
+assert(showing("^|cffff4040#41|r  |cff%x+Closed|r$"), "it didn't follow the update")
+-- Fewer now: the entry that went doesn't linger.
+thread.prs = { PRS[1], PRS[2] }
+thread.pr = "#46 +1"
+showRow()
+assert(#entries() == 2 and not showing("#47"), "stale entry")
+-- Nothing else to list: it closes.
+thread.prs = { PRS[1] }
+thread.pr = "#46"
+showRow()
+assert(not popup.shown, "stayed open with nothing to list")
+
+-- Pointer gone: it closes.
+thread.prs, thread.pr = PRS, "#46 +2"
+showRow()
+hoverMore()
+assert(popup.shown, "didn't open again")
+popup.IsMouseOver = function() return false end
+tick(1)
+assert(not popup.shown, "stayed open with the pointer gone")
 return "ok"
 `);
 });
@@ -618,9 +723,9 @@ test("the thread panel's header lists every pull request, and clicking one asks 
 local function links()
   local found = {}
   for _, f in ipairs(frames) do
-    -- A row has a .pr too, its font string; a header link's is the pull request.
-    local pr = rawget(f, "pr")
-    if f.kind == "Button" and f.shown and pr and rawget(pr, "n") then found[#found + 1] = f end
+    -- A row's number is a link too; these are the header's.
+    local inRow = rawget(f, "parent") and rawget(f.parent, "thread")
+    if f.kind == "Button" and f.shown and rawget(f, "pr") and not inRow then found[#found + 1] = f end
   end
   return found
 end

@@ -483,6 +483,17 @@ fn a_row_names_the_threads_pull_request_and_how_many_more() {
     assert_eq!(state("still-open"), "open", "the state of the one named");
     assert_eq!(state("all-merged"), "merged");
     assert_eq!(state("none"), Value::Null);
+    let links = |id: &str| snapshot["threads"].as_array().unwrap().iter().find(|t| t["e"] == 1 && t["id"] == id).unwrap()["prs"].clone();
+    assert_eq!(
+        links("still-open"),
+        json!([
+            { "n": "#41", "s": "merged", "u": "https://github.com/o/r/pull/41" },
+            { "n": "#46", "s": "open", "u": "https://github.com/o/r/pull/46" },
+            { "n": "#47", "s": "open", "u": "https://github.com/o/r/pull/47" },
+        ]),
+        "every one, in T3's order"
+    );
+    assert_eq!(links("none"), Value::Null);
 }
 
 #[test]
