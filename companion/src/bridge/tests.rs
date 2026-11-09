@@ -1741,6 +1741,102 @@ fn blocked(rig: &Rig, sent: &[(u64, &'static str)]) -> Vec<&'static str> {
 }
 
 #[test]
+fn t3s_scratch_project_is_told_by_its_folder_or_icon_and_not_by_its_title() {
+    let scratch = |root: &str| json!({ "title": "No project", "workspaceRoot": root, "repositoryIdentity": null });
+    assert!(is_scratch_project(&scratch("C:\\Users\\me\\.t3\\scratch")));
+    assert!(is_scratch_project(&scratch("/home/me/.t3/scratch/")));
+    assert!(is_scratch_project(&json!({ "workspaceRoot": "D:\\elsewhere", "projectIcon": { "name": "message-square-dashed" } })), "a T3 home moved elsewhere");
+    assert!(!is_scratch_project(&scratch("C:\\dev\\no-project")), "your own project may have that title");
+    assert!(!is_scratch_project(&json!({ "workspaceRoot": "/repo/.t3/scratch", "repositoryIdentity": { "name": "x" } })), "a repository isn't T3's scratch");
+}
+
+#[test]
+fn new_thread_isnt_offered_t3s_scratch_project_but_its_threads_keep_the_name() {
+    let mut rig = Rig::new(32_000_000);
+    rig.t3.projects.lock().unwrap().insert("local".to_string(), json!([
+        { "id": "p1", "title": "app", "repositoryIdentity": { "name": "app" } },
+        { "id": "s1", "title": "No project", "workspaceRoot": "C:\\Users\\me\\.t3\\scratch", "repositoryIdentity": null },
+    ]));
+    *rig.t3.threads.lock().unwrap() = vec![json!({ "threadId": "t9", "projectId": "s1", "title": "Quick question", "status": "completed", "updatedAt": "2026-11-06T10:00:00Z" })];
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    let ids: Vec<&str> = snapshot["projects"].as_array().unwrap().iter().map(|p| str_of(&p["id"])).collect();
+    assert!(!ids.is_empty() && !ids.contains(&"s1"), "{}", snapshot["projects"]);
+    let row = snapshot["threads"].as_array().unwrap().iter().find(|t| t["id"] == "t9").expect("the thread is listed");
+    assert_eq!(row["p"], "No project", "{row}");
+}
+
+#[test]
+fn a_working_thread_says_when_its_run_started_from_one_read_per_run() {
+    let mut rig = Rig::new(33_000_000);
+    *rig.t3.threads.lock().unwrap() = vec![json!({ "threadId": "t9", "projectId": "p1", "title": "Busy", "status": "running", "latestRunId": "r1", "updatedAt": "2026-11-06T10:00:00Z" })];
+    *rig.t3.runs.lock().unwrap() = json!([{ "runId": "r1", "startedAt": "2026-11-06T09:58:00.000Z" }]);
+    let started = |rig: &Rig| rig.bridge.snapshot()["threads"].as_array().unwrap().iter().find(|t| t["id"] == "t9").unwrap()["st"].clone();
+    let reads = |rig: &Rig| rig.t3.calls_to("t3_thread_read").iter().filter(|a| a["runLimit"] == 1).count();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(started(&rig), iso_seconds("2026-11-06T09:58:00.000Z"));
+    let once = reads(&rig);
+    assert!(once >= 1, "read for the run");
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(reads(&rig), once, "the same run isn't read again");
+
+    // Another run of the thread is another start.
+    rig.t3.threads.lock().unwrap()[0]["latestRunId"] = json!("r2");
+    *rig.t3.runs.lock().unwrap() = json!([{ "runId": "r2", "startedAt": "2026-11-06T10:30:00.000Z" }]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(started(&rig), iso_seconds("2026-11-06T10:30:00.000Z"));
+}
+
+#[test]
+fn a_time_is_written_as_t3_writes_them() {
+    assert_eq!(iso_from_seconds(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(iso_from_seconds(1_709_210_096), "2024-02-29T12:34:56.000Z", "a leap day");
+    for seconds in [951_782_399, 1_735_689_599, 1_735_689_600, 1_794_700_000] {
+        assert_eq!(iso_seconds(&iso_from_seconds(seconds)), seconds);
+    }
+}
+
+#[test]
+fn snooze_asks_t3_for_a_time_and_wake_undoes_it() {
+    let mut rig = Rig::new(30_000_000);
+    let q = json!([
+        { "s": 1, "t": "snooze", "e": "local", "id": "t1", "mn": 240 },
+        { "s": 2, "t": "unsnooze", "e": "local", "id": "t1" },
+        { "s": 3, "t": "snooze", "e": "local", "id": "t1" },
+        { "s": 4, "t": "snooze", "e": "local", "id": "t1", "mn": 0 },
+    ]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": q }));
+    let now = rig.bridge.now_seconds();
+    rig.bridge.tick();
+    let calls = rig.t3.calls_to("t3_thread_organize");
+    assert_eq!(calls.len(), 2, "a snooze with no length doesn't reach T3: {calls:?}");
+    assert_eq!(calls[0]["action"], "snooze");
+    assert_eq!(calls[0]["threadId"], "t1");
+    let until = iso_seconds(str_of(&calls[0]["snoozedUntil"]));
+    assert!((now + 240 * 60..=now + 240 * 60 + 5).contains(&until), "{calls:?}");
+    assert_eq!(calls[1]["action"], "unsnooze");
+    assert!(calls[1]["snoozedUntil"].is_null());
+
+    // The tray's Read-only stops both.
+    let mut rig = Rig::new(31_000_000);
+    rig.bridge.set_trust(Trust::ReadOnly);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [
+        { "s": 1, "t": "snooze", "e": "local", "id": "t1", "mn": 60 },
+        { "s": 2, "t": "unsnooze", "e": "local", "id": "t1" },
+    ] }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_organize").is_empty());
+}
+
+#[test]
 fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     let changes = ["t3_thread_send", "t3_thread_launch", "t3_thread_organize", "t3_thread_interrupt"];
     let count = |rig: &Rig| -> usize { changes.iter().map(|tool| rig.t3.calls_to(tool).len()).sum() };

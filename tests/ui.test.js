@@ -17,7 +17,7 @@ const luaValue = (v) =>
 const UI_HELPERS = `
 function find(kind, text)
   for _, f in ipairs(frames) do
-    if f.kind == kind and (text == nil or f.text == text) then return f end
+    if f.kind == kind and (text == nil or f.text == text or rawget(f, "tip") == text) then return f end
   end
 end
 function click(text) find("Button", text).scripts.OnClick(find("Button", text), "LeftButton") end
@@ -25,6 +25,16 @@ function click(text) find("Button", text).scripts.OnClick(find("Button", text), 
 function composer()
   for _, f in ipairs(frames) do
     if f.kind == "EditBox" and rawget(f, "name") == nil then return f end
+  end
+end
+-- Puts the pointer on a thread's row, as the game would.
+function hoverRow(id)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "thread") and f.thread.id == id and f.shown then
+      f.IsMouseOver = function() return true end
+      f.scripts.OnEnter(f)
+      return f
+    end
   end
 end
 function typeText(text) composer().text = text end
@@ -133,7 +143,7 @@ assert(typed() == "again", typed())
 assert(shown("T3WoWProjectMenu"):find("gone: pick another"), shown("T3WoWProjectMenu"))
 -- The Mac is unlinked too: Start refuses, keeps the text, and the dropdown says so.
 inboxWith({ ENVS[1] })
-pick("T3WoWProjectMenu", "No project (scratch)")
+pick("T3WoWProjectMenu", "No project")
 click("Start")
 assert(#queue() == before, "started on a machine that's gone")
 assert(typed() == "again", typed())
@@ -148,15 +158,15 @@ local projects = { { e = 1, id = "pb", t = "beta" }, { e = 1, id = "pa", t = "Al
 inboxWith(ENVS, { projects = projects })
 click("New Thread")
 assert(menuTexts("T3WoWMachineMenu") == "PC|Mac", menuTexts("T3WoWMachineMenu"))
-assert(menuTexts("T3WoWProjectMenu") == "No project (scratch)|Alpha|beta", menuTexts("T3WoWProjectMenu"))
+assert(menuTexts("T3WoWProjectMenu") == "No project|Alpha|beta", menuTexts("T3WoWProjectMenu"))
 assert(menuEntries("T3WoWProjectMenu")[1].checked, "scratch isn't checked")
 pick("T3WoWProjectMenu", "beta")
 assert(menuEntries("T3WoWProjectMenu")[3].checked and not menuEntries("T3WoWProjectMenu")[1].checked, "beta isn't checked")
 -- Another machine: its projects, and the project picked goes back to none.
 pick("T3WoWMachineMenu", "Mac")
 assert(menuEntries("T3WoWMachineMenu")[2].checked, "Mac isn't checked")
-assert(menuTexts("T3WoWProjectMenu") == "No project (scratch)|mac app", menuTexts("T3WoWProjectMenu"))
-assert(shown("T3WoWProjectMenu") == "No project (scratch)", shown("T3WoWProjectMenu"))
+assert(menuTexts("T3WoWProjectMenu") == "No project|mac app", menuTexts("T3WoWProjectMenu"))
+assert(shown("T3WoWProjectMenu") == "No project", shown("T3WoWProjectMenu"))
 -- Picking the machine already picked keeps the project.
 pick("T3WoWProjectMenu", "mac app")
 pick("T3WoWMachineMenu", "Mac")
@@ -206,7 +216,7 @@ assert(sent().p == "pa" and sent().w == nil, "w=" .. tostring(sent().w))
 -- Back to scratch: the workspace goes, and a worktree picked before isn't asked for.
 click("New Thread")
 pick("T3WoWProjectMenu", "alpha")
-pick("T3WoWProjectMenu", "No project (scratch)")
+pick("T3WoWProjectMenu", "No project")
 assert(not T3WoWWorkspaceMenu:IsShown(), "workspace shown for scratch")
 typeText("scratch")
 click("Start")
@@ -311,20 +321,20 @@ local view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = 
 inboxWith(ENVS, { threads = { thread }, view = view })
 UI.Select(thread)
 click("Red")
-click("Send answer")
+click("Submit answer")
 local s = sent().s
 assert(sent().t == "answer", sent().t)
-assert(find("Button", "Sending…"), "not sending")
+assert(find("Button", "Submitting…"), "not sending")
 inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "timed out" } } })
-assert(find("Button", "Send answer") and find("Button", "Send answer"):IsShown(), "still stuck")
+assert(find("Button", "Submit answer") and find("Button", "Submit answer"):IsShown(), "still stuck")
 assert(showing("Answer not sent: timed out"), "no notice")
 
 -- An older companion says nothing: the button comes back after the timeout.
-click("Send answer")
-assert(find("Button", "Sending…"), "not sending again")
+click("Submit answer")
+assert(find("Button", "Submitting…"), "not sending again")
 inboxWith(ENVS, { threads = { thread }, view = view })
 tick(50)
-assert(find("Button", "Send answer"), "stuck without word")
+assert(find("Button", "Submit answer"), "stuck without word")
 return "ok"
 `);
 });
@@ -399,10 +409,10 @@ UI.Select(thread)
 local long = string.rep('"', 2400)
 typeText(long)
 local before = #queue()
-click("Send answer")
+click("Submit answer")
 assert(#queue() == before, "sent")
 assert(typed() == long, "box cleared")
-assert(find("Button", "Send answer"), "stuck on Sending")
+assert(find("Button", "Submit answer"), "stuck on Sending")
 return "ok"
 `);
 });
@@ -455,13 +465,18 @@ inboxWith(ENVS, { threads = { thread }, view = view, trust = "readonly" })
 UI.Select(thread)
 assert(not find("Button", "Send").enabled, "Send enabled under Read-only")
 assert(not find("Button", "Stop").enabled, "Stop enabled under Read-only")
-assert(not find("Button", "Settle").enabled, "Settle enabled under Read-only")
+local row = hoverRow("t1")
+assert(not row.settleAction.enabled, "Settle enabled under Read-only")
+assert(not row.snoozeAction.enabled, "Snooze enabled under Read-only")
+assert(row.settleAction.tip:find("Settle is off"), row.settleAction.tip)
 assert(showing("Read%-only: see Commands from the game"), "the window doesn't say it's read-only")
 typeText("please fix it")
 local before = #queue()
 click("Send")
 click("Stop")
-click("Settle")
+row.settleAction.scripts.OnClick(row.settleAction, "LeftButton")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+assert(not T3WoWDropdownList.shown, "offered how long to snooze under Read-only")
 assert(#queue() == before, "sent under Read-only")
 assert(typed() == "please fix it", typed())
 assert(showing("Sending messages from the game is off"), "no reason given")
@@ -469,13 +484,13 @@ assert(showing("Sending messages from the game is off"), "no reason given")
 local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } } } }
 view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask }
 inboxWith(ENVS, { threads = { thread }, view = view, trust = "readonly" })
-assert(not find("Button", "Send answer").enabled, "Send answer enabled under Read-only")
+assert(not find("Button", "Submit answer").enabled, "Send answer enabled under Read-only")
 assert(not find("Button", "Red").enabled, "an option enabled under Read-only")
 assert(showing("Answering from the game is off"), "no reason on the question")
 
 -- No new threads: messages go, Start doesn't.
 inboxWith(ENVS, { threads = { thread }, view = view, trust = "nonew" })
-assert(find("Button", "Send answer").enabled, "Send answer off under No new threads")
+assert(find("Button", "Submit answer").enabled, "Send answer off under No new threads")
 click("New Thread")
 assert(not find("Button", "Start").enabled, "Start enabled under No new threads")
 assert(showing("Starting threads from the game is off"), "no reason in the composer")
@@ -1253,7 +1268,7 @@ for _, f in ipairs(frames) do assert(not (f.kind == "Button" and f.shown and raw
 card.d = { t = "Sol review (round 1)", s = "running", b = "" }
 inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
 head = shownString("^Sol review %(round 1%)$")
-assert(shownString("^|cffffd100Working|r$"), "a running task doesn't say Working")
+assert(shownString("^|cffa1a1aaWorking|r$"), "a running task doesn't say Working")
 assert(below(shownString("Back after"), head), "the next message isn't below the card")
 -- Gone: the strings it used are plain messages again.
 items = { { r = "u", x = "review it" }, { r = "a", x = "Plain again" }, { r = "a", x = "Back after." } }
@@ -1529,7 +1544,7 @@ test("the compact list puts each thread on one line, its machine in the tooltip"
   run(`
 local thread = { e = 1, id = "t1", t = "Fix the build", s = "completed", set = false, at = time(), p = "web" }
 inboxWith(ENVS, { threads = { thread } })
-assert(showing("^PC · web$"), "comfortable rows show the machine and project")
+assert(showing("^PC$") and showing("^web$"), "comfortable rows show the machine and project")
 UI.ShowSettings()
 -- The Compact thread list check is the first in Settings.
 local compact
@@ -1539,7 +1554,7 @@ end
 compact.GetChecked = function() return true end
 compact.scripts.OnClick(compact)
 assert(T3WoWDB.settings.compact == true, "not saved")
-assert(not showing("^PC · web$"), "compact rows still show the machine line")
+assert(not showing("^PC$") and not showing("^web$"), "compact rows still show the machine or project line")
 assert(showing("Fix the build"), "compact rows lost the title")
 return "ok"
 `);
@@ -2172,7 +2187,7 @@ local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = fals
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view({ pv = "codex", m = "gpt-6-sol", mt = "GPT-6 Sol", rm = "auto" }) })
 UI.Select({ e = 1, id = "t1" })
 assert(shown("T3WoWModelMenu") == "GPT-6 Sol", shown("T3WoWModelMenu"))
-assert(menuTexts("T3WoWModelMenu") == "GPT-6 Sol|Claude|Claude Opus|Claude Haiku|Grok|Grok Build", menuTexts("T3WoWModelMenu"))
+assert(menuTexts("T3WoWModelMenu") == "GPT-6 Sol|Claude|Claude Opus|Claude Haiku|Grok|Grok Build|Permissions|Auto", menuTexts("T3WoWModelMenu"))
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view({ pv = "codex", m = "brand-new", rm = "auto" }) })
 assert(shown("T3WoWModelMenu") == "brand-new", shown("T3WoWModelMenu"))
 return "ok"
@@ -2190,9 +2205,10 @@ assert(not T3WoWModelMenu.shown, "nothing to show until its read arrives")
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = view(opus) })
 assert(shown("T3WoWModelMenu") == "Claude Opus", shown("T3WoWModelMenu"))
 assert(shown("T3WoWEffortMenu") == "High", shown("T3WoWEffortMenu"))
-assert(shown("T3WoWPermissionMenu") == "Auto", shown("T3WoWPermissionMenu"))
--- Every provider the machine runs, as in T3; only New Thread has a default row.
-assert(menuTexts("T3WoWModelMenu") == "Claude|Claude Opus|Claude Haiku|Grok|Grok Build", menuTexts("T3WoWModelMenu"))
+assert(not T3WoWPermissionMenu.shown and not T3WoWMachineMenu.shown, "a started thread shows its machine or permissions under the box")
+-- Every provider the machine runs, as in T3; only New Thread has a default row. The thread's
+-- permissions end the list.
+assert(menuTexts("T3WoWModelMenu") == "Claude|Claude Opus|Claude Haiku|Grok|Grok Build|Permissions|Auto", menuTexts("T3WoWModelMenu"))
 assert(menuTexts("T3WoWEffortMenu") == "Low|High|Extra high", menuTexts("T3WoWEffortMenu"))
 
 -- Picking is sent at once and shows right away, ahead of the thread's next read.
@@ -2302,7 +2318,9 @@ local v = { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg =
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread })
 UI.Select({ e = 1, id = "t1" })
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = v })
-openPermissions()
+pick("T3WoWModelMenu", "Supervised")
+assert(T3WoWPermissions.shown, "the model's menu didn't open the permissions")
+assert(#queue() == 0, "picking the permissions row sent something")
 assert(lit() == "approval-required", lit())
 for _, s in ipairs(segments()) do assert(s.enabled == false, s.mode.id .. " can be picked") end
 assert(showing("keeps the permissions it started with"), "doesn't say why")
@@ -2318,6 +2336,130 @@ return "ok"
 `);
 });
 
+test("the box is laid out as in T3: Send and the model inside, the machine and permissions under it in New Thread", () => {
+  run(SELECTOR_HELPERS + `
+local card = T3WoWModelMenu.parent
+local running = { e = 1, id = "t1", t = "A thread", s = "running", set = false, at = time(), p = "" }
+local cfg = { pv = "claudeAgent", m = "opus", ef = "high", rm = "auto" }
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = { running } })
+click("New Thread")
+assert(find("Button", "Start").parent == card and find("Button", "Stop").parent == card, "Send or Stop outside the box")
+assert(T3WoWMachineMenu.shown and T3WoWPermissionMenu.shown, "New Thread's machine or permissions missing")
+assert(T3WoWMachineMenu.point[1] == "TOPLEFT" and T3WoWMachineMenu.point[3] == "BOTTOMLEFT", "machine isn't under the box")
+assert(T3WoWPermissionMenu.point[1] == "TOPRIGHT" and T3WoWPermissionMenu.point[3] == "BOTTOMRIGHT", "permissions aren't under the box")
+assert(not find("Button", "Stop").shown, "Stop shows with nothing to stop")
+
+-- In the middle, under T3's question, with the project over the box and no labels.
+local box = composer().parent
+assert(box.point[1] == "CENTER", "New Thread's box isn't in the middle")
+assert(showing("^What should we work on%?$"), "no question")
+assert(not showing("^Project$") and not showing("^Machine$") and not showing("^Workspace$"), "a label beside the dropdowns")
+assert(T3WoWProjectMenu.point[1] == "BOTTOM" and T3WoWProjectMenu.point[2] == card and T3WoWProjectMenu.point[3] == "TOP", "the project isn't over the box")
+
+UI.Select(running)
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = { running }, view = { e = 1, id = "t1", t = "A thread", s = "running", items = {}, cfg = cfg } })
+assert(box.point[1] == "BOTTOMRIGHT", "a thread's box isn't back at the bottom")
+local stopButton, sendButton = find("Button", "Stop"), find("Button", "Send")
+assert(stopButton.shown and not sendButton.shown, "a run with nothing typed isn't just Stop")
+assert(T3WoWEffortMenu.point[2] == stopButton, "the effort isn't next to Stop")
+assert(not T3WoWMachineMenu.shown and not T3WoWPermissionMenu.shown, "a started thread keeps them under the box")
+
+-- Typing turns it into Send at once, and clearing the box back; spaces aren't a message.
+typeText("steer it")
+composer().scripts.OnTextChanged(composer(), true)
+assert(sendButton.shown and not stopButton.shown, "typing during a run isn't just Send")
+assert(T3WoWEffortMenu.point[2] == sendButton, "the effort isn't next to Send")
+typeText("   ")
+composer().scripts.OnTextChanged(composer(), true)
+assert(stopButton.shown and not sendButton.shown, "spaces took Stop away")
+typeText("")
+composer().scripts.OnTextChanged(composer(), true)
+
+running.s = "completed"
+inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = { running }, view = { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg = cfg } })
+assert(not stopButton.shown and sendButton.shown, "Stop stays after the run")
+assert(T3WoWEffortMenu.point[2] == sendButton, "the effort didn't close up to Send")
+return "ok"
+`);
+});
+
+test("a row offers Settle and Snooze while the pointer is on it", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+local rowFrame
+for _, f in ipairs(frames) do if f.kind == "Button" and rawget(f, "thread") and f.thread.id == "t1" then rowFrame = f end end
+assert(not rowFrame.actions.shown and not rowFrame.age.hidden, "shown with no pointer on it")
+local row = hoverRow("t1")
+assert(row.actions.shown and row.age.hidden, "the actions didn't take the age's place")
+assert(row.settleAction.tip == "Settle thread" and row.snoozeAction.tip == "Snooze thread", "tips")
+
+row.settleAction.scripts.OnClick(row.settleAction, "LeftButton")
+assert(sent().t == "settle" and sent().e == "local" and sent().id == "t1", "bad settle")
+
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+local list = T3WoWDropdownList
+assert(list.shown, "no choice of how long")
+local names = {}
+for _, r in ipairs(list.rows) do if r.shown then names[#names + 1] = r.text end end
+assert(table.concat(names, "|") == "1 hour|4 hours|1 day|1 week", table.concat(names, "|"))
+list.rows[2].scripts.OnClick(list.rows[2], "LeftButton")
+assert(sent().t == "snooze" and sent().id == "t1" and sent().mn == 240, "bad snooze")
+
+-- A snoozed thread wakes in one click; a settled one has only Unsettle. Both groups start folded.
+local function header(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and type(f.text.text) == "string" and f.text.text:find(label, 1, true) then return f end
+  end
+end
+thread.sn = true
+inboxWith(ENVS, { threads = { thread } })
+header("Snoozed").scripts.OnClick(header("Snoozed"))
+row = hoverRow("t1")
+assert(row.snoozeAction.tip == "Wake thread", row.snoozeAction.tip)
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+assert(sent().t == "unsnooze" and sent().id == "t1", "bad wake")
+thread.sn, thread.set = nil, true
+inboxWith(ENVS, { threads = { thread } })
+header("Settled").scripts.OnClick(header("Settled"))
+row = hoverRow("t1")
+assert(not row.snoozeAction.shown and row.settleAction.tip == "Unsettle thread", "a settled row")
+row.settleAction.scripts.OnClick(row.settleAction, "LeftButton")
+assert(sent().t == "unsettle", "bad unsettle")
+
+-- Pointer gone: back to the age.
+row.IsMouseOver = function() return false end
+row.scripts.OnLeave(row)
+assert(not row.actions.shown and not row.age.hidden, "stayed after the pointer left")
+
+-- Needing you: Settle only, and the status stands where the age was until hovered.
+thread.set, thread.s = false, "waiting"
+inboxWith(ENVS, { threads = { thread } })
+row = hoverRow("t1")
+assert(not row.snoozeAction.shown and row.settleAction.shown and row.settleAction.tip == "Settle thread", "a thread that needs you offers Snooze")
+assert(row.status.box.shown == false and row.age.hidden, "the actions didn't replace the status")
+row.IsMouseOver = function() return false end
+row.scripts.OnLeave(row)
+assert(row.status.box.shown and row.age.hidden, "a status doesn't replace the age")
+-- In T3's words and colors: Input in indigo with its icon, Working in blue with its ring.
+assert(row.status.label == "Input" and row.status.hexColor == "a5b4fc" and row.status.icon.shown, tostring(row.status.label))
+thread.s = "running"
+inboxWith(ENVS, { threads = { thread } })
+assert(row.status.label == "Working" and row.status.hexColor == "60a5fa" and row.status.iconName == "spinner", tostring(row.status.hexColor))
+thread.s = "idle"
+inboxWith(ENVS, { threads = { thread } })
+assert(row.status.box.shown == false and not row.age.hidden, "a thread at rest doesn't show its age")
+
+-- A game started before this version has no clock file: words, not a square.
+missingTextures[ROOT .. "Media\\\\clock"] = true
+thread.set = false
+inboxWith(ENVS, { threads = { thread } })
+row = hoverRow("t1")
+assert(not row.snoozeAction.glyph.shown and not row.snoozeAction.short.hidden, "no fallback")
+return "ok"
+`);
+});
+
 test("the tray's Read-only greys out changing the model; No new threads leaves it", () => {
   run(SELECTOR_HELPERS + `
 local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }
@@ -2325,7 +2467,16 @@ local v = { e = 1, id = "t1", t = "A thread", s = "completed", items = {}, cfg =
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, trust = "readonly" })
 UI.Select({ e = 1, id = "t1" })
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = v, trust = "readonly" })
-assert(T3WoWModelMenu.enabled == false and T3WoWEffortMenu.enabled == false, "still enabled")
+assert(T3WoWEffortMenu.enabled == false, "effort still enabled")
+-- The model menu still opens, for the permissions row, but no model can be picked.
+local rows = menuEntries("T3WoWModelMenu")
+for _, row in ipairs(rows) do
+  if row.text ~= "Auto" then assert(row.pick == nil, row.text .. " can be picked under Read-only") end
+end
+assert(rows[#rows].text == "Auto" and rows[#rows].pick, "no way to the thread's permissions under Read-only")
+rows[#rows].pick()
+assert(T3WoWPermissions.shown, "the permissions didn't open under Read-only")
+T3WoWPermissions:Hide()
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG, threads = thread, view = v, trust = "nonew" })
 assert(T3WoWModelMenu.enabled == true and T3WoWEffortMenu.enabled == true, "No new threads still changes models")
 return "ok"
@@ -2510,6 +2661,132 @@ assert(T3WoWPicker.shown, "closed under the click")
 rawset(box, "HasFocus", function() return false end)
 box.scripts.OnEditFocusLost(box)
 assert(not T3WoWPicker.shown, "stayed open after you left the box")
+return "ok"
+`);
+});
+
+test("New Thread is an icon beside the search box; Settings then Refresh start the footer", () => {
+  run(`
+local newThread, settings, refresh = find("Button", "New Thread"), find("Button", "Settings"), find("Button", "Refresh")
+assert(newThread.point[1] == "LEFT" and newThread.point[2] == T3WoWSearch and newThread.point[3] == "RIGHT", "New Thread isn't beside the search box")
+assert(settings.point[1] == "BOTTOMLEFT" and refresh.point[1] == "BOTTOMLEFT" and settings.point[2] < refresh.point[2], "Settings doesn't come first")
+assert(newThread.text ~= "New Thread" and settings.text ~= "Settings" and refresh.text ~= "Refresh", "a button still has words on it")
+newThread.scripts.OnShow(newThread)
+assert(newThread.glyph.shown and newThread.short.hidden, "the icon isn't what shows")
+-- A game started before these files shipped: short words, not a square.
+missingTextures[ROOT .. "Media\\\\compose"] = true
+newThread.scripts.OnShow(newThread)
+assert(not newThread.glyph.shown and not newThread.short.hidden, "no fallback")
+return "ok"
+`);
+});
+
+
+test("row statuses in T3's words: Working's time and ring, Approval, Done until opened", () => {
+  run(`
+local envs = { { id = "local", name = "PC", ok = true } }
+local thread = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "web", st = time() - 125 }
+inboxWith(envs, { threads = { thread } })
+local row
+for _, f in ipairs(frames) do if f.kind == "Button" and rawget(f, "thread") and f.thread.id == "t1" then row = f end end
+assert(row.status.label == "Working 2m", row.status.label)
+assert(row.status.iconName == "spinner" and row.status.icon.shown, "no ring")
+-- Under a minute there's no time to give.
+thread.st = time() - 20
+inboxWith(envs, { threads = { thread } })
+assert(row.status.label == "Working", row.status.label)
+
+thread.s = "approval"
+inboxWith(envs, { threads = { thread } })
+assert(row.status.label == "Approval" and row.status.hexColor == "fbbf24", row.status.label)
+
+-- It finished while something else was open: Done, until the thread is opened.
+thread.s = "running"
+inboxWith(envs, { threads = { thread } })
+thread.s = "completed"
+inboxWith(envs, { threads = { thread } })
+assert(row.status.label == "Done" and row.status.hexColor == "34d399" and row.status.box.shown and row.age.hidden, row.status.label)
+UI.Select(thread)
+assert(row.status.box.shown == false and not row.age.hidden, "still Done once opened")
+
+-- A thread already finished the first time it's seen isn't news.
+inboxWith(envs, { threads = { thread, { e = 1, id = "t2", t = "Old", s = "completed", set = false, at = time(), p = "" } } })
+local old
+for _, f in ipairs(frames) do if f.kind == "Button" and rawget(f, "thread") and f.thread.id == "t2" then old = f end end
+assert(old.status.box.shown == false and not old.age.hidden, "an old thread says Done")
+
+-- Finishing while you're reading it isn't unread.
+thread.s = "running"
+inboxWith(envs, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "running", items = {} } })
+thread.s = "completed"
+inboxWith(envs, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = {} } })
+assert(not UI.Unread()["local:t1"], "Done on the thread being read")
+return "ok"
+`);
+});
+
+test("the header leaves the status to the list", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "failed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "failed", items = {} } })
+UI.Select(thread)
+local count = 0
+for _, fs in ipairs(fontStrings) do
+  if not fs.hidden and fs.text == "Failed" then count = count + 1 end
+end
+assert(count == 1, "the status shows " .. count .. " times")
+return "ok"
+`);
+});
+
+test("an x clears the search, and shows only while there is something to clear", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Fix the build", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+local search = T3WoWSearch
+local function listedRow()
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "thread") and f.shown then return f end
+  end
+end
+assert(not search.clear.shown, "an x with nothing typed")
+search.text = "zzz"
+search.scripts.OnTextChanged(search)
+assert(search.clear.shown, "no x while searching")
+assert(not listedRow(), "the search didn't narrow the list")
+search.clear.scripts.OnClick(search.clear, "LeftButton")
+search.scripts.OnTextChanged(search)
+assert(search.text == "" and not search.clear.shown, "not cleared")
+assert(listedRow(), "the list didn't come back")
+return "ok"
+`);
+});
+
+test("a question is laid out as in T3: a quiet header, then options stacked with what they mean and a number", () => {
+  run(`
+local ask = { k = "abcd1234", qs = { { h = "Input test", q = "Does it look right?", m = false, o = { { l = "Looks right", d = "The row shows Input" }, { l = "Needs changes", d = "" } } } } }
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+UI.Select(thread)
+assert(showing("^Input test$"), "the header isn't as written")
+assert(not showing("INPUT TEST"), "the header is still shouted")
+assert(showing("^Does it look right%?$"), "no question")
+local first, second = find("Button", "Looks right"), find("Button", "Needs changes")
+assert(first.about.text == "The row shows Input" and not first.about.hidden, "no description under the option")
+assert(second.about.hidden, "a description where there is none")
+assert(first.number.text == 1 and second.number.text == 2, "no numbers")
+assert(second.point[2] == first and second.point[3] == "BOTTOMLEFT", "the options aren't stacked")
+
+-- Submitting is in the box, where Send is; typing doesn't bring Send back.
+local submit, send = find("Button", "Submit answer"), find("Button", "Send")
+assert(submit.shown and not send.shown, "Submit isn't in Send's place")
+typeText("my own")
+composer().scripts.OnTextChanged(composer(), true)
+assert(submit.shown and not send.shown, "typing swapped Submit for Send")
+typeText("")
+click("Looks right")
+click("Submit answer")
+assert(sent().t == "answer" and sent().a[1] == 1, "the pick wasn't sent")
 return "ok"
 `);
 });

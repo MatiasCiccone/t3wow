@@ -34,10 +34,10 @@ Skin.THEMES = {
             regular = MEDIA .. "Inter-Regular.ttf", strong = MEDIA .. "Inter-SemiBold.ttf", heading = MEDIA .. "Inter-SemiBold.ttf", mono = MONO,
         },
         -- Inter is wider than Arial Narrow, so its body text is a size smaller to take the same room.
-        sizes = { text = 12, strong = 12, small = 11, title = 15, label = 11, button = 12, pill = 10, code = 12 },
+        sizes = { text = 12, strong = 12, small = 11, rowMeta = 10, hero = 24, title = 15, label = 11, button = 12, pill = 10, code = 12 },
         shadow = false,
-        check = "toggle", pillAlpha = 0.14,
-        rowHeight = 44, compactHeight = 24,
+        check = "toggle", pillAlpha = 0,
+        rowHeight = 58, compactHeight = 24,
         colors = {
             bg = hex("0b0b0c", 0.96), panel = hex("0f0f10"), card = hex("151517"), raised = hex("1c1c1f"),
             hover = { 1, 1, 1, 0.05 }, border = hex("27272a"), line = hex("27272a"),
@@ -52,10 +52,10 @@ Skin.THEMES = {
         name = "Flat",
         shapes = { panel = { art = SQUARE, c = "px" }, control = { art = SQUARE, c = "px" }, pill = { art = SQUARE, c = "px" } },
         fonts = { regular = ARIAL_NARROW, strong = ARIAL_NARROW, heading = ARIAL_NARROW, mono = MONO },
-        sizes = { text = 14, strong = 14, small = 11, title = 15, label = 11, button = 13, pill = 11, code = 12 },
+        sizes = { text = 14, strong = 14, small = 11, rowMeta = 10, hero = 24, title = 15, label = 11, button = 13, pill = 11, code = 12 },
         shadow = true,
         check = "fill", pillAlpha = 0.16,
-        rowHeight = 42, compactHeight = 22,
+        rowHeight = 60, compactHeight = 22,
         colors = {
             bg = hex("131313", 0.93), panel = hex("101010"), card = hex("161616"), raised = hex("1e1e1e"),
             hover = hex("8f8fff", 0.1), border = hex("000000"), line = hex("2b2b2b"),
@@ -70,10 +70,10 @@ Skin.THEMES = {
         name = "Classic",
         shapes = { panel = { art = CLASSIC, c = 8 }, control = { art = CLASSIC, c = 8 }, pill = { art = CLASSIC, c = "half" } },
         fonts = { regular = ARIAL_NARROW, strong = ARIAL_NARROW, heading = FRIZ, mono = MONO },
-        sizes = { text = 14, strong = 13, small = 11, title = 14, label = 12, button = 12, pill = 11, code = 12 },
+        sizes = { text = 14, strong = 13, small = 11, rowMeta = 10, hero = 24, title = 14, label = 12, button = 12, pill = 11, code = 12 },
         shadow = true,
         check = "tick", pillAlpha = 0,
-        rowHeight = 42, compactHeight = 22,
+        rowHeight = 60, compactHeight = 22,
         colors = {
             bg = hex("09090e", 0.94), panel = { 0, 0, 0, 0.35 }, card = hex("141418"), raised = hex("222226"),
             hover = hex("ffd100", 0.12), border = { 1, 1, 1, 1 }, line = hex("2f2f2f"),
@@ -162,6 +162,8 @@ end
 -- Font objects by role: every string set to one changes with it.
 local FONT_ROLES = {
     text = { "regular", "text", "text" }, strong = { "strong", "strong", "text" }, small = { "regular", "small", "dim" },
+    rowMeta = { "regular", "rowMeta", "muted" }, -- a thread row's project and machine
+    hero = { "heading", "hero", "heading" }, -- New Thread's question
     muted = { "regular", "small", "muted" }, title = { "heading", "title", "heading" }, label = { "heading", "label", "label" },
     button = { "heading", "button", "text" }, buttonPrimary = { "heading", "button", "primaryText" },
     buttonGhost = { "heading", "button", "muted" }, buttonDisabled = { "heading", "button", "dim" },
@@ -529,25 +531,44 @@ function Skin.Pill(host)
     pill.text:SetFontObject(Skin.fonts.pill)
     pill.text:SetPoint("CENTER", pill.box.proxy, "CENTER", 0, 0)
     pill.box.proxy:SetHeight(16)
+    pill.icon = host:CreateTexture(nil, "OVERLAY")
+    pill.icon:SetSize(11, 11)
+    pill.icon:SetPoint("RIGHT", pill.text, "LEFT", -3, 0)
+    pill.icon:Hide()
+    pill.visible = true
     pills[#pills + 1] = pill
     return pill
 end
 
-function Pill:Set(text, hexColor)
-    self.label, self.hexColor = text, hexColor
+-- icon: a Media file drawn before the text in its color. A game started before the file
+-- shipped has no such file, so the pill goes without.
+function Pill:Set(text, hexColor, icon)
+    self.label, self.hexColor, self.iconName = text, hexColor, icon
     self.text:SetText(text or "")
     local r, g, b = tonumber(hexColor:sub(1, 2), 16) / 255, tonumber(hexColor:sub(3, 4), 16) / 255, tonumber(hexColor:sub(5, 6), 16) / 255
     self.text:SetTextColor(r, g, b)
     self.box:SetColors({ r, g, b, theme.pillAlpha })
+    self.drawn = false
+    if icon then
+        self.icon:SetTexture(MEDIA .. icon)
+        local file = not self.icon.GetTextureFilePath or self.icon:GetTextureFilePath()
+        self.drawn = file ~= nil and file ~= ""
+    end
+    self.icon:SetVertexColor(r, g, b)
+    self.icon:SetShown(self.drawn and self.visible)
+    self.text:ClearAllPoints()
+    self.text:SetPoint("CENTER", self.box.proxy, "CENTER", self.drawn and 7 or 0, 0)
     local pad = theme.pillAlpha > 0 and 14 or 0
-    self.box.proxy:SetWidth((self.text:GetStringWidth() or 0) + pad)
+    self.box.proxy:SetWidth((self.text:GetStringWidth() or 0) + pad + (self.drawn and 14 or 0))
 end
 
 function Pill:SetPoint(...) self.box:SetPoint(...) end
 function Pill:ClearAllPoints() self.box:ClearAllPoints() end
 function Pill:SetShown(shown)
+    self.visible = shown and true or false
     self.box:SetShown(shown)
     self.text:SetShown(shown)
+    self.icon:SetShown(self.visible and self.drawn or false)
 end
 function Pill:Width() return self.box.proxy:GetWidth() or 0 end
 
@@ -644,7 +665,7 @@ function Skin.Apply()
     for _, cb in ipairs(checks) do Skin.UpdateCheck(cb) end
     for _, slider in ipairs(sliders) do Skin.UpdateSlider(slider) end
     for _, bar in ipairs(scrollBars) do Skin.UpdateScrollBar(bar) end
-    for _, pill in ipairs(pills) do if pill.hexColor then pill:Set(pill.label, pill.hexColor) end end
+    for _, pill in ipairs(pills) do if pill.hexColor then pill:Set(pill.label, pill.hexColor, pill.iconName) end end
     for _, fn in ipairs(listeners) do fn() end
 end
 

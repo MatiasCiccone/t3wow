@@ -27,9 +27,10 @@ local WORKING = { preparing = true, queued = true, starting = true, running = tr
 -- T3's sidebar files it under Working as "Waiting", though there's no run to stop.
 local function inWorking(status) return WORKING[status] or status == "watching" end
 local STATUS = {
-    preparing = { "Working", "ffd100" }, queued = { "Queued", "ffd100" }, starting = { "Working", "ffd100" },
-    running = { "Working", "ffd100" }, completed = { "Finished", "40c040" }, failed = { "Failed", "ff4040" },
-    waiting = { "Needs you", "ff8000" }, approval = { "Approve in T3", "ff8000" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
+    preparing = { "Working", "60a5fa", "spinner" }, queued = { "Queued", "60a5fa", "spinner" }, starting = { "Working", "60a5fa", "spinner" },
+    running = { "Working", "60a5fa", "spinner" }, completed = { "Finished", "40c040" }, failed = { "Failed", "ff4040" },
+    -- As T3 says it: Input, in its indigo, with a question mark; "notice" is for a notification, where the one word says little.
+    waiting = { "Input", "a5b4fc", "question", notice = "Awaiting input" }, approval = { "Approval", "fbbf24", "shield", notice = "Approve in T3" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
     idle = { "Idle", "a0a0a0" }, rolled_back = { "Rolled back", "a0a0a0" }, watching = { "Waiting", "ffd100" },
 }
 -- A linked pull request's state, in the colors GitHub gives them. Another state keeps the
@@ -155,12 +156,13 @@ end
 -- "readonly"; an older companion leaves it out) limits what the game may make T3 do. The
 -- companion refuses those commands anyway: the window greys them out and says why.
 local TRUST_NAME = { nonew = "No new threads", readonly = "Read-only" }
-local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true, paste = true, model = true, script = true }
+local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, snooze = true, unsnooze = true, stop = true, answer = true, paste = true, model = true, script = true }
 local BLOCKED_LEAD = {
     send = "Sending messages from the game is off", new = "Starting threads from the game is off",
     script = "Running scripts from the game is off",
     paste = "Pasting images from the game is off", model = "Changing the model from the game is off",
     answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
+    snooze = "Snooze is off", unsnooze = "Wake is off",
 }
 local function blockedReason(kind)
     local trust = inbox and inbox.trust
@@ -224,9 +226,6 @@ local SIZE = {
     -- Where a labelled control (a dropdown, the slider) starts in Settings: past the widest
     -- label, "Stay on screen", which T3's Inter draws widest.
     field = 132,
-    -- Where the New Thread form's dropdowns start: past its widest label, "Workspace", which
-    -- T3's Inter draws about 66 wide.
-    newField = 80,
     composer = 126, -- the message box and its row of selectors, with their margins
 }
 -- The window is drawn in the theme (Theme.lua): a panel with a title bar and a footer, the
@@ -323,6 +322,36 @@ local function button(parent, text, width, onClick, variant)
     b:SetSize(width, 28)
     b:SetText(text)
     b:SetScript("OnClick", onClick)
+    return b
+end
+
+-- A square button with an icon, named by its tooltip. A game started before the icon's file
+-- shipped shows the short word instead; asked each time it shows, as the game can take a
+-- while to say.
+function UI.IconButton(parent, glyph, tip, short, onClick)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(28, 28)
+    b.tip = tip
+    b.glyph = Skin.Glyph(b, glyph, 16, "muted", "OVERLAY")
+    b.glyph:SetPoint("CENTER")
+    b.short = b:CreateFontString(nil, "OVERLAY")
+    b.short:SetFontObject(Skin.fonts.small)
+    b.short:SetPoint("CENTER")
+    b.short:SetText(short)
+    b.short:Hide()
+    b:SetScript("OnClick", onClick)
+    b:SetScript("OnShow", function(self)
+        local drawn = UI.GlyphKnown(self.glyph)
+        self.glyph:SetShown(drawn)
+        self.short:SetShown(not drawn)
+    end)
+    b:SetScript("OnEnter", function(self)
+        Skin.Tooltip:SetOwner(self, "ANCHOR_TOP")
+        Skin.Tooltip:AddLine(self.tip)
+        Skin.Tooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
+    Skin.Hover(b)
     return b
 end
 
@@ -428,6 +457,12 @@ do
         list:Show()
     end
 
+    -- The same list, opened from any other button.
+    function UI.OpenMenu(anchor, menu)
+        anchor.menu = menu
+        open(anchor)
+    end
+
     function dropdown(parent, name, width, menu)
         local dd = CreateFrame("Button", name, parent)
         dd:SetSize(width, 26)
@@ -478,6 +513,16 @@ local search -- the search box over the list (built after renderList)
 -- Compact (a setting): one line per thread, its machine and project in the tooltip.
 local function compactList() return T3WoWDB ~= nil and T3WoWDB.settings ~= nil and T3WoWDB.settings.compact == true end
 
+-- Statuses with nothing to say on a row: as in T3, it shows the thread's age instead.
+UI.AtRest = { completed = true, idle = true, interrupted = true, cancelled = true, rolled_back = true }
+
+-- The game finds a new file only when it starts: a game started before this version shows
+-- no icon rather than a square. Asked each time, as the answer can come a while after SetTexture.
+function UI.GlyphKnown(glyph)
+    local file = not glyph.GetTextureFilePath or glyph:GetTextureFilePath()
+    return file ~= nil and file ~= ""
+end
+
 local function header(index)
     local h = headers[index]
     if not h then
@@ -513,12 +558,16 @@ local function row(index)
         r = CreateFrame("Button", nil, listChild)
         r:SetSize(SIZE.row, 44)
         r.box = Skin.Box(r, { shape = "control", fill = false, ring = false })
+        r.project = r:CreateFontString(nil, "OVERLAY")
+        r.project:SetFontObject(Skin.fonts.rowMeta)
+        r.project:SetJustifyH("LEFT")
+        r.project:SetWordWrap(false)
         r.title = r:CreateFontString(nil, "OVERLAY")
         r.title:SetFontObject(Skin.fonts.strong)
         r.title:SetJustifyH("LEFT")
         r.title:SetWordWrap(false)
         r.sub = r:CreateFontString(nil, "OVERLAY")
-        r.sub:SetFontObject(Skin.fonts.small)
+        r.sub:SetFontObject(Skin.fonts.rowMeta)
         r.sub:SetJustifyH("LEFT")
         r.sub:SetWordWrap(false)
         r.status = Skin.Pill(r)
@@ -530,46 +579,181 @@ local function row(index)
         r.prMore = PullRequests.TextButton(r)
         r.prMore:SetScript("OnEnter", function(self) PullRequests.ShowAll(self, r.thread) end)
         r:SetScript("OnClick", function(self) UI.Select(self.thread) end)
-        r:SetScript("OnEnter", rowTooltip)
-        r:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
-        Skin.Hover(r)
+        r:SetScript("OnEnter", function(self)
+            rowTooltip(self)
+            UI.RowActions.Hover(self)
+        end)
+        r:SetScript("OnLeave", function(self)
+            Skin.Tooltip:Hide()
+            UI.RowActions.Hover(self)
+        end)
+        r.hoverBox = Skin.Hover(r)
+        UI.RowActions.Build(r)
         rows[index] = r
     end
     return r
 end
 
--- Comfortable: title and status pill, machine · project and age under them. Compact: a
--- status dot, the title and the age on one line. Either way a linked pull request's number
--- sits just before the age, and the text before it is what gets cut short.
+-- Comfortable, as in T3: the project, the title, then the machine with the linked pull
+-- request across from it. A thread with no project has no first line. Top right is one
+-- place: the status while there's something to say (T3 shows no status for a thread at
+-- rest), else the age, and Settle and Snooze while the pointer is on the row.
+-- Compact: a status dot, the title, the pull request and the age on one line.
 local function layoutRow(r, compact, hasPr, hasMore)
+    r.isCompact, r.hasPr, r.hasMore = compact, hasPr, hasMore
+    local hasProject = not compact and (r.thread.p or "") ~= ""
+    local showStatus = not compact and (not UI.AtRest[r.thread.s] or UI.RowStatus(r.thread) == UI.DONE)
+    r.project:ClearAllPoints()
     r.title:ClearAllPoints()
     r.sub:ClearAllPoints()
     r.age:ClearAllPoints()
+    r.actions:ClearAllPoints()
     r.status:ClearAllPoints()
     r.dot:ClearAllPoints()
     r.prLink:ClearAllPoints()
     r.prMore:ClearAllPoints()
-    r.prMore:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
-    r.prLink:SetPoint("RIGHT", hasMore and r.prMore or r.age, "LEFT", hasMore and -2 or -6, 0)
+    local slot = (r.hovering and r.actions) or (showStatus and r.status.box.proxy) or r.age
     r.prLink:SetShown(hasPr)
     r.prMore:SetShown(hasMore)
-    local beforeAge = (hasPr and r.prLink) or (hasMore and r.prMore) or r.age
+    local leftmostPr = (hasPr and r.prLink) or (hasMore and r.prMore) or nil
     if compact then
+        r.prMore:SetPoint("RIGHT", slot, "LEFT", -6, 0)
+        r.prLink:SetPoint("RIGHT", hasMore and r.prMore or slot, "LEFT", hasMore and -2 or -6, 0)
         r.dot:SetPoint("LEFT", r, "LEFT", 9, 0)
         r.title:SetPoint("LEFT", 22, 0)
-        r.title:SetPoint("RIGHT", beforeAge, "LEFT", -6, 0)
+        r.title:SetPoint("RIGHT", leftmostPr or slot, "LEFT", -6, 0)
         r.age:SetPoint("RIGHT", -8, 0)
+        r.actions:SetPoint("RIGHT", -5, 0)
     else
-        r.status:SetPoint("TOPRIGHT", r, "TOPRIGHT", -8, -6)
-        r.title:SetPoint("TOPLEFT", 10, -7)
-        r.title:SetPoint("RIGHT", r.status.box.proxy, "LEFT", -6, 0)
-        r.age:SetPoint("BOTTOMRIGHT", -8, 7)
+        r.status:SetPoint("TOPRIGHT", r, "TOPRIGHT", -8, -5)
+        r.age:SetPoint("TOPRIGHT", -8, -7)
+        r.actions:SetPoint("TOPRIGHT", -5, -4)
+        local firstLine = hasProject and r.project or r.title
+        firstLine:SetPoint("TOPLEFT", 10, -7)
+        firstLine:SetPoint("RIGHT", slot, "LEFT", -6, 0)
+        if hasProject then
+            r.title:SetPoint("TOPLEFT", 10, -23)
+            r.title:SetPoint("TOPRIGHT", -8, -23)
+        end
+        r.prMore:SetPoint("BOTTOMRIGHT", -8, 4)
+        if hasMore then r.prLink:SetPoint("RIGHT", r.prMore, "LEFT", -2, 0) else r.prLink:SetPoint("BOTTOMRIGHT", -8, 4) end
         r.sub:SetPoint("BOTTOMLEFT", 10, 7)
-        r.sub:SetPoint("RIGHT", beforeAge, "LEFT", -6, 0)
+        if leftmostPr then r.sub:SetPoint("RIGHT", leftmostPr, "LEFT", -6, 0) else r.sub:SetPoint("BOTTOMRIGHT", -8, 7) end
     end
+    r.project:SetShown(hasProject)
     r.sub:SetShown(not compact)
-    r.status:SetShown(not compact)
+    r.status:SetShown(showStatus and not r.hovering)
     r.dot:SetShown(compact)
+    r.age:SetShown(not showStatus and not r.hovering)
+    r.actions:SetShown(r.hovering)
+end
+
+-- Settle and Snooze on a row, as in T3's sidebar. Snooze asks for how long; T3 takes a time,
+-- which the companion works out, since the game's clock may not be the PC's. On a snoozed
+-- thread the clock wakes it. A settled thread has only Unsettle, and one that needs you
+-- only Settle.
+do
+    local Actions = {}
+    UI.RowActions = Actions
+    local SNOOZE_FOR = { { "1 hour", 60 }, { "4 hours", 240 }, { "1 day", 1440 }, { "1 week", 10080 } }
+
+    local function command(kind, t, minutes)
+        local blocked = blockedReason(kind)
+        if blocked then return UI.Notice(blocked) end
+        ns.Link.Send({ t = kind, e = envIdOf(t.e), id = t.id, mn = minutes })
+    end
+
+    local snoozeMenu = { isSelected = function() return false end }
+    function snoozeMenu.entries()
+        local list = {}
+        for _, choice in ipairs(SNOOZE_FOR) do list[#list + 1] = { text = choice[1], value = choice[2] } end
+        return list
+    end
+    -- The thread is the one clicked: its row may list another by the time one is picked.
+    function snoozeMenu.pick(minutes) command("snooze", snoozeMenu.thread, minutes) end
+
+    local function action(r, glyph, onClick)
+        local b = CreateFrame("Button", nil, r.actions)
+        b:SetSize(16, 16)
+        b.glyph = Skin.Glyph(b, glyph, 12, "muted", "OVERLAY")
+        b.glyph:SetPoint("CENTER")
+        b:SetScript("OnClick", onClick)
+        b:SetScript("OnEnter", function(self)
+            r.hoverBox:Show() -- the row was just left for this button, but the pointer is still on it
+            Skin.Tooltip:SetOwner(self, "ANCHOR_TOP")
+            Skin.Tooltip:AddLine(self.tip)
+            Skin.Tooltip:Show()
+        end)
+        b:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
+        Skin.Hover(b)
+        return b
+    end
+
+    function Actions.Build(r)
+        r.hovering = false
+        r.actions = CreateFrame("Frame", nil, r)
+        r.actions:SetHeight(16)
+        r.actions:Hide()
+        -- However the pointer left (a menu's click-away layer swallows the row's OnLeave).
+        r.actions:SetScript("OnUpdate", function()
+            if not r:IsMouseOver() then Actions.Hover(r) end
+        end)
+        r.settleAction = action(r, "check", function()
+            local t = r.thread
+            if t then command(t.set and "unsettle" or "settle", t) end
+        end)
+        r.settleAction:SetPoint("RIGHT", r.actions, "RIGHT", 0, 0)
+        -- The check and the word, as in T3.
+        r.settleAction.glyph:ClearAllPoints()
+        r.settleAction.glyph:SetPoint("LEFT", 2, 0)
+        r.settleAction.label = r.settleAction:CreateFontString(nil, "OVERLAY")
+        r.settleAction.label:SetFontObject(Skin.fonts.muted)
+        r.settleAction.label:SetPoint("LEFT", r.settleAction.glyph, "RIGHT", 2, 0)
+        r.snoozeAction = action(r, "clock", function(self)
+            local t = r.thread
+            if not t then return end
+            if t.sn then return command("unsnooze", t) end
+            if blockedReason("snooze") then return UI.Notice(blockedReason("snooze")) end
+            snoozeMenu.thread = t
+            UI.OpenMenu(self, snoozeMenu)
+        end)
+        r.snoozeAction:SetPoint("RIGHT", r.settleAction, "LEFT", -2, 0)
+        -- What it says when the game has no icon file yet.
+        r.snoozeAction.short = r.snoozeAction:CreateFontString(nil, "OVERLAY")
+        r.snoozeAction.short:SetFontObject(Skin.fonts.small)
+        r.snoozeAction.short:SetPoint("CENTER")
+        r.snoozeAction.short:SetText("Zz")
+    end
+
+    local function paint(b, kind, name)
+        local blocked = blockedReason(kind)
+        b.tip = blocked or name
+        b:SetEnabled(not blocked)
+        Skin.SetGlyphColor(b.glyph, blocked and "dim" or "muted")
+    end
+
+    -- Whether the pointer is on the row, and what its two buttons do for this thread.
+    function Actions.Refresh(r)
+        local t = r.thread
+        r.hovering = (t ~= nil and r:IsMouseOver()) and true or false
+        if not r.hovering then return end
+        paint(r.settleAction, t.set and "unsettle" or "settle", t.set and "Unsettle thread" or "Settle thread")
+        paint(r.snoozeAction, t.sn and "unsnooze" or "snooze", t.sn and "Wake thread" or "Snooze thread")
+        local drawn = UI.GlyphKnown(r.snoozeAction.glyph)
+        r.snoozeAction.glyph:SetShown(drawn)
+        r.snoozeAction.short:SetShown(not drawn)
+        local snoozable = t.sn or not (t.set or UI.Waits.NeedsYou(t.s))
+        r.snoozeAction:SetShown(snoozable and true or false)
+        r.settleAction.label:SetText(t.set and "Unsettle" or "Settle")
+        local width = math.ceil(r.settleAction.label:GetStringWidth() or 0) + 19
+        r.settleAction:SetWidth(width)
+        r.actions:SetWidth(width + (snoozable and 18 or 0))
+    end
+
+    function Actions.Hover(r)
+        Actions.Refresh(r)
+        layoutRow(r, r.isCompact, r.hasPr, r.hasMore)
+    end
 end
 
 -- A row's pull requests: one shows its number, several just +total, listed on hover. An
@@ -669,6 +853,53 @@ do
     end
 end
 
+-- A finished thread you haven't opened: T3's Done. T3's tools don't say what you've read,
+-- so this is what the game saw finish and hasn't opened since; reading it in T3 doesn't clear it.
+UI.DONE = { "Done", "34d399", "done" }
+function UI.Unread()
+    T3WoWDB = T3WoWDB or {}
+    T3WoWDB.unread = T3WoWDB.unread or {}
+    return T3WoWDB.unread
+end
+
+function UI.RowStatus(t)
+    if t.s == "completed" and not t.set and UI.Unread()[UI.Waits.Key(envIdOf(t.e), t.id)] then return UI.DONE end
+    return STATUS[t.s] or { t.s or "?", "a0a0a0" }
+end
+
+-- A run's status says how long it has been going, once that's a minute or more.
+function UI.PaintRowStatus(r, t)
+    local s = UI.RowStatus(t)
+    local elapsed = WORKING[t.s] and t.st and age(t.st) or ""
+    r.status:Set((elapsed ~= "" and elapsed ~= "now") and (s[1] .. " " .. elapsed) or s[1], s[2], s[3])
+    r.dot:SetColors({ hexColor(s[2]) })
+end
+
+-- Which threads just finished, from what each update says against the one before. An
+-- update with no threads says nothing: the lists haven't arrived.
+function UI.TrackUnread(data)
+    local threads = data.threads or {}
+    if #threads == 0 then return end
+    T3WoWDB = T3WoWDB or {}
+    local before, unread, now = T3WoWDB.lastStatus or {}, UI.Unread(), {}
+    for _, t in ipairs(threads) do
+        local id = data.envs and data.envs[t.e] and data.envs[t.e].id
+        if id then
+            local key = UI.Waits.Key(id, t.id)
+            now[key] = t.s
+            if t.s ~= "completed" then
+                unread[key] = nil
+            elseif before[key] and before[key] ~= "completed" and not UI.Waits.Reading(id, t.id) then
+                unread[key] = true
+            end
+        end
+    end
+    for key in pairs(unread) do
+        if not now[key] then unread[key] = nil end
+    end
+    T3WoWDB.lastStatus = now
+end
+
 -- Show more, at the end of a group with more threads than the companion listed: the next
 -- updates list more of it, for this UI session. Working and Needs you come from the open
 -- list, so Open's covers them.
@@ -762,20 +993,23 @@ local function renderList()
                 rowIndex = rowIndex + 1
                 local r = row(rowIndex)
                 r.thread = t
+                if selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e) then UI.Unread()[UI.Waits.Key(selected.env, t.id)] = nil end
+                UI.RowActions.Refresh(r)
                 layoutRow(r, compact, PullRequests.FillRow(r, t))
                 r.title:SetText(t.t ~= "" and t.t or "Untitled")
                 local e = env(t.e)
-                r.sub:SetText(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
-                local s = STATUS[t.s] or { t.s or "?", "a0a0a0" }
-                r.status:Set(s[1], s[2])
-                r.dot:SetColors({ hexColor(s[2]) })
+                r.project:SetText(t.p or "")
+                r.sub:SetText(e and e.name or "?")
+                UI.PaintRowStatus(r, t)
                 r.age:SetText(age(t.at))
                 local isSelected = selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e)
                 r.box:SetColors(isSelected and "selected" or false, isSelected and "selectedRing" or false)
                 r:SetPoint("TOPLEFT", indent, -y)
-                r:SetSize(SIZE.row - indent, rowHeight)
+                -- A thread with no project has no line for it.
+                local height = (compact or (t.p or "") ~= "") and rowHeight or rowHeight - 15
+                r:SetSize(SIZE.row - indent, height)
                 r:Show()
-                y = y + rowHeight + (compact and 1 or 2)
+                y = y + height + (compact and 1 or 2)
                 for _, child in ipairs(launched[id] or {}) do place(child, math.min(indent + 14, 42)) end
             end
             for _, t in ipairs(groups[key]) do place(t, 0) end
@@ -791,16 +1025,29 @@ local function renderList()
     PullRequests.FollowList()
 end
 
+-- While the window is open: running threads' elapsed time.
+do
+    local ticker, since = CreateFrame("Frame", nil, frame), 0
+    ticker:SetScript("OnUpdate", function(_, elapsed)
+        since = since + elapsed
+        if since < 15 then return end
+        since = 0
+        for _, r in ipairs(rows) do
+            if r:IsShown() and r.thread and WORKING[r.thread.s] then UI.PaintRowStatus(r, r.thread) end
+        end
+    end)
+end
+
 -- Search, over the list as in T3's sidebar: typing narrows the list (renderList), Enter
 -- opens the first thread it shows, Escape clears it. It searches the threads the companion
 -- listed; Show more lists more of a group.
 search = CreateFrame("EditBox", "T3WoWSearch", frame)
 search:SetPoint("TOPLEFT", 10, -SIZE.title - 8)
-search:SetSize(LIST_WIDTH - 20, 26)
+search:SetSize(LIST_WIDTH - 50, 26) -- New Thread is beside it
 search:SetAutoFocus(false)
 search:SetMaxLetters(80)
 search:SetFontObject(Skin.fonts.text)
-search:SetTextInsets(28, 8, 0, 0)
+search:SetTextInsets(28, 24, 0, 0)
 search.folded = {} -- groups folded during this search
 search.box = Skin.Box(search, { shape = "control", fill = "input", ring = "border" })
 search.glyph = Skin.Glyph(search, "search", 14, "muted", "OVERLAY")
@@ -815,6 +1062,15 @@ search.placeholder = search:CreateFontString(nil, "OVERLAY")
 search.placeholder:SetFontObject(Skin.fonts.muted)
 search.placeholder:SetPoint("LEFT", 28, 0)
 search.placeholder:SetText("Search")
+-- A small x to clear what is typed, there only while something is.
+search.clear = Skin.CloseButton(search, function()
+    search:SetText("")
+    search:ClearFocus()
+end)
+search.clear:SetSize(18, 18)
+search.clear.glyph:SetSize(12, 12)
+search.clear:SetPoint("RIGHT", -4, 0)
+search.clear:Hide()
 search.none = listChild:CreateFontString(nil, "OVERLAY")
 search.none:SetFontObject(Skin.fonts.muted)
 search.none:SetPoint("TOPLEFT", 10, -8)
@@ -825,6 +1081,7 @@ search:SetScript("OnEditFocusLost", function(self) self.box:SetColors(nil, "bord
 search:SetScript("OnTextChanged", function(self)
     local text = self:GetText()
     self.placeholder:SetShown(text == "")
+    self.clear:SetShown(text ~= "")
     if not text:find("%S") then self.folded = {} end
     listScroll:SetVerticalScroll(0)
     renderList()
@@ -845,15 +1102,13 @@ local right = CreateFrame("Frame", nil, frame)
 right:SetPoint("TOPLEFT", LIST_WIDTH + 1, -SIZE.title - 1)
 right:SetPoint("BOTTOMRIGHT", -1, SIZE.footer + 1)
 
--- The thread's title, then its status pill, machine, age and branch; a line under them.
+-- The thread's title, then its machine, age and branch; a line under them. Its status is in the list.
 local viewTitle = right:CreateFontString(nil, "OVERLAY")
 viewTitle:SetFontObject(Skin.fonts.title)
 viewTitle:SetPoint("TOPLEFT", 18, -12)
 viewTitle:SetPoint("RIGHT", -18, 0)
 viewTitle:SetJustifyH("LEFT")
 viewTitle:SetWordWrap(false)
-local viewPill = Skin.Pill(right)
-viewPill:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -6)
 local viewMeta = right:CreateFontString(nil, "OVERLAY")
 viewMeta:SetFontObject(Skin.fonts.small)
 viewMeta:SetJustifyH("LEFT")
@@ -877,7 +1132,7 @@ do
         return link
     end
 
-    -- Laid out from the right edge, level with the status pill, so what's before them is
+    -- Laid out from the right edge, level with the line under the title, so what's before them is
     -- what gets cut short. Returns the leftmost, or nil when there are none. Off the title,
     -- not the text beside them: that text is anchored to these, and the game refuses a loop.
     function PullRequests.Place(prs)
@@ -902,19 +1157,10 @@ do
     end
 end
 
--- What the header says under the title: a status (as a pill) and the rest, or just text;
--- prs is the thread's pull requests, if it has any.
-local function setViewMeta(status, text, prs)
+-- What the header says under the title; prs is the thread's pull requests, if it has any.
+local function setViewMeta(text, prs)
     viewMeta:ClearAllPoints()
-    if status then
-        local s = STATUS[status] or { status, "a0a0a0" }
-        viewPill:Set(s[1], s[2])
-        viewPill:SetShown(true)
-        viewMeta:SetPoint("LEFT", viewPill.box.proxy, "RIGHT", 6, 0)
-    else
-        viewPill:SetShown(false)
-        viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -8)
-    end
+    viewMeta:SetPoint("TOPLEFT", viewTitle, "BOTTOMLEFT", 0, -8)
     local leftmost = PullRequests.Place(prs or {})
     if leftmost then
         viewMeta:SetPoint("RIGHT", leftmost, "LEFT", -10, 0)
@@ -1401,7 +1647,7 @@ local function placeCard(fs, d)
     fs.bubble:Hide()
     local s = STATUS[d.s] or { tostring(d.s or "?"), "a0a0a0" }
     local ended = d.s ~= "running" and type(d.at) == "number" and d.at > 0 and type(date) == "function"
-    fs.state:SetText(format("|cff%s%s|r%s", s[2], s[1], ended and ("  " .. date("%H:%M", d.at)) or ""))
+    fs.state:SetText(format("|cff%s%s|r%s", WORKING[d.s] and Skin.Hex("muted") or s[2], s[1], ended and ("  " .. date("%H:%M", d.at)) or ""))
     fs.head:SetWidth(math.max(40, inner - math.ceil(fs.state:GetStringWidth() or 0) - 12))
     fs.head:SetText(type(d.t) == "string" and d.t or "Delegated task")
     local body = type(d.b) == "string" and d.b ~= "" and d.b or nil
@@ -1564,36 +1810,16 @@ newHelp:SetFontObject(Skin.fonts.muted)
 newHelp:SetPoint("TOPLEFT", 4, -8)
 newHelp:SetPoint("RIGHT", -4, 0)
 newHelp:SetJustifyH("LEFT")
--- The machine and project dropdowns. The project list is the picked machine's.
+-- The project dropdown; its list is the machine's picked under the message box.
 local function composing() return selected ~= nil and selected.new end
-local envLabel = newPanel:CreateFontString(nil, "OVERLAY")
-envLabel:SetFontObject(Skin.fonts.strong)
-envLabel:SetPoint("TOPLEFT", newHelp, "BOTTOMLEFT", 0, -20)
-envLabel:SetText("Machine")
-local envMenu = dropdown(newPanel, "T3WoWMachineMenu", 240, {
-    entries = function()
-        local list = {}
-        for _, e in ipairs(inbox and inbox.envs or {}) do list[#list + 1] = { text = e.name, value = e.id } end
-        if #list == 0 then list[1] = { text = "No machines linked: link one in T3", note = true } end
-        return list
-    end,
-    isSelected = function(id) return composing() and selected.env == id end,
-    pick = function(id)
-        if not composing() or selected.env == id then return end
-        -- Another machine offers other models: what was picked for this one goes.
-        selected.env, selected.project = id, nil
-        selected.pv, selected.m, selected.ef, selected.rm = nil, nil, nil, nil
-        UI.Refresh()
-    end,
-})
-envMenu:SetPoint("LEFT", envLabel, "LEFT", SIZE.newField, 0)
-local projectLabel = newPanel:CreateFontString(nil, "OVERLAY")
-projectLabel:SetFontObject(Skin.fonts.strong)
-projectLabel:SetPoint("TOPLEFT", envLabel, "BOTTOMLEFT", 0, -22)
-projectLabel:SetText("Project")
+-- As in T3: the question over the project, over the message box, all in the middle
+-- (placed by Selectors.PlaceBox, once the box exists).
+newPanel.heading = newPanel:CreateFontString(nil, "OVERLAY")
+newPanel.heading:SetFontObject(Skin.fonts.hero)
+newPanel.heading:SetText("What should we work on?")
 local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
     entries = function()
-        local list = { { text = "No project (scratch)" } }
+        local list = { { text = "No project" } }
         local projects = composing() and UI.ProjectsFor(envIndexById(selected.env)) or {}
         for _, p in ipairs(projects) do list[#list + 1] = { text = p.t, value = p.id } end
         if #projects == 0 then list[2] = { text = "No projects on this machine", note = true } end
@@ -1612,15 +1838,10 @@ local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
         UI.Refresh()
     end,
 })
-projectMenu:SetPoint("LEFT", projectLabel, "LEFT", SIZE.newField, 0)
 -- Where a project's thread runs, as T3 asks: a new worktree (from the checkout's current
 -- branch) or the project's checkout itself. A scratch thread has neither, so it's hidden.
-local workspaceLabel = newPanel:CreateFontString(nil, "OVERLAY")
-workspaceLabel:SetFontObject(Skin.fonts.strong)
-workspaceLabel:SetPoint("TOPLEFT", projectLabel, "BOTTOMLEFT", 0, -22)
-workspaceLabel:SetText("Workspace")
 local WORKSPACE_NAME = { worktree = "New worktree", checkout = "Current checkout" }
-local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 240, {
+local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 200, {
     entries = function()
         return { { text = WORKSPACE_NAME.checkout, value = "checkout" }, { text = WORKSPACE_NAME.worktree, value = "worktree" } }
     end,
@@ -1633,7 +1854,6 @@ local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 240, {
         UI.Refresh()
     end,
 })
-workspaceMenu:SetPoint("LEFT", workspaceLabel, "LEFT", SIZE.newField, 0)
 
 -- The New Thread composer's project, if it is still listed.
 local function selectedProject()
@@ -1835,10 +2055,7 @@ local approvalOpen = button(messageChild, "Open in T3", 120, function()
 end)
 approvalOpen:Hide()
 
-local askSend = button(messageChild, "Send answer", 120, function()
-    sendAnswer(nil)
-    UI.Refresh()
-end, "primary")
+local askSend = button(messageChild, "Submit answer", 112, function() UI.SendCurrent() end, "primary")
 askSend:Hide()
 
 -- The question (or the approval note) sits on a card, its content inset by SIZE.card.
@@ -1858,17 +2075,26 @@ local function askString(index)
     return fs
 end
 
--- An option is a chip: a round mark for one pick, a square one where several may be picked.
+-- An option is a row, as in T3: a round mark for one pick (a square one where several may
+-- be picked), its label with what it means under it, and its number at the right.
 local function askButton(index)
     local b = askButtons[index]
     if not b then
-        b = Skin.Button(CreateFrame("Button", nil, messageChild), "chip")
-        b:SetHeight(28)
-        b:GetFontString():ClearAllPoints()
-        b:GetFontString():SetPoint("LEFT", 27, 0)
+        b = Skin.Button(CreateFrame("Button", nil, messageChild), "ghost")
+        b:GetFontString():SetJustifyH("LEFT")
+        b:GetFontString():SetWordWrap(false)
         b.mark = Skin.Box(b, { shape = "pill", fill = "off", ring = "border", height = 12, free = true, layer = "ARTWORK" })
-        b.mark:SetPoint("LEFT", b, "LEFT", 9, 0)
         b.mark.proxy:SetSize(12, 12)
+        b.about = b:CreateFontString(nil, "OVERLAY")
+        b.about:SetFontObject(Skin.fonts.muted)
+        b.about:SetJustifyH("LEFT")
+        b.about:SetWordWrap(true)
+        b.badge = Skin.Box(b, { shape = "control", fill = "raised", height = 18, free = true, layer = "ARTWORK" })
+        b.badge:SetPoint("RIGHT", b, "RIGHT", -8, 0)
+        b.badge.proxy:SetSize(20, 18)
+        b.number = b:CreateFontString(nil, "OVERLAY")
+        b.number:SetFontObject(Skin.fonts.small)
+        b.number:SetPoint("CENTER", b.badge.proxy, "CENTER", 0, 0)
         b.dot = Skin.Box(b, { shape = "pill", fill = "accent", height = 6, free = true, layer = "ARTWORK", sub = 2 })
         b.dot:SetPoint("CENTER", b.mark.proxy, "CENTER")
         b.dot.proxy:SetSize(6, 6)
@@ -1884,14 +2110,6 @@ local function askButton(index)
             askState.picks[self.qi] = picks
             renderView()
         end)
-        b:HookScript("OnEnter", function(self)
-            if self.desc and self.desc ~= "" and self.desc ~= self.label then
-                Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
-                Skin.Tooltip:AddLine(self.desc)
-                Skin.Tooltip:Show()
-            end
-        end)
-        b:HookScript("OnLeave", function() Skin.Tooltip:Hide() end)
         askButtons[index] = b
     end
     return b
@@ -1937,67 +2155,80 @@ local function renderAsk(view)
     end
     if askState.k ~= ask.k then askState = { k = ask.k, picks = {} } end
     local si, bi = 0, 0
-    local first
+    local first, last
     flow.gap = flow.gap + SIZE.card
     local blocked = blockedReason("answer")
     for qi, q in ipairs(ask.qs or {}) do
         si = si + 1
-        local fs = askString(si)
-        fs:SetFontObject(Skin.fonts.text)
-        fs:SetWidth(width)
-        fs:SetText(format("|cff%s%s|r%s\n%s", warn, ((q.h and q.h ~= "") and q.h or "Question"):upper(),
-            q.m and (" |cff" .. Skin.Hex("dim") .. "(pick any)|r") or "", q.q or ""))
-        place(fs, x, 8)
-        first = first or fs
-        -- Chips run left to right and wrap; each row hangs under the one before.
-        local rowStart, rowWidth, prev = nil, 0, nil
+        local head = askString(si)
+        head:SetFontObject(Skin.fonts.muted)
+        head:SetWidth(width)
+        head:SetText(((q.h and q.h ~= "") and q.h or "Question") .. (q.m and " (pick any)" or ""))
+        place(head, x, 8)
+        first = first or head
+        si = si + 1
+        local question = askString(si)
+        question:SetFontObject(Skin.fonts.strong)
+        question:SetWidth(width)
+        question:SetText(q.q or "")
+        place(question, x, 8)
+        last = question
         for oi, o in ipairs(q.o or {}) do
             bi = bi + 1
             local b = askButton(bi)
-            b.qi, b.oi, b.multi, b.desc, b.label = qi, oi, q.m, o.d, o.l
+            b.qi, b.oi, b.multi = qi, oi, q.m
             local picked = askState.picks[qi] and askState.picks[qi][oi] and true or false
+            local about = type(o.d) == "string" and o.d ~= "" and o.d ~= o.l and o.d or nil
+            local label = b:GetFontString()
             b:SetText(o.l)
-            local w = math.min(width, math.max(72, b:GetFontString():GetStringWidth() + 40))
-            b:SetWidth(w)
-            Skin.SetVariant(b, picked and "picked" or "chip")
+            b:SetWidth(width)
+            label:SetWidth(width - 62)
+            label:ClearAllPoints()
+            b.mark:ClearAllPoints()
+            b.about:ClearAllPoints()
+            if about then
+                b.mark:SetPoint("TOPLEFT", b, "TOPLEFT", 6, -8)
+                label:SetPoint("TOPLEFT", 24, -7)
+                b.about:SetPoint("TOPLEFT", label, "BOTTOMLEFT", 0, -2)
+                b.about:SetWidth(width - 62)
+                b.about:SetText(about)
+                b:SetHeight(25 + math.max(12, b.about:GetStringHeight() or 0))
+            else
+                b.mark:SetPoint("LEFT", b, "LEFT", 6, 0)
+                label:SetPoint("LEFT", 24, 0)
+                b.about:SetText("")
+                b:SetHeight(30)
+            end
+            b.about:SetShown(about ~= nil)
+            b.number:SetText(oi)
+            Skin.SetVariant(b, picked and "picked" or "ghost")
             b.mark.shape = q.m and "control" or "pill"
             b.mark:SetColors("off", picked and "accent" or "border")
             b.dot:SetShown(picked and not q.m)
             b.tick:SetShown(picked and q.m and true or false)
             b:SetEnabled(not blocked)
-            if rowStart and rowWidth + 6 + w <= width then
-                b:ClearAllPoints()
-                b:SetPoint("TOPLEFT", prev, "TOPRIGHT", 6, 0)
-                b:Show()
-                rowWidth = rowWidth + 6 + w
-            else
-                place(b, x, 6)
-                rowStart, rowWidth = b, w
-            end
-            prev = b
+            place(b, x, 2)
+            last = b
         end
-        flow.gap = flow.gap + 8
+        flow.gap = flow.gap + 12
     end
+    if not first then return end
+    -- Submitting is in the message box, where Send is, as in T3.
     local sending = askState.sent == ask.k and GetTime() - (askState.sentAt or 0) < ANSWER_TIMEOUT
-    askSend:SetText(sending and "Sending…" or "Send answer")
+    askSend:SetText(sending and "Submitting…" or (#ask.qs > 1 and "Submit answers" or "Submit answer"))
     askSend:SetEnabled(not sending and not blocked)
-    si = si + 1
-    local hint = askString(si)
-    hint:SetFontObject(Skin.fonts.small)
+    askSend:Show()
     if blocked then
-        place(askSend, x, 8)
+        si = si + 1
+        local hint = askString(si)
+        hint:SetFontObject(Skin.fonts.small)
         hint:SetWidth(width)
         hint:SetText("|cffff8000" .. blocked .. " Answer it in T3.|r")
         place(hint, x, 18 + SIZE.card)
-        showCard(first or askSend, hint)
+        showCard(first, hint)
     else
-        place(askSend, x, 18 + SIZE.card)
-        showCard(first or askSend, askSend)
-        hint:SetWidth(math.max(80, width - 140))
-        hint:SetText("or type your own answer below and press Enter")
-        hint:ClearAllPoints()
-        hint:SetPoint("LEFT", askSend, "RIGHT", 10, 0)
-        hint:Show()
+        flow.gap = 18 + SIZE.card
+        showCard(first, last)
     end
 end
 
@@ -2071,19 +2302,16 @@ function renderView()
     if selected and selected.new then
         messageScroll:Hide()
         newPanel:Show()
-        local e = envById(selected.env)
         local project = selectedProject()
         viewTitle:SetText("New thread")
-        setViewMeta(nil, "Type the task below and press Start.")
+        setViewMeta("")
+        -- Only what the layout can't say: it's turned off, or the picks wouldn't be heard.
         local blocked = blockedReason("new")
         newHelp:SetText(blocked and ("|cffff8000" .. blocked .. "|r")
-            or (inbox and inbox.sel and "Pick its model and permissions in the box below, or leave T3's defaults.")
+            or (inbox and inbox.sel and "")
             or "The thread uses the project's default model and mode.")
-        local noMachines = #(inbox and inbox.envs or {}) == 0
-        envMenu:SetLabel(e and e.name or (noMachines and "|cffff4040none linked|r" or "|cffff4040no longer linked: pick another|r"))
         projectMenu:SetLabel(project and project.t
-            or (selected.project and "|cffff4040gone: pick another|r" or "No project (scratch)"))
-        workspaceLabel:SetShown(selected.project ~= nil)
+            or (selected.project and "|cffff4040gone: pick another|r" or "No project"))
         workspaceMenu:SetShown(selected.project ~= nil)
         workspaceMenu:SetLabel(WORKSPACE_NAME[selected.worktree and "worktree" or "checkout"])
         return
@@ -2092,7 +2320,7 @@ function renderView()
     messageScroll:Show()
     if not selected then
         viewTitle:SetText("Pick a thread")
-        setViewMeta(nil, "")
+        setViewMeta("")
         flowStart(0)
         fit(true)
         return
@@ -2109,7 +2337,7 @@ function renderView()
     if view and view.br and view.br ~= "" then
         meta = meta .. " · " .. view.br
     end
-    setViewMeta(status, meta, view and view.prs)
+    setViewMeta(meta, view and view.prs)
     if not view then
         flowStart(0)
         placeMessage(messageString(1), "|cff" .. Skin.Hex("dim") .. "Loading…|r", false)
@@ -2169,7 +2397,7 @@ function renderView()
     end
     renderAsk(view)
     if WORKING[status] then
-        placeMessage(messageString(count + 2), "|cffffd100Working…|r", false)
+        placeMessage(messageString(count + 2), "|cff" .. Skin.Hex("muted") .. "Working…|r", false)
     end
     -- Sized now from what the game has laid out; `settle` sizes it again as text heights
     -- settle.
@@ -2181,7 +2409,8 @@ end
 
 -- The box is a card; its outline takes the focus color while you type.
 local inputScroll = CreateFrame("ScrollFrame", nil, right, "UIPanelScrollFrameTemplate")
--- It leaves room inside the card, under the text, for the row of selectors.
+-- It leaves room inside the card, under the text, for the model, effort and Send or Stop.
+-- In New Thread the card moves to the middle (Selectors.PlaceBox).
 inputScroll:SetPoint("BOTTOMLEFT", 28, 48)
 inputScroll:SetPoint("BOTTOMRIGHT", -40, 48)
 inputScroll:SetHeight(60)
@@ -2229,6 +2458,7 @@ placeholder:SetText("Message the agent (Shift+Enter for a new line)")
 input:SetScript("OnTextChanged", function(self, userInput)
     placeholder:SetShown(self:GetText() == "")
     UI.Picker.Update(userInput)
+    UI.ComposerButton()
 end)
 -- What the empty box says: what Enter does, or that the tray setting turned it off.
 setPlaceholder = function()
@@ -2257,6 +2487,7 @@ local Paste = {}
 do
     local MAX_PASTED = 8
     local PASTE_HEIGHT = 44
+    Paste.rowHeight = PASTE_HEIGHT + 6
 
     -- The message being written: "new" in New Thread, else "<machine>:<thread>".
     function Paste.DraftKey()
@@ -2490,27 +2721,35 @@ do
             if not c then return list end
             if c.new then list[1] = { text = "Default model" } end
             local providers, listed = providersOn(selected.env), false
+            -- Read-only: a started thread's models only show, and the menu still opens for its permissions.
+            local locked = not c.new and blockedReason("model") ~= nil
             for _, p in ipairs(providers) do
                 if #providers > 1 then list[#list + 1] = { text = p.t, note = true } end
                 for _, model in ipairs(p.m or {}) do
-                    list[#list + 1] = { text = model.t, value = { pv = p.id, m = model.id } }
+                    list[#list + 1] = { text = model.t, value = { pv = p.id, m = model.id }, note = locked }
                     listed = listed or (p.id == c.pv and model.id == c.m)
                 end
             end
             -- T3 lists its usual models only; the one a thread is on stays shown.
             if not c.new and not listed and c.m then
-                table.insert(list, 1, { text = c.mt or c.m:gsub("|", "||"), value = { pv = c.pv, m = c.m } })
+                table.insert(list, 1, { text = c.mt or c.m:gsub("|", "||"), value = { pv = c.pv, m = c.m }, note = locked })
             end
             if #list == 0 then list[1] = { text = "No models on this machine", note = true } end
+            -- As in T3, a thread that has started shows its permissions here.
+            if not c.new then
+                list[#list + 1] = { text = "Permissions", note = true }
+                list[#list + 1] = { text = MODE[c.rm] and MODE[c.rm].name or "Default", value = { access = true } }
+            end
             return list
         end,
         isSelected = function(value)
             local c = current()
-            if not c then return false end
+            if not c or (value and value.access) then return false end
             if not value then return c.new and c.m == nil end
             return value.pv == c.pv and value.m == c.m
         end,
         pick = function(value)
+            if value and value.access then return Selectors.OpenAccess(Selectors.modelMenu) end
             local c = current()
             if not c then return end
             local model, provider
@@ -2526,7 +2765,26 @@ do
             end
         end,
     })
-    modelMenu:SetPoint("BOTTOMLEFT", inputBg, "BOTTOMLEFT", 8, 7)
+    Selectors.modelMenu = modelMenu
+
+    -- New Thread's machine, under the box as in T3. A thread that has started stays on its own.
+    local machineMenu = chip("T3WoWMachineMenu", 190, {
+        entries = function()
+            local list = {}
+            for _, e in ipairs(inbox and inbox.envs or {}) do list[#list + 1] = { text = e.name, value = e.id } end
+            if #list == 0 then list[1] = { text = "No machines linked: link one in T3", note = true } end
+            return list
+        end,
+        isSelected = function(id) return composing() and selected.env == id end,
+        pick = function(id)
+            if not composing() or selected.env == id then return end
+            -- Another machine offers other models: what was picked for this one goes.
+            selected.env, selected.project = id, nil
+            selected.pv, selected.m, selected.ef, selected.rm = nil, nil, nil, nil
+            UI.Refresh()
+        end,
+    })
+    machineMenu:SetPoint("TOPLEFT", inputBg, "BOTTOMLEFT", 2, -6)
 
     local EFFORT_WIDTH, PERMISSION_WIDTH = 96, 148
     local effortMenu = chip("T3WoWEffortMenu", EFFORT_WIDTH, {
@@ -2555,20 +2813,24 @@ do
             end
         end,
     })
-    effortMenu:SetPoint("LEFT", modelMenu, "RIGHT", 6, 0)
+
+    -- Model, effort, then Send or Stop run along the bottom of the card, from its right edge.
+    function Selectors.PlaceRow(button)
+        local effort = Selectors.effortShown
+        effortMenu:ClearAllPoints()
+        effortMenu:SetPoint("RIGHT", button, "LEFT", -6, 0)
+        modelMenu:ClearAllPoints()
+        modelMenu:SetPoint("RIGHT", effort and effortMenu or button, "LEFT", -6, 0)
+        local used = 22 + button:GetWidth() + (effort and (EFFORT_WIDTH + 6) or 0)
+        modelMenu:SetWidth(math.min(220, math.max(110, inputBg:GetWidth() - used)))
+    end
 
     local permissionMenu = chip("T3WoWPermissionMenu", PERMISSION_WIDTH, {})
-    permissionMenu:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -8, 7)
+    permissionMenu:SetPoint("TOPRIGHT", inputBg, "BOTTOMRIGHT", -2, -6)
     permissionMenu.icon = Skin.Glyph(permissionMenu, "lock", 14, "muted", "OVERLAY")
     permissionMenu.icon:SetPoint("LEFT", 8, 0)
 
-    -- The game finds a new file only when it starts: a game started before this version
-    -- shows no icon rather than a square. Asked each time, as the answer can come a while
-    -- after SetTexture.
-    local function known(glyph)
-        local file = not glyph.GetTextureFilePath or glyph:GetTextureFilePath()
-        return file ~= nil and file ~= ""
-    end
+    local known = UI.GlyphKnown
 
     local POPOVER_WIDTH, SEGMENT_HEIGHT = 300, 28
     local popover = CreateFrame("Frame", "T3WoWPermissions", UIParent)
@@ -2577,7 +2839,6 @@ do
     popover:SetClampedToScreen(true)
     popover:EnableMouse(true)
     popover:SetWidth(POPOVER_WIDTH)
-    popover:SetPoint("BOTTOMRIGHT", permissionMenu, "TOPRIGHT", 0, 4)
     Skin.Box(popover, { shape = "panel", fill = "card", ring = "border", ringLayer = "BORDER" })
     popover:Hide()
     -- A click anywhere else closes it, as with the dropdown lists.
@@ -2674,36 +2935,80 @@ do
         popover:SetHeight(c.new and 122 or 192)
     end
 
-    permissionMenu:SetScript("OnClick", function()
+    -- Opens over what was clicked: the chip in New Thread, the model's menu in a thread.
+    function Selectors.OpenAccess(anchor)
         if popover:IsShown() then return popover:Hide() end
         local c = current()
         if not c then return end
+        popover:ClearAllPoints()
+        popover:SetPoint("BOTTOMRIGHT", anchor, "TOPRIGHT", 0, 4)
         renderPopover(c)
         catcher:Show()
         popover:Show()
-    end)
+    end
+    permissionMenu:SetScript("OnClick", function(self) Selectors.OpenAccess(self) end)
     permissionMenu:SetScript("OnHide", function() popover:Hide() end)
+    modelMenu:HookScript("OnHide", function() popover:Hide() end)
+
+    -- The box at the bottom of a thread; in New Thread, in the middle under T3's question,
+    -- no wider than it reads well. The card reaches past the text area (see inputBg), so
+    -- the offsets are for the card and what's over and under it to be centered as a whole.
+    function Selectors.PlaceBox(centered)
+        inputScroll:ClearAllPoints()
+        if not centered then
+            inputScroll:SetPoint("BOTTOMLEFT", 28, 48)
+            inputScroll:SetPoint("BOTTOMRIGHT", -40, 48)
+            input:SetWidth(messageWidth() - 24)
+            return
+        end
+        local textWidth = math.max(320, math.min(680, right:GetWidth() - 60)) - 36
+        inputScroll:SetWidth(textWidth)
+        inputScroll:SetPoint("CENTER", right, "CENTER", -8, -43)
+        input:SetWidth(textWidth)
+        -- Pasted images sit right over the box: the project moves up for them.
+        local raise = 14 + (#Paste.For("new") > 0 and Paste.rowHeight or 0)
+        local both = selected.project ~= nil
+        projectMenu:SetWidth(both and 200 or 240)
+        projectMenu:ClearAllPoints()
+        workspaceMenu:ClearAllPoints()
+        if both then
+            projectMenu:SetPoint("BOTTOMRIGHT", inputBg, "TOP", -3, raise)
+            workspaceMenu:SetPoint("BOTTOMLEFT", inputBg, "TOP", 3, raise)
+        else
+            projectMenu:SetPoint("BOTTOM", inputBg, "TOP", 0, raise)
+        end
+        newPanel.heading:ClearAllPoints()
+        newPanel.heading:SetPoint("BOTTOM", inputBg, "TOP", 0, raise + 38)
+    end
 
     function Selectors.Render()
+        local composingNew = composing() and true or false
+        Selectors.PlaceBox(composingNew)
+        machineMenu:SetShown(composingNew)
+        if composingNew then
+            local e = envById(selected.env)
+            local noMachines = #(inbox and inbox.envs or {}) == 0
+            machineMenu:SetLabel(e and e.name or (noMachines and "|cffff4040none linked|r" or "|cffff4040no longer linked: pick another|r"))
+        end
         local c = current()
         if not c then
             modelMenu:Hide()
             effortMenu:Hide()
             permissionMenu:Hide()
+            Selectors.effortShown = false
             return
         end
         local model = find(selected.env, c.pv, c.m)
-        -- The model takes what room the box has beside the two that keep their size.
-        modelMenu:SetWidth(math.min(220, math.max(110, inputBg:GetWidth() - EFFORT_WIDTH - PERMISSION_WIDTH - 28)))
-        modelMenu:SetShown(c.m ~= nil or #providersOn(selected.env) > 0)
+        -- A started thread's permissions are in this menu, so it shows even with no models.
+        modelMenu:SetShown(not c.new or c.m ~= nil or #providersOn(selected.env) > 0)
         modelMenu:SetLabel(model and model.t or c.mt or (c.m and c.m:gsub("|", "||")) or "Default model")
-        effortMenu:SetShown(model ~= nil and type(model.ef) == "table" and #model.ef > 0)
+        Selectors.effortShown = model ~= nil and type(model.ef) == "table" and #model.ef > 0
+        effortMenu:SetShown(Selectors.effortShown)
         effortMenu:SetLabel(c.ef and effortName(c.ef) or "Default")
         local changeable = c.new or not blockedReason("model")
-        modelMenu:SetEnabled(changeable and true or false)
         effortMenu:SetEnabled(changeable and true or false)
         local mode = MODE[c.rm]
-        permissionMenu:SetShown(true)
+        permissionMenu:SetShown(c.new and true or false)
         permissionMenu:SetLabel(mode and mode.name or "Default")
         Skin.SetGlyphFile(permissionMenu.icon, mode and mode.icon or "lock")
         local drawn = known(permissionMenu.icon)
@@ -2822,6 +3127,8 @@ local function sendCurrent()
     input:SetText("")
     UI.Refresh()
 end
+
+UI.SendCurrent = sendCurrent
 
 -- ---------------------------------------------------------------- the / $ and @ picker
 -- As in T3's composer: / at the start of a word lists the provider's commands and skills,
@@ -3040,9 +3347,11 @@ end)
 
 -- ---------------------------------------------------------------- buttons and status
 
-local refresh = button(frame, "Refresh", 84, function() ns.Link.Send({ t = "refresh" }) end)
-refresh:SetPoint("BOTTOMLEFT", 12, 10)
-local newThread = button(frame, "New Thread", 110, function()
+-- The footer starts with Settings (made with its panel, below) and then Refresh.
+local refresh = UI.IconButton(frame, "refresh", "Refresh", "Ref", function() ns.Link.Send({ t = "refresh" }) end)
+refresh:SetPoint("BOTTOMLEFT", 44, 10)
+-- As in T3, beside the search box.
+local newThread = UI.IconButton(frame, "compose", "New Thread", "New", function()
     local first = inbox and inbox.envs and inbox.envs[1]
     selected = { new = true, env = first and first.id or "" }
     UI.History.pending = nil
@@ -3050,33 +3359,48 @@ local newThread = button(frame, "New Thread", 110, function()
     UI.Refresh()
     input:SetFocus()
 end)
-newThread:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
+newThread:SetSize(26, 26)
+newThread:SetPoint("LEFT", search, "RIGHT", 4, 0)
 local reload = button(frame, "Reload UI", 100, function() ReloadUI() end)
-reload:SetPoint("LEFT", newThread, "RIGHT", 6, 0)
+reload:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
 
-local send = button(frame, "Send", 90, sendCurrent, "primary")
-send:SetPoint("BOTTOMRIGHT", -22, 10)
-local settle = button(frame, "Settle", 90, function()
-    if not selected or selected.new then return end
-    local listed = selectedThread()
-    local kind = (listed and listed.set) and "unsettle" or "settle"
-    if blockedReason(kind) then return UI.Notice(blockedReason(kind)) end
-    ns.Link.Send({ t = kind, e = selected.env, id = selected.id })
-end)
-settle:SetPoint("RIGHT", send, "LEFT", -6, 0)
-local stop = button(frame, "Stop", 80, function()
+-- Send and Stop share one place in the message box, next to the model, as in T3.
+local send = button(inputBg, "Send", 64, sendCurrent, "primary")
+send:SetHeight(24)
+send:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -8, 6)
+local stop = button(inputBg, "Stop", 76, function()
     if not selected or selected.new then return end
     if blockedReason("stop") then return UI.Notice(blockedReason("stop")) end
     local s = ns.Link.Send({ t = "stop", e = selected.env, id = selected.id })
     stopping = { env = selected.env, id = selected.id, s = s, at = GetTime() }
     UI.Refresh()
 end)
-stop:SetPoint("RIGHT", settle, "LEFT", -6, 0)
+stop:SetHeight(24)
+stop:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -8, 6)
+stop:Hide()
+-- An agent's question is answered from the same place.
+askSend:SetParent(inputBg)
+askSend:SetHeight(24)
+askSend:ClearAllPoints()
+askSend:SetPoint("BOTTOMRIGHT", inputBg, "BOTTOMRIGHT", -8, 6)
+
+-- A run shows Stop, until there's something to send: then it's Send, which steers or queues.
+function UI.ComposerButton()
+    local listed = selectedThread()
+    local isStopping = stopping ~= nil and selected ~= nil and stopping.env == selected.env and stopping.id == selected.id
+    local writing = input:GetText():find("%S") ~= nil or #Paste.For(Paste.DraftKey()) > 0
+    local answering = pendingAsk() ~= nil
+    local showStop = ((listed ~= nil and WORKING[listed.s] == true) or isStopping) and not writing and not answering
+    stop:SetShown(showStop)
+    send:SetShown(not showStop and not answering)
+    Selectors.PlaceRow((answering and askSend) or (showStop and stop) or send)
+end
 
 local statusLine = frame:CreateFontString(nil, "OVERLAY")
 statusLine:SetFontObject(Skin.fonts.small)
 statusLine:SetPoint("LEFT", reload, "RIGHT", 12, 0)
-statusLine:SetPoint("RIGHT", stop, "LEFT", -12, 0)
+-- Level with the footer's buttons (10 up, 28 tall).
+statusLine:SetPoint("RIGHT", frame, "BOTTOMRIGHT", -22, 24)
 statusLine:SetJustifyH("LEFT")
 statusLine:SetWordWrap(false)
 
@@ -3138,7 +3462,9 @@ local function renderStatus()
     connectionPill.proxy:SetWidth(width + 30)
     local dot = connected:match("^|cff(%x%x%x%x%x%x)")
     connectionDot:SetColors(dot and { hexColor(dot) } or "dim")
-    reload:SetShown(ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil)
+    local showReload = (ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil) and true or false
+    reload:SetShown(showReload)
+    statusLine:SetPoint("LEFT", showReload and reload or refresh, "RIGHT", 8, 0)
     connectionPill.hit:SetShown(connected:find("Reload UI", 1, true) ~= nil)
     local line = notice
     if not line and inbox and inbox.notes and #inbox.notes > 0 then
@@ -3148,13 +3474,12 @@ local function renderStatus()
     if link.queue > 0 then line = "Sending…" end
     statusLine:SetText(line or "")
     local listed = selectedThread()
-    settle:SetText(listed and listed.set and "Unsettle" or "Settle")
-    settle:SetEnabled(listed ~= nil and not blockedReason(listed.set and "unsettle" or "settle"))
     local isStopping = stopping ~= nil and selected ~= nil and stopping.env == selected.env and stopping.id == selected.id
     stop:SetText(isStopping and "Stopping…" or "Stop")
     stop:SetEnabled(not isStopping and listed ~= nil and WORKING[listed.s] == true and not blockedReason("stop"))
-    send:SetText((selected and selected.new and "Start") or (pendingAsk() and "Answer") or "Send")
-    send:SetEnabled(selected ~= nil and not blockedReason((selected.new and "new") or (pendingAsk() and "answer") or "send"))
+    UI.ComposerButton()
+    send:SetText((selected and selected.new and "Start") or "Send")
+    send:SetEnabled(selected ~= nil and not blockedReason((selected.new and "new") or "send"))
     setPlaceholder()
 end
 
@@ -3405,7 +3730,7 @@ local function showToast(event)
     toast.icon:SetShown(icon ~= "?")
     toast.mark:SetTextColor(r, g, b)
     toast.mark:SetShown(icon == "?")
-    toast.head:SetText(format("T3 WoW · |cff%s%s|r", s[2], s[1]))
+    toast.head:SetText(format("T3 WoW · |cff%s%s|r", s[2], s.notice or s[1]))
     toast.title:SetText(event.t ~= "" and event.t or "Thread")
     toast.sub:SetText((machine and machine.name or "") .. (event.id and (toast.inT3 and "  ·  click to open in T3" or "  ·  click to open") or ""))
     -- Classic outlines a notification in its status color, as the game's own alerts do.
@@ -3443,7 +3768,7 @@ function UI.Alert(event)
     if not s[EVENT_SETTING[event.s] or "onCompleted"] then return "not shown: turned off in Settings" end
     local status = STATUS[event.s] or { event.s, "ffffff" }
     if s.chat then
-        print(format("|cff8f8fffT3|r %s: |cff%s%s|r", event.t ~= "" and event.t or "Thread", status[2], status[1]))
+        print(format("|cff8f8fffT3|r %s: |cff%s%s|r", event.t ~= "" and event.t or "Thread", status[2], status.notice or status[1]))
     end
     if s.sound then playSound(event.s) end
     if s.toasts then showToast(event) end
@@ -3681,8 +4006,8 @@ do
     end)
     settingsPanel:SetScript("OnHide", function() setAnchorUnlocked(false) end)
 
-    local settingsButton = button(frame, "Settings", 76, function() settingsPanel:SetShown(not settingsPanel:IsShown()) end, "ghost")
-    settingsButton:SetPoint("TOPRIGHT", -38, -6)
+    local settingsButton = UI.IconButton(frame, "gear", "Settings", "Set", function() settingsPanel:SetShown(not settingsPanel:IsShown()) end)
+    settingsButton:SetPoint("BOTTOMLEFT", 12, 10)
 end
 
 function UI.ShowSettings()
@@ -3821,6 +4146,7 @@ end
 function UI.OnInbox(data)
     announce(data)
     inbox = data
+    UI.TrackUnread(data)
     UI.Waits.CatchUp(data)
     if not restartSaid and restartNote() then
         restartSaid = true
@@ -3847,6 +4173,7 @@ function UI.ForgetLogin()
     announced = false
     UI.Waits.caughtUp = {}
     T3WoWDB.seenWaiting = nil
+    T3WoWDB.unread, T3WoWDB.lastStatus = nil, nil
     while #toasts > 0 do removeToast(toasts[#toasts]) end
     UI.Refresh()
 end
