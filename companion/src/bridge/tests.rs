@@ -2262,6 +2262,30 @@ fn a_running_delegated_task_says_so_and_its_card_fills_in_once_it_ends() {
 }
 
 #[test]
+fn a_compaction_shows_as_a_line_where_t3_shows_it_once_it_is_done() {
+    let mut rig = Rig::new(43_000_000);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["/compact", "after it"]));
+    let activity = vec![
+        json!({ "position": 0, "itemId": "m0", "type": "user_message", "status": "completed", "text": "/compact" }),
+        json!({ "position": 1, "itemId": "c1", "type": "compaction", "status": "running", "title": "Context compacted", "text": null, "updatedAt": "2026-11-06T10:00:30Z" }),
+        json!({ "position": 2, "itemId": "m2", "type": "assistant_message", "status": "completed", "text": "after it" }),
+    ];
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "dc": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(view_items(&rig).len(), 2, "still under way");
+    rig.t3.activity.lock().unwrap().get_mut("t1").unwrap()[1]["status"] = json!("completed");
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert_eq!(items[0]["x"], "/compact");
+    assert_eq!(items[1], json!({ "r": "a", "x": "Context compacted", "rule": 1 }));
+    assert_eq!(items[2]["x"], "after it");
+}
+
+#[test]
 fn without_an_addon_that_draws_cards_links_still_read_as_words_and_no_activity_is_read() {
     let mut rig = delegate_rig(42_000_000, false, "completed", "VERDICT: APPROVE");
     rig.bridge.tick();
@@ -3007,4 +3031,51 @@ fn the_selectors_work_on_the_signed_in_t3() {
     assert_eq!(started["runtimeMode"], "approval-required");
     assert_eq!(after["modelSelection"]["options"], json!([{ "id": "effort", "value": "medium" }]));
     assert_eq!(after["runtimeMode"], "approval-required", "a change of model leaves the permissions alone");
+}
+
+#[test]
+fn a_composer_list_keeps_what_can_be_typed_and_says_how_each_runs() {
+    let cache = json!({
+        "slashCommands": [
+            { "name": "compact", "description": "Summarize  it | all" },
+            { "name": "review", "description": "Review" },
+            { "name": "has space" },
+        ],
+        "skills": [
+            { "name": "review", "description": "Skill text", "enabled": true },
+            { "name": "imagegen", "description": "Make one" },
+            { "name": "off", "enabled": false },
+        ],
+    });
+    assert_eq!(compact_picks(&cache), vec![
+        json!({ "n": "compact", "d": "Summarize it || all", "c": true }),
+        json!({ "n": "review", "d": "Review", "c": true, "s": true }),
+        json!({ "n": "imagegen", "d": "Make one", "s": true }),
+    ]);
+}
+
+#[test]
+fn only_this_pcs_t3_lists_its_composers_and_a_bad_read_keeps_the_last() {
+    let dir = std::env::temp_dir().join(format!("t3wow-picks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("claudeAgent.json"), json!({ "slashCommands": [{ "name": "compact", "description": "Short" }] }).to_string()).unwrap();
+    // Without the folder (T3 on another machine) nothing is listed.
+    let remote = rig_with_catalog(42_000_000);
+    assert!(remote.bridge.snapshot()["picks"].is_null());
+
+    let mut rig = Rig::new(43_000_000);
+    *rig.t3.capabilities.lock().unwrap() = capabilities();
+    rig.bridge.set_provider_caches(Some(dir.clone()));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let expected = json!([{ "pv": "claudeAgent", "e": 1, "c": [{ "n": "compact", "d": "Short", "c": true }] }]);
+    assert_eq!(rig.bridge.snapshot()["picks"], expected, "this PC only, though the Mac offers the same provider");
+
+    std::fs::write(dir.join("claudeAgent.json"), "{ half written").unwrap();
+    rig.advance(CATALOG_TTL_MS);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["picks"], expected);
+    let _ = std::fs::remove_dir_all(&dir);
 }

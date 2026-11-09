@@ -92,6 +92,8 @@ local function frame(kind, name)
   function f:IsShown() return self.shown end
   function f:SetText(text) self.text = text or "" end
   function f:GetText() return self.text end
+  function f:Insert(text) self.text = self.text .. text end
+  function f:GetCursorPosition() return #self.text end
   function f:SetEnabled(on) self.enabled = on end
   function f:GetFontString() return fontString() end
   function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end

@@ -1135,10 +1135,13 @@ do
                     put(s:sub(1, e), mono, color)
                     s = s:sub(e + 1)
                 end
-                if s ~= "" then
-                    x, row = 0, row + 1
-                    s = s:gsub("^ +", "")
+                -- Only spaces left: the gap before the next run, not a reason for a new line.
+                if not s:find("[^ ]") then
+                    x = x + #s * space[mono]
+                    break
                 end
+                x, row = 0, row + 1
+                s = s:gsub("^ +", "")
             end
         end
         local firstLine = true
@@ -1817,8 +1820,9 @@ local function renderAsk(view)
     end
 end
 
--- The line T3 draws where a thread moved to another provider: its text in the middle, a
--- rule each side. Each message that has one (item.ho) gets it above itself.
+-- The line T3 draws where a thread moved to another provider or its context was compacted:
+-- its text in the middle, a rule each side. A message that moved provider (item.ho) gets it
+-- above itself; a compaction (item.rule) is one in the list.
 local Handoff = { pool = {}, used = 0 }
 
 function Handoff.Release()
@@ -1830,7 +1834,7 @@ function Handoff.Release()
     Handoff.used = 0
 end
 
-function Handoff.Place(what)
+function Handoff.Place(text)
     Handoff.used = Handoff.used + 1
     local line = Handoff.pool[Handoff.used]
     if not line then
@@ -1844,7 +1848,7 @@ function Handoff.Place(what)
         Handoff.pool[Handoff.used] = line
     end
     line.text:SetWidth(messageWidth() - 8)
-    line.text:SetText("Context handoff · " .. what)
+    line.text:SetText(text)
     place(line.text, 4, 18)
     local room = math.ceil((line.text:GetStringWidth() or 0) / 2) + 8
     line.left:ClearAllPoints()
@@ -1940,11 +1944,14 @@ function renderView()
     local count = #items
     for i, item in ipairs(items) do
         local fs = messageString(i)
-        if item.ho then Handoff.Place(item.ho) end
+        if item.ho then Handoff.Place("Context handoff · " .. item.ho) end
+        local rule = item.rule == 1
         local card = type(item.d) == "table"
         local lost = not card and item.lost == 1
         local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
-        if card then
+        if rule then
+            Handoff.Place(item.x)
+        elseif card then
             placeCard(fs, item.d)
         elseif lost then
             Pictures.Lost(fs, item.r == "u")
@@ -1956,7 +1963,7 @@ function renderView()
         -- A picture enlarges instead.
         fs.hit.picture = picture and item.im or false
         -- A picture that couldn't be loaded has nothing to enlarge or copy.
-        fs.hit:SetShown(not lost)
+        fs.hit:SetShown(not lost and not rule)
     end
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may
@@ -2002,6 +2009,10 @@ inputBg:SetPoint("BOTTOMRIGHT", inputScroll, 26, -36)
 inputBg:SetFrameLevel(math.max(0, inputScroll:GetFrameLevel() - 1))
 local inputBox = Skin.Box(inputBg, { shape = "panel", fill = "input", ring = "border" })
 
+-- The list that opens as you type / $ or @ (filled in further down, once what it reads exists).
+-- On UI, not a local of its own: the file has all of Lua's 200 locals in one chunk.
+UI.Picker = {}
+
 local input = CreateFrame("EditBox", nil, inputScroll)
 input:SetMultiLine(true)
 input:SetAutoFocus(false)
@@ -2017,17 +2028,24 @@ input:SetScript("OnEditFocusLost", function()
     inputBox:SetColors(nil, "border")
     -- A window closing says so itself.
     if frame:IsShown() then ns.Link.Send({ t = "ui", o = true, f = false }) end
+    -- Not at once: a click on one of the picker's rows may be what took the focus.
+    C_Timer.After(0.2, function()
+        if not input:HasFocus() then UI.Picker.Close() end
+    end)
 end)
 input:SetMaxBytes(2400)
 inputScroll:SetScrollChild(input)
-input:SetScript("OnEscapePressed", input.ClearFocus)
+input:SetScript("OnEscapePressed", function(self)
+    if not UI.Picker.Close() then self:ClearFocus() end
+end)
 inputScroll:SetScript("OnMouseDown", function() input:SetFocus() end)
 local placeholder = input:CreateFontString(nil, "OVERLAY")
 placeholder:SetFontObject(Skin.fonts.small)
 placeholder:SetPoint("TOPLEFT", 0, -3)
 placeholder:SetText("Message the agent (Shift+Enter for a new line)")
-input:SetScript("OnTextChanged", function(self)
+input:SetScript("OnTextChanged", function(self, userInput)
     placeholder:SetShown(self:GetText() == "")
+    UI.Picker.Update(userInput)
 end)
 -- What the empty box says: what Enter does, or that the tray setting turned it off.
 setPlaceholder = function()
@@ -2085,6 +2103,7 @@ do
     end
 
     input:SetScript("OnKeyDown", function(self, key)
+        UI.Picker.Key(self, key)
         if key ~= "V" or not (IsControlKeyDown() or (IsMetaKeyDown and IsMetaKeyDown())) then return end
         -- Once the game has pasted: no text came in, so look for an image.
         local before = self:GetText()
@@ -2255,6 +2274,12 @@ do
             pending = nil
         end
         return cfg
+    end
+
+    -- The provider the message being written goes to, when that's known.
+    function Selectors.Provider()
+        local c = current()
+        return c and c.pv
     end
 
     -- Sends a new model or effort for the open thread.
@@ -2597,9 +2622,9 @@ local function sendCurrent()
         return
     end
     local command = selected.new
-        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = text,
+        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = UI.Picker.Expand(text),
             pv = selected.pv, md = selected.m, ef = selected.ef, rm = selected.rm }
-        or { t = "send", e = selected.env, id = selected.id, m = text }
+        or { t = "send", e = selected.env, id = selected.id, m = UI.Picker.Expand(text) }
     if not ns.Link.Fits(command) then
         UI.Notice("That message is too long to send from the game: shorten it.")
         return
@@ -2615,8 +2640,219 @@ local function sendCurrent()
     UI.Refresh()
 end
 
+-- ---------------------------------------------------------------- the / $ and @ picker
+-- As in T3's composer: / at the start of a word lists the provider's commands and skills,
+-- $ lists its skills, and @ lists your other machines. What you pick goes into the
+-- box as text, the way T3's own composer writes it, and T3 finds it there. MCP doesn't say what
+-- a provider offers, so inbox.picks comes from T3's cache on this PC ({ e = machine, pv =
+-- provider, c = { { n = name, d = description, c = runs as /name, s = runs as $name } } });
+-- other machines have no list. Each update costs one of the session's 200, so the list comes
+-- once and is filtered here. It follows the end of the text only: where the game counts the
+-- cursor in bytes or in letters doesn't matter that way, and a pick needs no cursor math.
+do
+    local Picker = UI.Picker
+    local MAX_ROWS, ROW_HEIGHT, PAD = 8, 22, 4
+    local list = CreateFrame("Frame", "T3WoWPicker", frame)
+    list:SetFrameStrata("FULLSCREEN_DIALOG")
+    list:SetPoint("BOTTOMLEFT", inputBg, "TOPLEFT", 0, 4)
+    list:SetPoint("BOTTOMRIGHT", inputBg, "TOPRIGHT", 0, 4)
+    list:EnableMouse(true)
+    list:Hide()
+    Skin.Box(list, { shape = "control", fill = "card", ring = "border", ringLayer = "BORDER" })
+
+    local rows, shown, active, tokenBytes, owner = {}, {}, 1, 0, nil
+
+    local function paint()
+        for index, item in ipairs(shown) do
+            local r = rows[index]
+            r.label:SetText(item.text)
+            r.note:SetText(item.note or "")
+            if index == active then r.lit:Show() else r.lit:Hide() end
+            r:Show()
+        end
+        for index = #shown + 1, #rows do rows[index]:Hide() end
+        list:SetHeight(#shown * ROW_HEIGHT + 2 * PAD)
+    end
+
+    local function row(index)
+        if rows[index] then return rows[index] end
+        local r = CreateFrame("Button", nil, list)
+        r:SetHeight(ROW_HEIGHT)
+        r:SetPoint("TOPLEFT", PAD, -PAD - (index - 1) * ROW_HEIGHT)
+        r:SetPoint("TOPRIGHT", -PAD, -PAD - (index - 1) * ROW_HEIGHT)
+        r.lit = Skin.Box(r, { shape = "control", fill = "hover", layer = "BORDER", sub = 0 })
+        r.lit:Hide()
+        r.label = r:CreateFontString(nil, "OVERLAY")
+        r.label:SetFontObject(Skin.fonts.text)
+        r.label:SetPoint("LEFT", 8, 0)
+        r.label:SetWordWrap(false)
+        r.note = r:CreateFontString(nil, "OVERLAY")
+        r.note:SetFontObject(Skin.fonts.small)
+        r.note:SetPoint("LEFT", r.label, "RIGHT", 10, 0)
+        r.note:SetPoint("RIGHT", -8, 0)
+        r.note:SetJustifyH("LEFT")
+        r.note:SetWordWrap(false)
+        r:SetScript("OnEnter", function()
+            active = index
+            paint()
+        end)
+        r:SetScript("OnClick", function() Picker.Accept(index) end)
+        rows[index] = r
+        return r
+    end
+
+    -- Your other machines. Only from a thread on this T3's own machine: a linked machine's
+    -- agent may have no link back to the others.
+    local function machines()
+        local found, own = {}, inbox and inbox.envs and inbox.envs[1]
+        if not selected or not own or selected.env ~= own.id then return found end
+        for _, e in ipairs(inbox.envs) do
+            if e ~= own and e.ok and e.id ~= "" then found[#found + 1] = e end
+        end
+        return found
+    end
+
+    -- Further into a message a skill is written as $name, which T3 runs from anywhere.
+    local function candidates(mark, leading)
+        local found, seen = {}, {}
+        if mark == "@" then
+            for _, e in ipairs(machines()) do
+                found[#found + 1] = { key = e.name, text = "@" .. e.name, note = "Machine" }
+            end
+            return found
+        end
+        local index, provider = envIndexById(selected.env), Selectors.Provider()
+        for _, p in ipairs(inbox and type(inbox.picks) == "table" and inbox.picks or {}) do
+            if type(p) == "table" and p.e == index and (not provider or p.pv == provider) then
+                for _, c in ipairs(type(p.c) == "table" and p.c or {}) do
+                    if not seen[c.n] and (mark == "/" or c.s) then
+                        seen[c.n] = true
+                        local slash = mark == "/" and c.c and (leading or not c.s)
+                        found[#found + 1] = { key = c.n, text = (slash and "/" or "$") .. c.n, note = c.d }
+                    end
+                end
+            end
+        end
+        return found
+    end
+
+    -- What's being typed at the end of the text, if it asks for the list.
+    local function parse(text)
+        local token = text:match("(%S*)$")
+        local mark, query = token:sub(1, 1), token:sub(2)
+        if not query:find("^[%w:_%.%-]*$") then return nil end
+        if mark == "$" or mark == "@" or mark == "/" then return mark, query, token, text:find("^%s*%S*$") ~= nil end
+    end
+
+    -- Starting with what you typed first, then containing it; alphabetical within each.
+    local function matching(items, query)
+        local q, found = query:lower(), {}
+        for _, item in ipairs(items) do
+            local at = item.key:lower():find(q, 1, true)
+            if at then
+                item.rank = at == 1 and 1 or 2
+                found[#found + 1] = item
+            end
+        end
+        table.sort(found, function(a, b)
+            if a.rank ~= b.rank then return a.rank < b.rank end
+            return a.key < b.key
+        end)
+        for index = #found, MAX_ROWS + 1, -1 do found[index] = nil end
+        return found
+    end
+
+    -- Says whether it was open.
+    function Picker.Close()
+        local was = list:IsShown()
+        list:Hide()
+        return was
+    end
+
+    -- Only for what you type: the box filled back in after a failed send opens nothing.
+    function Picker.Update(userInput)
+        local text = input:GetText()
+        -- Off by one at most is still the end: the game may not have moved the cursor yet.
+        local away = input:GetCursorPosition() < (strlenutf8 or string.len)(text) - 1
+        if not userInput or not selected or pendingAsk() or away then return Picker.Close() end
+        local mark, query, token, leading = parse(text)
+        local found = mark and matching(candidates(mark, leading), query) or {}
+        if #found == 0 then return Picker.Close() end
+        shown, active, tokenBytes, owner = found, 1, #token, Paste.DraftKey()
+        for index = 1, #shown do row(index) end
+        paint()
+        list:Show()
+    end
+
+    -- Moving to another thread leaves the list behind.
+    function Picker.Sync()
+        if owner ~= Paste.DraftKey() then Picker.Close() end
+    end
+
+    function Picker.Move(step)
+        if not list:IsShown() then return end
+        active = (active - 1 + step) % #shown + 1
+        paint()
+    end
+
+    -- Puts a row's text in place of what was being typed. False when there's nothing to pick.
+    function Picker.Accept(index)
+        local item = list:IsShown() and shown[index or active]
+        if not item then return false end
+        local text = input:GetText()
+        Picker.Close()
+        -- Insert leaves the cursor after it; a SetText might not.
+        input:SetText("")
+        input:Insert(text:sub(1, #text - tokenBytes) .. item.text .. " ")
+        input:SetFocus()
+        return true
+    end
+
+    -- An @machine goes out as T3 stores one: a link it reads for the chip, the machine's id in it.
+    function Picker.Expand(text)
+        local others = machines()
+        -- The longest first: "@AIQ Mac" isn't "@AIQ" followed by a word.
+        table.sort(others, function(a, b) return #a.name > #b.name end)
+        for _, e in ipairs(others) do
+            local token, from = "@" .. e.name, 1
+            local label = e.name:gsub("%]", "")
+            local reference = format("[%s](t3-context://v1/environment/environment_%s)", label, e.id)
+            while true do
+                local first, last = text:find(token, from, true)
+                if not first then break end
+                local before, after = text:sub(first - 1, first - 1), text:sub(last + 1, last + 1)
+                if (before == "" or before:find("%s")) and (after == "" or after:find("%s")) then
+                    text = text:sub(1, first - 1) .. reference .. text:sub(last + 1)
+                    from = first + #reference
+                else
+                    from = last + 1
+                end
+            end
+        end
+        return text
+    end
+
+    input:SetScript("OnTabPressed", function() Picker.Accept() end)
+    -- The arrow keys, seen as key presses: a box of several lines keeps them for its cursor
+    -- and the game never fires OnArrowPressed on it.
+    function Picker.Key(box, key)
+        if not list:IsShown() then return end
+        if key == "UP" or key == "DOWN" then
+            Picker.Move(key == "DOWN" and 1 or -1)
+            -- The cursor moved too: back to the end, where the list works.
+            C_Timer.After(0, function() box:SetCursorPosition(#box:GetText()) end)
+        elseif key == "LEFT" or key == "RIGHT" then
+            Picker.Close()
+        end
+    end
+end
+
 input:SetScript("OnEnterPressed", function(self)
-    if IsShiftKeyDown() then self:Insert("\n") else sendCurrent() end
+    if IsShiftKeyDown() then
+        self:Insert("\n")
+    elseif not UI.Picker.Accept() then
+        sendCurrent()
+    end
 end)
 
 -- ---------------------------------------------------------------- buttons and status
@@ -3219,6 +3455,7 @@ function UI.Refresh()
     renderView()
     Paste.Render()
     Selectors.Render()
+    UI.Picker.Sync()
     renderStatus()
 end
 
