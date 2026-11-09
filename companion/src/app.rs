@@ -102,6 +102,13 @@ pub fn t3_named(label: &str) -> String {
 }
 
 /// The tray's line while an update runs.
+/// What choosing Update installs, given the release on offer and a fresh look at GitHub:
+/// whatever GitHub says is newest now, or nothing if the release was withdrawn. A failed
+/// look doesn't stand in the way: the offered release is still checked when it downloads.
+fn release_to_install(offered: Release, newest: Result<Option<Release>, String>) -> Option<Release> {
+    newest.unwrap_or(Some(offered))
+}
+
 pub fn update_step_text(version: &str, step: Step) -> String {
     match step {
         Step::Downloading(Some(percent)) => format!("Downloading update {version}… {percent}%"),
@@ -245,27 +252,42 @@ impl App {
         self.notify(Notice::new(Level::Info, title, checks.description()));
     }
 
-    /// Downloads and swaps in the release, showing how far it has got; `then` runs on success
-    /// (the tray restarts, and the new companion says it was updated).
-    pub fn install_update(self: &Arc<App>, release: Release, then: impl FnOnce() + Send + 'static) {
-        let version = release.version.clone();
-        *self.update.lock().unwrap() = Update::Installing(version.clone());
-        self.set_activity(Task::Update, Some(update_step_text(&version, Step::Downloading(None))));
-        self.notify(Notice::new(Level::Info, format!("Updating T3 WoW to {version}"), "Downloading it now. T3 WoW restarts by itself when it's done."));
+    /// Looks once more for the newest release (the offer can be hours old), then downloads
+    /// and swaps it in, showing how far it has got; `then` runs on success (the tray
+    /// restarts, and the new companion says it was updated).
+    pub fn install_update(self: &Arc<App>, offered: Release, then: impl FnOnce() + Send + 'static) {
+        *self.update.lock().unwrap() = Update::Checking;
+        self.set_activity(Task::Update, Some("Checking for updates…".into()));
         let app = Arc::clone(self);
-        std::thread::spawn(move || match updater::install(&release, &|step| app.set_activity(Task::Update, Some(update_step_text(&version, step)))) {
-            Ok(()) => {
-                app.set_activity(Task::Update, Some("Restarting T3 WoW…".into()));
-                let text = format!("Updated from {} and restarted. If WoW is running, it needs a restart to load the new addon: {RESTART_WOW}", updater::current_version());
-                notice_after_restart(&Notice::new(Level::Info, format!("T3 WoW updated to {version}"), text));
-                log::line(&format!("Updated to {version}; restarting."));
-                then();
+        std::thread::spawn(move || {
+            let newest = updater::check();
+            if let Err(error) = &newest {
+                log::line(&format!("Update re-check failed, so installing the release on offer: {error}"));
             }
-            Err(error) => {
+            let Some(release) = release_to_install(offered, newest) else {
                 app.set_activity(Task::Update, None);
-                app.notify(Notice::new(Level::Error, format!("Update to {version} failed"), format!("{error}. Choose Update to {version} in the tray menu to try again.")));
-                // Still out there: the menu offers it again.
-                *app.update.lock().unwrap() = Update::Available(release);
+                app.notify(Notice::new(Level::Info, "T3 WoW is up to date", format!("You have {}, the newest release.", updater::current_version())));
+                *app.update.lock().unwrap() = Update::UpToDate;
+                return;
+            };
+            let version = release.version.clone();
+            *app.update.lock().unwrap() = Update::Installing(version.clone());
+            app.set_activity(Task::Update, Some(update_step_text(&version, Step::Downloading(None))));
+            app.notify(Notice::new(Level::Info, format!("Updating T3 WoW to {version}"), "Downloading it now. T3 WoW restarts by itself when it's done."));
+            match updater::install(&release, &|step| app.set_activity(Task::Update, Some(update_step_text(&version, step)))) {
+                Ok(()) => {
+                    app.set_activity(Task::Update, Some("Restarting T3 WoW…".into()));
+                    let text = format!("Updated from {} and restarted. If WoW is running, it needs a restart to load the new addon: {RESTART_WOW}", updater::current_version());
+                    notice_after_restart(&Notice::new(Level::Info, format!("T3 WoW updated to {version}"), text));
+                    log::line(&format!("Updated to {version}; restarting."));
+                    then();
+                }
+                Err(error) => {
+                    app.set_activity(Task::Update, None);
+                    app.notify(Notice::new(Level::Error, format!("Update to {version} failed"), format!("{error}. Choose Update to {version} in the tray menu to try again.")));
+                    // Still out there: the menu offers it again.
+                    *app.update.lock().unwrap() = Update::Available(release);
+                }
             }
         });
     }
@@ -765,6 +787,21 @@ mod tests {
         app.set_activity(Task::Update, None);
         app.set_activity(Task::SignIn, None);
         assert_eq!(app.activity(), None);
+    }
+
+    #[test]
+    fn choosing_update_installs_the_newest_release_github_knows_of() {
+        let release = |version: &str| Release {
+            version: version.into(),
+            exe_url: format!("https://x/{version}/exe"),
+            sha_url: format!("https://x/{version}/sha"),
+            sig_url: None,
+        };
+        assert_eq!(release_to_install(release("0.7.0"), Ok(Some(release("0.7.1")))), Some(release("0.7.1")), "a newer one came out since the offer");
+        assert_eq!(release_to_install(release("0.7.0"), Ok(Some(release("0.7.0")))), Some(release("0.7.0")));
+        assert_eq!(release_to_install(release("0.7.1"), Ok(Some(release("0.7.0")))), Some(release("0.7.0")), "the offered one was withdrawn, an older one is newest");
+        assert_eq!(release_to_install(release("0.7.0"), Ok(None)), None, "withdrawn, and nothing newer than this companion is left");
+        assert_eq!(release_to_install(release("0.7.0"), Err("GitHub answered 403".into())), Some(release("0.7.0")), "a failed look still installs the offer");
     }
 
     #[test]
