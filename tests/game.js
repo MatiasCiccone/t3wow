@@ -106,6 +106,9 @@ local function frame(kind, name)
   function f:SetPoint(...) self.point = { ... } end
   function f:ClearAllPoints() self.point = nil end
   function f:SetSize(w, h) self.width, self.height = w, h end
+  function f:SetHeight(h) self.height = h end
+  function f:SetParent(parent) self.parent = parent end
+  function f:GetParent() return self.parent end
   -- Textures: the file asked for, and its file id as the game gives it (none for a file
   -- the game didn't find at startup, listed in missingTextures).
   function f:SetTexture(path) self.texturePath = path end

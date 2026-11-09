@@ -543,6 +543,68 @@ return "ok"
 `);
 });
 
+test("Working, Snoozed and Settled are docked at the bottom and open upward, leaving Open room", () => {
+  run(`
+local function header(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and f.text.text == label and f.shown then return f end
+  end
+end
+local function click(h) h.scripts.OnClick(h) end
+local window = T3WoWFrame
+-- 500 of this is the list: under the title bar and search box, over the footer.
+window.height = 640
+function window:GetHeight() return self.height end
+local threads = { { e = 1, id = "w", t = "W", s = "running", set = false, at = time(), p = "" } }
+local function add(prefix, count, extra)
+  for i = 1, count do
+    local t = { e = 1, id = prefix .. i, t = prefix, s = "completed", set = false, at = time(), p = "" }
+    for k, v in pairs(extra) do t[k] = v end
+    threads[#threads + 1] = t
+  end
+end
+add("o", 1, {})
+add("z", 1, { sn = true })
+add("s", 30, { set = true })
+inboxWith(ENVS, { threads = threads })
+
+local open, working, snoozed, settled = header("Open"), header("Working"), header("Snoozed"), header("Settled")
+local dockChild = working.parent
+assert(open.parent ~= dockChild, "Open is in the dock")
+assert(snoozed.parent == dockChild and settled.parent == dockChild, "a group is out of the dock")
+local dock = dockChild.parent
+assert(dock.point[1] == "BOTTOMLEFT", "the dock isn't at the bottom")
+local function bar() return { SetShown = function(self, shown) self.on = shown end } end
+local list = open.parent.parent
+list.ScrollBar, dock.ScrollBar = bar(), bar()
+
+-- Folded, the dock is just its three headers; opening one makes it taller, so it grows up.
+click(working)
+assert(dock.height == 84, "folded dock is " .. tostring(dock.height))
+assert(list.ScrollBar.on == false and dock.ScrollBar.on == false, "a scroll bar with nothing to scroll")
+click(working)
+assert(dock.height > 84, "opening Working didn't grow the dock")
+
+-- It takes all that Open leaves, and scrolls the rest.
+click(settled)
+assert(dockChild.height > 500, "dock content is " .. tostring(dockChild.height))
+assert(dock.height == 500 - open.parent.height, "dock is " .. tostring(dock.height))
+assert(list.ScrollBar.on == false and dock.ScrollBar.on == true, "only the dock has more to scroll")
+
+-- A long Open keeps half.
+add("o-more", 30, {})
+inboxWith(ENVS, { threads = threads })
+assert(open.parent.height > 250 and dock.height == 250, "dock is " .. tostring(dock.height))
+assert(list.ScrollBar.on == true and dock.ScrollBar.on == true, "both have more to scroll")
+
+-- It follows the window's height.
+window.height = 440
+window.scripts.OnSizeChanged(window)
+assert(dock.height == 150, "after resizing, dock is " .. tostring(dock.height))
+return "ok"
+`);
+});
+
 test("An agent-launched thread with no known launcher keeps out of Open, as in T3's sidebar", () => {
   run(`
 local function count(label)

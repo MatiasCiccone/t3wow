@@ -503,11 +503,33 @@ do
     listLine:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", LIST_WIDTH, SIZE.footer)
 end
 
+-- Open runs down from under the search box. Working, Snoozed and Settled are docked at the
+-- bottom, as in T3's sidebar: opening one pushes the dock up into the list. Each scrolls on
+-- its own, so the dock stays in reach however long Open is.
 local listScroll, listChild = makeScroll(frame, SIZE.row)
+local List = { headers = {}, openHeight = 0, dockHeight = 0 }
+List.dock, List.dockChild = makeScroll(frame, SIZE.row)
+List.dock:SetPoint("BOTTOMLEFT", 8, SIZE.footer + 6)
+List.dock:SetSize(SIZE.row, 1)
 listScroll:SetPoint("TOPLEFT", 8, -SIZE.title - SIZE.search - 6)
-listScroll:SetPoint("BOTTOMLEFT", 8, SIZE.footer + 6)
+listScroll:SetPoint("BOTTOMLEFT", List.dock, "TOPLEFT", 0, 4)
 listScroll:SetWidth(SIZE.row)
-local rows, headers = {}, {}
+
+-- The dock is as tall as its groups, up to what Open leaves; when both want more than half
+-- the list, each gets half. A scroll bar shows only when there's something to scroll.
+function List.FitDock()
+    local room = frame:GetHeight() - SIZE.title - SIZE.search - SIZE.footer - 16
+    local height = math.max(math.min(List.dockHeight, math.max(room / 2, room - List.openHeight)), 1)
+    List.dock:SetHeight(height)
+    local function showBar(scroll, scrolls)
+        local bar = scroll.ScrollBar
+        if type(bar) == "table" and bar.SetShown then bar:SetShown(scrolls) end
+    end
+    showBar(List.dock, List.dockHeight > height)
+    showBar(listScroll, List.openHeight > room - height)
+end
+
+local rows = {}
 local search -- the search box over the list (built after renderList)
 
 -- Compact (a setting): one line per thread, its machine and project in the tooltip.
@@ -523,10 +545,12 @@ function UI.GlyphKnown(glyph)
     return file ~= nil and file ~= ""
 end
 
-local function header(index)
-    local h = headers[index]
+-- Headers and rows are reused by position, so one can move between the list and the dock.
+local function header(index, parent)
+    local h = List.headers[index]
+    if h and h:GetParent() ~= parent then h:SetParent(parent) end
     if not h then
-        h = CreateFrame("Button", nil, listChild)
+        h = CreateFrame("Button", nil, parent)
         h:SetSize(SIZE.row, 26)
         h.chevron = Skin.Glyph(h, "chevron", 12, "label")
         h.chevron:SetPoint("LEFT", 4, 0)
@@ -536,7 +560,7 @@ local function header(index)
         h.count = h:CreateFontString(nil, "OVERLAY")
         h.count:SetFontObject(Skin.fonts.label)
         h.count:SetPoint("RIGHT", -8, 0)
-        headers[index] = h
+        List.headers[index] = h
     end
     return h
 end
@@ -552,10 +576,11 @@ local function rowTooltip(self)
     Skin.Tooltip:Show()
 end
 
-local function row(index)
+local function row(index, parent)
     local r = rows[index]
+    if r and r:GetParent() ~= parent then r:SetParent(parent) end
     if not r then
-        r = CreateFrame("Button", nil, listChild)
+        r = CreateFrame("Button", nil, parent)
         r:SetSize(SIZE.row, 44)
         r.box = Skin.Box(r, { shape = "control", fill = false, ring = false })
         r.project = r:CreateFontString(nil, "OVERLAY")
@@ -907,7 +932,7 @@ local moreButtons = {}
 local function moreButton(key)
     local b = moreButtons[key]
     if not b then
-        b = button(listChild, "Show more", SIZE.row - 8, function(self) ns.Link.Send({ t = "list", g = self.group }) end, "ghost")
+        b = button(key == "open" and listChild or List.dockChild, "Show more", SIZE.row - 8, function(self) ns.Link.Send({ t = "list", g = self.group }) end, "ghost")
         b.group = key
         moreButtons[key] = b
     end
@@ -916,7 +941,7 @@ end
 
 local function renderList()
     for _, r in ipairs(rows) do r:Hide() end
-    for _, h in ipairs(headers) do h:Hide() end
+    for _, h in ipairs(List.headers) do h:Hide() end
     for _, b in pairs(moreButtons) do b:Hide() end
     local groups = { working = {}, open = {}, snoozed = {}, settled = {} }
     -- Threads an agent launched sit under the thread that launched them when both are in
@@ -958,6 +983,7 @@ local function renderList()
     local compact = compactList()
     local rowHeight = compact and Skin.Theme().compactHeight or Skin.Theme().rowHeight
     local y, rowIndex, headerIndex = 0, 0, 0
+    List.openHeight = 0 -- a search can leave Open out
     -- While searching, every group opens on its matches (folding one lasts for this search),
     -- and a group with none and nothing more to list hides.
     local folded = searching and search.folded or collapsed
@@ -969,8 +995,9 @@ local function renderList()
     search.none:SetShown(#shownGroups == 0)
     for _, group in ipairs(shownGroups) do
         local key, label = group[1], group[2]
+        local parent = key == "open" and listChild or List.dockChild
         headerIndex = headerIndex + 1
-        local h = header(headerIndex)
+        local h = header(headerIndex, parent)
         -- Only recent settled threads are listed; the count is all of them, as in T3.
         local count = #groups[key]
         if key == "settled" and not searching and inbox and inbox.settledTotal then count = math.max(count, inbox.settledTotal) end
@@ -991,7 +1018,7 @@ local function renderList()
                 if placed[id] then return end
                 placed[id] = true
                 rowIndex = rowIndex + 1
-                local r = row(rowIndex)
+                local r = row(rowIndex, parent)
                 r.thread = t
                 if selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e) then UI.Unread()[UI.Waits.Key(selected.env, t.id)] = nil end
                 UI.RowActions.Refresh(r)
@@ -1020,8 +1047,13 @@ local function renderList()
                 y = y + 32
             end
         end
+        -- Open ends here: the dock's groups count from the top of the dock.
+        if key == "open" then List.openHeight, y = y, 0 end
     end
-    listChild:SetHeight(math.max(y, 1))
+    List.dockHeight = y
+    listChild:SetHeight(math.max(List.openHeight, 1))
+    List.dockChild:SetHeight(math.max(y, 1))
+    List.FitDock()
     PullRequests.FollowList()
 end
 
@@ -1084,6 +1116,7 @@ search:SetScript("OnTextChanged", function(self)
     self.clear:SetShown(text ~= "")
     if not text:find("%S") then self.folded = {} end
     listScroll:SetVerticalScroll(0)
+    List.dock:SetVerticalScroll(0)
     renderList()
 end)
 search:SetScript("OnEscapePressed", function(self)
@@ -4399,6 +4432,7 @@ end)
 -- is hidden while you drag and laid out once, when you let go.
 
 frame:SetScript("OnSizeChanged", function()
+    List.FitDock()
     if Sizing.from then
         input:SetWidth(messageWidth() - 24)
         return
