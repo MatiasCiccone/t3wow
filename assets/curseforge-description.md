@@ -27,7 +27,7 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Start threads.** **New Thread** asks for the machine, the project, and whether the thread runs in a new worktree or the current checkout, then starts a thread with your message as its task and opens it. You can pick its model, effort and permissions too; whatever you leave alone stays T3's default.
 
-**Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Send answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
+**Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Submit answer**. You can also type your own answer and press Enter. If an answer doesn't go through, you can send it again.
 
 **Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it.
 
@@ -81,7 +81,7 @@ Any addon you install can draw the same strip of squares T3 WoW draws, and the c
 
 - **Full** (the default): everything the window offers.
 - **No new threads**: everything but starting threads.
-- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Stop or Settle).
+- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Stop, Settle or Snooze).
 
 It applies at once. The window greys out what the setting blocks and says why. Install addons you trust, or pick a stricter setting.
 

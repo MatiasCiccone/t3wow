@@ -48,7 +48,7 @@ update({ thread("t1", "waiting") })
 assert(count() == 1, "no notification: " .. count())
 assert(top().title.text == "Thread t1", top().title.text)
 assert(played == 0, "it made a sound")
-assert(said("Needs you") == 0, "it wrote a chat line")
+assert(said("Awaiting input") == 0, "it wrote a chat line")
 assert(said("connected to T3") == 1)
 -- The next update of the same session doesn't show it again.
 update({ thread("t1", "waiting") })

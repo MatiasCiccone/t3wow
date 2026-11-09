@@ -90,6 +90,29 @@ strokes("shield-off.tga", 2.4, [
   [[16, 4.5], [25.5, 8], [25.5, 15.5], [23.5, 21], [16, 27.5], [8.5, 21], [6.5, 15.5], [6.5, 8], [16, 4.5]],
   [[5, 5], [27, 27]],
 ]);
+// Snooze: a clock face (a 48-sided polygon) and its hands.
+const face = Array.from({ length: 49 }, (_, i) => [16 + 10.5 * Math.cos((i * Math.PI) / 24), 16 + 10.5 * Math.sin((i * Math.PI) / 24)]);
+strokes("clock.tga", 2.4, [face, [[16, 9.5], [16, 16], [20.5, 19]]]);
+// A thread waiting on your input: a question mark in a circle.
+const hook = Array.from({ length: 25 }, (_, i) => [16 + 3.6 * Math.cos(Math.PI + (i * Math.PI * 1.3) / 24), 12.6 + 3.6 * Math.sin(Math.PI + (i * Math.PI * 1.3) / 24)]);
+strokes("question.tga", 2.4, [face, [...hook, [16, 18]], [[16, 22], [16, 22.4]]]);
+// The window's three actions. Refresh: a circle nearly closed, with its arrowhead at the top right.
+const arc = Array.from({ length: 41 }, (_, i) => { const a = ((30 + (i * 300) / 40) * Math.PI) / 180; return [16 + 9.5 * Math.cos(a), 16 + 9.5 * Math.sin(a)]; });
+strokes("refresh.tga", 2.4, [arc, [[25.5, 5], [25.5, 11.5], [19, 11.5]]]);
+// New Thread: a page, open at the top right, with a pen over it.
+strokes("compose.tga", 2.4, [
+  [[15, 6.5], [8.5, 6.5], [6, 9], [6, 23.5], [8.5, 26], [23, 26], [25.5, 23.5], [25.5, 17]],
+  [[13.5, 18.5], [14.5, 14], [24, 4.5], [27.5, 8], [18, 17.5], [13.5, 18.5]],
+]);
+// Settings: a cog, as a ring with eight teeth around a small hole.
+const circle = (r) => Array.from({ length: 49 }, (_, i) => [16 + r * Math.cos((i * Math.PI) / 24), 16 + r * Math.sin((i * Math.PI) / 24)]);
+const teeth = Array.from({ length: 8 }, (_, i) => { const a = (i * Math.PI) / 4; return [[16 + 8.5 * Math.cos(a), 16 + 8.5 * Math.sin(a)], [16 + 12 * Math.cos(a), 16 + 12 * Math.sin(a)]]; });
+strokes("gear.tga", 2.4, [circle(8.5), circle(3.2), ...teeth]);
+// Row statuses, as in T3: a dashed ring, a check in a circle, a shield.
+const dashes = Array.from({ length: 8 }, (_, d) => Array.from({ length: 6 }, (_, i) => { const a = ((d + i * 0.11) * Math.PI) / 4; return [16 + 10.5 * Math.cos(a), 16 + 10.5 * Math.sin(a)]; }));
+strokes("spinner.tga", 2.8, dashes);
+strokes("done.tga", 2.4, [face, [[11, 16.5], [14.5, 20], [21, 12.5]]]);
+strokes("shield.tga", 2.4, [[[16, 4.5], [25.5, 8], [25.5, 15.5], [23.5, 21], [16, 27.5], [8.5, 21], [6.5, 15.5], [6.5, 8], [16, 4.5]]]);
 // A picture struck through: said where an image couldn't be loaded.
 strokes("image-off.tga", 2.2, [
   [[6, 8], [26, 8], [26, 24], [6, 24], [6, 8]],

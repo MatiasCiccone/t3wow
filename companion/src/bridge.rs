@@ -343,6 +343,34 @@ fn hostname() -> String {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "This PC".into())
 }
 
+/// The project T3 keeps scratch threads in. New Thread has its own "No project" for those,
+/// as T3's own picker does. T3's tools don't mark it, so it's told by having no repository
+/// and T3's scratch folder or scratch icon, not by its title, which anyone's project can have.
+fn is_scratch_project(project: &Value) -> bool {
+    let root = str_of(&project["workspaceRoot"]).replace('\\', "/");
+    let scratch_folder = root.trim_end_matches('/').ends_with(".t3/scratch");
+    project["repositoryIdentity"].is_null() && (scratch_folder || project["projectIcon"]["name"] == "message-square-dashed")
+}
+
+/// The longest snooze the game may ask for: a year.
+const MAX_SNOOZE_MINUTES: i64 = 525_600;
+
+/// Epoch seconds to ISO 8601 in UTC ("2026-11-07T00:22:41.000Z"), as T3 writes its times.
+fn iso_from_seconds(seconds: i64) -> String {
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Civil from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mo <= 2);
+    format!("{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
 /// ISO 8601 ("2026-11-07T00:22:41.923Z", or with an offset) to epoch seconds; 0 if unreadable.
 pub fn iso_seconds(iso: &str) -> i64 {
     fn num(s: &str, range: std::ops::Range<usize>) -> Option<i64> {
@@ -570,6 +598,9 @@ pub struct Bridge {
     watches: HashMap<String, Watch>,
     /// The thread that launched each agent-launched thread (None: unknown), read once.
     launchers: HashMap<String, Option<String>>,
+    /// Each working thread's current run and when it started, read once per run: T3's
+    /// lists don't say.
+    run_starts: HashMap<String, (String, i64)>,
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
     /// Commands waiting to run: client key, the UI session they came in, the stamp of the
@@ -950,6 +981,7 @@ enum Step {
     QuestionKind(usize, i64),
     Watch(usize),
     Launcher(usize),
+    RunStart(usize),
     Track,
     Unlisted(String, String),
     Keep,
@@ -1126,6 +1158,7 @@ impl Bridge {
             watches: HashMap::new(),
             listed_envs: HashSet::new(),
             launchers: HashMap::new(),
+            run_starts: HashMap::new(),
             commands: VecDeque::new(),
             queued: HashMap::new(),
             last_publish_at: 0,
@@ -1260,6 +1293,7 @@ impl Bridge {
         self.pending_ask = None;
         self.threads.clear();
         self.projects.clear();
+        self.run_starts.clear();
         self.new_worktrees.clear();
         self.catalogs.clear();
         self.settled_totals.clear();
@@ -1600,6 +1634,16 @@ impl Bridge {
                     self.client.call("t3_thread_organize", with_args(json!({ "action": kind, "threadId": id }), &env_arg))?;
                     self.note(if kind == "settle" { "Settled." } else { "Moved back to open." });
                 }
+                // The game says for how long; T3 takes the time it ends.
+                "snooze" if !id.is_empty() && command["mn"].as_i64().is_some_and(|m| (1..=MAX_SNOOZE_MINUTES).contains(&m)) => {
+                    let until = iso_from_seconds(self.now_seconds() + command["mn"].as_i64().unwrap_or(0) * 60);
+                    self.client.call("t3_thread_organize", with_args(json!({ "action": "snooze", "threadId": id, "snoozedUntil": until }), &env_arg))?;
+                    self.note("Snoozed.");
+                }
+                "unsnooze" if !id.is_empty() => {
+                    self.client.call("t3_thread_organize", with_args(json!({ "action": "unsnooze", "threadId": id }), &env_arg))?;
+                    self.note("Moved back to open.");
+                }
                 // T3 says whether it stopped a run ("interrupt_requested") or there was none
                 // ("no_active_run", or how the last one ended; a T3 that says neither counts as
                 // stopping). The game hears which, so its Stop doesn't wait on a run that already
@@ -1925,6 +1969,7 @@ impl Bridge {
             Step::QuestionKind(i, read_at) => self.check_waiting_on(i, read_at),
             Step::Watch(i) => self.check_watch(i),
             Step::Launcher(i) => self.find_launcher(i),
+            Step::RunStart(i) => self.read_run_start(i),
             Step::Track => {
                 self.track_listed();
                 Ok(())
@@ -2065,6 +2110,7 @@ impl Bridge {
                 let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
                 steps.extend((0..threads.len()).filter(|i| may_watch(&threads[*i])).map(Step::Watch));
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
+                steps.extend((0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::RunStart));
                 steps.extend([Step::Track, Step::Keep]);
                 if let Some(run) = self.poll_run.as_mut() {
                     run.listed = Some(Listed { env, threads, settled_total, more, seen: Vec::new() });
@@ -2211,6 +2257,35 @@ impl Bridge {
         Ok(())
     }
 
+    /// Notes when a working thread's current run started, for the time beside its status.
+    fn read_run_start(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some((env, id, _)) = self.listed_thread(i) else { return Ok(()) };
+        let run = self.listed_mut().and_then(|l| l.threads.get(i)).map(|t| str_of(&t["latestRunId"]).to_string()).unwrap_or_default();
+        if run.is_empty() {
+            return Ok(());
+        }
+        let key = format!("{env}:{id}");
+        if self.run_starts.get(&key).is_none_or(|(known, _)| *known != run) && !self.out_of_time() {
+            let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1, "runLimit": 1 }), &self.env_arg(&env));
+            match self.client.call("t3_thread_read", args) {
+                Ok(read) => {
+                    let started = read["recentRuns"].as_array().and_then(|runs| runs.iter().find(|r| r["runId"] == run.as_str())).and_then(|r| r["startedAt"].as_str()).map(iso_seconds);
+                    if let Some(started) = started.filter(|s| *s > 0) {
+                        self.run_starts.insert(key.clone(), (run.clone(), started));
+                    }
+                }
+                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                Err(T3Error::Other(message)) => self.log(&format!("run start ({key}): {message}")),
+            }
+        }
+        if let Some(started) = self.run_starts.get(&key).filter(|(known, _)| *known == run).map(|(_, started)| *started) {
+            if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
+                thread["runStartedAt"] = json!(started);
+            }
+        }
+        Ok(())
+    }
+
     /// Notes which thread launched an agent-launched thread: the sender of its first message.
     fn find_launcher(&mut self, i: usize) -> Result<(), T3Error> {
         let Some((env, id, _)) = self.listed_thread(i) else { return Ok(()) };
@@ -2246,6 +2321,7 @@ impl Bridge {
         let ids: HashSet<String> = listed.threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
         self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !ids.contains(k));
         self.watches.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
+        self.run_starts.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         let gone: Vec<(String, String)> =
             self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !ids.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
         let mut steps = Vec::new();
@@ -3360,6 +3436,9 @@ impl Bridge {
                 if t["createdBy"] == "agent" && !self.link.started_threads.iter().any(|known| known == str_of(&t["threadId"])) {
                     entry["ag"] = json!(true);
                 }
+                if let Some(started) = t["runStartedAt"].as_i64() {
+                    entry["st"] = json!(started);
+                }
                 if let Some(launcher) = t["launcher"].as_str() {
                     entry["par"] = json!(launcher);
                 }
@@ -3378,7 +3457,7 @@ impl Bridge {
         let mut projects = Vec::new();
         for (env, list) in self.projects.iter().filter(|(env, _)| env_index(env) > 0) {
             let machine_worktree = self.new_worktrees.get(env).copied().unwrap_or(false);
-            for p in list.iter().filter(|p| !p["archivedAt"].is_string() && !p["deletedAt"].is_string()) {
+            for p in list.iter().filter(|p| !p["archivedAt"].is_string() && !p["deletedAt"].is_string() && !is_scratch_project(p)) {
                 let mut entry = json!({ "e": env_index(env), "id": str_of(&p["id"]), "t": plain(str_of(&p["title"]), 40) });
                 // Where New Thread starts it by default: the project's own mode, else the machine's.
                 let worktree = match p["defaultThreadEnvMode"].as_str() {
