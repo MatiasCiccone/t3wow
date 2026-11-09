@@ -1709,6 +1709,171 @@ return "ok"
 `);
 });
 
+// The mouse's side buttons, pressed with the pointer on the window; what each press opened.
+const SIDE_BUTTONS = `
+local function listed(e, id) return { e = e, id = id, t = id, s = "completed", set = false, at = time(), p = "" } end
+LISTED = { listed(1, "a"), listed(2, "b"), listed(1, "c"), listed(2, "d") }
+function open(id)
+  for _, t in ipairs(LISTED) do
+    if t.id == id then return UI.Select(t) end
+  end
+end
+T3WoWFrame.IsMouseOver = function() return true end
+function wait(seconds)
+  clock = clock + seconds
+  T3WoWFrame.scripts.OnUpdate(T3WoWFrame, seconds)
+end
+function press(button)
+  local before = #queue()
+  fire("GLOBAL_MOUSE_DOWN", button)
+  wait(0.5)
+  if #queue() == before then return "nothing" end
+  return sent().t .. " " .. tostring(sent().e) .. " " .. tostring(sent().id)
+end
+function expect(button, wanted)
+  local got = press(button)
+  assert(got == wanted, button .. " did " .. got .. ", wanted " .. wanted)
+end
+`;
+
+test("the mouse's side buttons go back and forward through the threads you opened", () => {
+  run(`${SIDE_BUTTONS}
+inboxWith(ENVS, { threads = LISTED })
+open("a") open("b") open("c")
+expect("Button4", "open mac b")
+expect("Button4", "open local a")
+expect("Button4", "nothing")
+expect("Button5", "open mac b")
+expect("Button5", "open local c")
+expect("Button5", "nothing")
+-- Opening a thread after going back drops what was ahead, as in a browser.
+expect("Button4", "open mac b")
+open("d")
+expect("Button5", "nothing")
+expect("Button4", "open mac b")
+-- Opening the thread you're on isn't another stop.
+open("b") open("b")
+expect("Button4", "open local a")
+return "ok"
+`);
+});
+
+test("quick presses of the side buttons open only the thread they end on, once they stop", () => {
+  run(`${SIDE_BUTTONS}
+inboxWith(ENVS, { threads = LISTED })
+open("a") open("b") open("c") open("d")
+local before = #queue()
+for _ = 1, 3 do
+  fire("GLOBAL_MOUSE_DOWN", "Button4")
+  wait(0.2)
+end
+assert(#queue() == before, "opened a thread on the way")
+wait(0.1)
+assert(#queue() == before + 1, "opened " .. (#queue() - before) .. " threads")
+assert(sent().t == "open" and sent().id == "a", tostring(sent().id))
+wait(1)
+assert(#queue() == before + 1, "opened it again")
+
+-- Going back and forward to where you were opens nothing.
+fire("GLOBAL_MOUSE_DOWN", "Button5")
+fire("GLOBAL_MOUSE_DOWN", "Button4")
+wait(0.5)
+assert(#queue() == before + 1, "opened the thread that was already open")
+
+-- Opening a thread yourself wins over presses still waiting.
+fire("GLOBAL_MOUSE_DOWN", "Button5")
+open("d")
+assert(sent().id == "d", tostring(sent().id))
+before = #queue()
+wait(0.5)
+assert(#queue() == before, "the waiting press opened a thread after the click")
+
+-- New Thread wins too, and the press it replaced doesn't count: Back is still d.
+fire("GLOBAL_MOUSE_DOWN", "Button4")
+click("New Thread")
+wait(0.5)
+assert(find("Button", "Start"), "the waiting press left the composer")
+expect("Button4", "open mac d")
+
+-- A press a click replaced doesn't move where the click goes on from: c follows d.
+fire("GLOBAL_MOUSE_DOWN", "Button4")
+open("c")
+wait(0.5)
+expect("Button4", "open mac d")
+expect("Button4", "open local a")
+expect("Button5", "open mac d")
+
+-- Quick presses add up from the composer too: the first is the thread it was left for.
+click("New Thread")
+fire("GLOBAL_MOUSE_DOWN", "Button4")
+fire("GLOBAL_MOUSE_DOWN", "Button4")
+wait(0.5)
+assert(sent().t == "open" and sent().id == "a", tostring(sent().id))
+
+-- A change of sign-in leaves nothing waiting.
+fire("GLOBAL_MOUSE_DOWN", "Button5")
+before = #queue()
+UI.ForgetLogin()
+wait(0.5)
+assert(#queue() == before, "the waiting press opened a thread of the old sign-in")
+return "ok"
+`);
+});
+
+test("the side buttons do nothing with the window closed, off the window, or under an enlarged picture", () => {
+  run(`${CTRL_V}${SIDE_BUTTONS}
+local att = { { d = "mac:b", i = 1, w = 1920, h = 1080, f = 3, tw = 142, th = 80, bf = 4, bw = 1024, bh = 576 } }
+inboxWith(ENVS, { pi = true, threads = LISTED, att = att })
+open("a") open("b")
+for _, other in ipairs({ "LeftButton", "RightButton", "MiddleButton" }) do expect(other, "nothing") end
+T3WoWFrame.IsMouseOver = function() return false end
+expect("Button4", "nothing")
+T3WoWFrame.IsMouseOver = function() return true end
+T3WoWFrame:Hide()
+expect("Button4", "nothing")
+T3WoWFrame:Show()
+local chip = pasteChips()[1]
+chip.scripts.OnClick(chip, "LeftButton")
+assert(T3WoWPictureZoom.shown, "not enlarged")
+expect("Button4", "nothing")
+T3WoWPictureZoom:Hide()
+expect("Button4", "open local a")
+return "ok"
+`);
+});
+
+test("New Thread isn't a stop: Back leaves it for the thread you were on, and a started thread is one", () => {
+  run(`${SIDE_BUTTONS}
+inboxWith(ENVS, { threads = LISTED })
+expect("Button4", "nothing")
+open("a") open("b")
+click("New Thread")
+expect("Button5", "nothing")
+expect("Button4", "open mac b")
+click("New Thread")
+pick("T3WoWMachineMenu", "Mac")
+typeText("Build it")
+click("Start")
+local s = sent().s
+inboxWith(ENVS, { threads = LISTED, out = { { s = s, ok = true, env = "mac", id = "new1" } } })
+expect("Button4", "open mac b")
+expect("Button5", "open mac new1")
+return "ok"
+`);
+});
+
+test("signing in to another T3 forgets the threads you went through", () => {
+  run(`${SIDE_BUTTONS}
+inboxWith(ENVS, { threads = LISTED })
+open("a") open("b")
+UI.ForgetLogin()
+inboxWith(ENVS, { threads = LISTED })
+expect("Button4", "nothing")
+expect("Button5", "nothing")
+return "ok"
+`);
+});
+
 test("Escape over a dropdown list or the permissions popover closes only it", () => {
   run(SELECTOR_HELPERS + `
 inboxWith(SEL_ENVS, { sel = true, models = CATALOG })
