@@ -57,7 +57,7 @@ impl fmt::Display for Problem {
         match self {
             Problem::NotRead => f.write_str("waiting for the macOS Keychain; saved sign-ins aren't available yet"),
             Problem::Denied => f.write_str("macOS Keychain access was denied, so saved sign-ins can't be read (they are still saved). Restart T3 WoW to be asked again"),
-            Problem::Locked => f.write_str("the macOS login keychain is locked, so saved sign-ins can't be read (they are still saved). Unlock it and restart T3 WoW"),
+            Problem::Locked => f.write_str("macOS couldn't open the login keychain: it's locked, or its permission dialog can't be shown here (over SSH, for example). Saved sign-ins are still saved. Unlock it or run T3 WoW on the Mac itself, then restart it"),
             Problem::Malformed => f.write_str("the T3 WoW item in the macOS Keychain doesn't hold a key, so saved sign-ins can't be read (they are still saved)"),
             Problem::Failed(code) => write!(f, "the macOS Keychain answered with error {code}, so saved sign-ins can't be read (they are still saved). Restart T3 WoW to try again"),
         }
@@ -79,6 +79,7 @@ impl StoreError {
             ERR_SEC_ITEM_NOT_FOUND => StoreError::NotFound,
             ERR_SEC_DUPLICATE_ITEM => StoreError::Duplicate,
             ERR_SEC_USER_CANCELED | ERR_SEC_AUTH_FAILED => StoreError::Blocked(Problem::Denied),
+            // Covers both a locked keychain and a permission dialog macOS can't show.
             ERR_SEC_INTERACTION_NOT_ALLOWED => StoreError::Blocked(Problem::Locked),
             other => StoreError::Blocked(Problem::Failed(other)),
         }
