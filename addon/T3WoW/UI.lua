@@ -155,9 +155,10 @@ end
 -- "readonly"; an older companion leaves it out) limits what the game may make T3 do. The
 -- companion refuses those commands anyway: the window greys them out and says why.
 local TRUST_NAME = { nonew = "No new threads", readonly = "Read-only" }
-local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true, paste = true, model = true }
+local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, stop = true, answer = true, paste = true, model = true, script = true }
 local BLOCKED_LEAD = {
     send = "Sending messages from the game is off", new = "Starting threads from the game is off",
+    script = "Running scripts from the game is off",
     paste = "Pasting images from the game is off", model = "Changing the model from the game is off",
     answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
 }
@@ -888,7 +889,7 @@ do
             if leftmost then
                 link:SetPoint("RIGHT", leftmost, "LEFT", -6, 0)
             else
-                link:SetPoint("TOPRIGHT", viewTitle, "BOTTOMRIGHT", 0, -6)
+                link:SetPoint("TOPRIGHT", viewTitle, "BOTTOMRIGHT", PullRequests.titleInset, -6)
             end
             link:Show()
             leftmost = link
@@ -1771,6 +1772,64 @@ local function openInT3(threadId, envId)
     UI.Notice("Opening T3…")
 end
 
+-- The open thread's project's saved scripts (view.scr: { id, n }), at the top right of the
+-- header. T3's tools can't run one, so picking it asks the thread's agent to, which is not
+-- what T3's own dropdown does: the list and the tooltip say so.
+do
+    local WIDTH_SCRIPTS = 92
+    -- What the title gives up for the button: the pull requests under it stay at the edge.
+    PullRequests.titleInset = 0
+    local function openScripts()
+        local view = inbox and inbox.view
+        return isSelectedView(view) and view.scr or {}
+    end
+    -- The open thread is on a machine whose scripts T3's tools don't tell (view.sna).
+    local function unavailable()
+        local view = inbox and inbox.view
+        return isSelectedView(view) and view.sna == true
+    end
+    local menu = dropdown(right, "T3WoWScriptsMenu", WIDTH_SCRIPTS, {
+        entries = function()
+            if unavailable() then return { { text = "Not available for threads on another machine", note = true } } end
+            local list = { { text = "Asks this thread's agent, not T3's terminal", note = true } }
+            for _, script in ipairs(openScripts()) do
+                list[#list + 1] = { text = script.n, value = script }
+            end
+            return list
+        end,
+        isSelected = function() return false end,
+        pick = function(script)
+            if pendingAsk() then return UI.Notice("Answer the agent's question first.") end
+            local s = ns.Link.Send({ t = "script", e = selected.env, id = selected.id, sc = script.id })
+            if s then awaiting[s] = { kind = "script", at = GetTime() } end
+            UI.Notice(format('Asking the agent to run "%s"…', script.n))
+        end,
+    })
+    menu:SetHeight(22)
+    menu:SetPoint("TOPRIGHT", right, "TOPRIGHT", -18, -8)
+    menu.label:SetFontObject(Skin.fonts.muted)
+    menu:SetLabel("Scripts")
+    menu:Hide()
+    -- Hooked: the dropdown's hover highlight is on these already.
+    menu:HookScript("OnEnter", function(self)
+        Skin.Tooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        Skin.Tooltip:AddLine("Saved scripts")
+        Skin.Tooltip:AddLine(unavailable() and "T3 keeps a machine's scripts in that machine's settings and doesn't share them with T3 WoW. Run them from T3." or "Picking one messages this thread's agent to run it. It takes a turn, with the thread's permissions, and a busy thread steers or queues as with any message. The result shows in the conversation, not in T3's terminal.")
+        local blocked = blockedReason("script")
+        if blocked then Skin.Tooltip:AddLine("|cffff8000" .. blocked .. "|r") end
+        Skin.Tooltip:Show()
+    end)
+    menu:HookScript("OnLeave", function() Skin.Tooltip:Hide() end)
+
+    function UI.RenderScripts()
+        local inset = (unavailable() or #openScripts() > 0) and WIDTH_SCRIPTS + 8 or 0
+        menu:SetShown(inset > 0)
+        menu:SetEnabled(not blockedReason("script"))
+        viewTitle:SetPoint("RIGHT", right, "RIGHT", -18 - inset, 0)
+        PullRequests.titleInset = inset
+    end
+end
+
 local approvalOpen = button(messageChild, "Open in T3", 120, function()
     if selected then openInT3(selected.id, selected.env) end
 end)
@@ -2008,6 +2067,7 @@ function renderView()
     Handoff.Release()
     hideAsk()
     earlier:Hide()
+    UI.RenderScripts()
     if selected and selected.new then
         messageScroll:Hide()
         newPanel:Show()

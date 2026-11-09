@@ -1257,6 +1257,96 @@ fn the_open_thread_says_which_branch_it_is_on() {
 }
 
 #[test]
+fn a_saved_script_is_offered_by_name_and_its_command_goes_to_the_threads_agent() {
+    let mut rig = Rig::new(18_650_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    // As on a real install: T3's settings hold the list, and the project's own is left over.
+    rig.t3.projects.lock().unwrap().insert("local".into(), json!([{ "id": "p1", "title": "app", "scripts": [{ "id": "old", "name": "leftover", "command": "npm run old" }] }]));
+    let settings = std::env::temp_dir().join(format!("t3wow-scripts-{}.json", std::process::id()));
+    let saved = json!({ "projectSettingsFolded": true, "projectSettingsOverrides": { "p1": { "defaultProjectScripts": [
+        { "id": "dev", "name": "serve | app", "command": "npm run dev", "icon": "play", "runOnWorktreeCreate": false },
+        { "id": "lint", "name": "lint", "command": "npm run lint", "icon": "lint", "runOnWorktreeCreate": false },
+    ] } } });
+    std::fs::write(&settings, saved.to_string()).unwrap();
+    rig.bridge.set_t3_settings(Some(settings.clone()));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["view"]["scr"], json!([{ "id": "dev", "n": "serve || app" }, { "id": "lint", "n": "lint" }]));
+    assert!(snapshot["view"]["pid"].is_null());
+    assert!(!snapshot.to_string().contains("npm run"), "commands stay out of the game");
+
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "script", "id": "t1", "sc": "dev" }] }));
+    rig.bridge.tick();
+    let sends = rig.t3.calls_to("t3_thread_send");
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0]["threadId"], "t1");
+    assert_eq!(sends[0]["mode"], "auto");
+    assert!(str_of(&sends[0]["message"]).contains("saved script \"serve | app\""), "{}", sends[0]);
+    assert!(str_of(&sends[0]["message"]).contains("```\nnpm run dev\n```"), "{}", sends[0]);
+
+    // Only a script T3 has saved for the open thread's project: another addon can draw this.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "script", "id": "t1", "sc": "rm -rf" }, { "s": 5, "t": "script", "id": "t2", "sc": "dev" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+    let snapshot = rig.bridge.snapshot();
+    for s in [4, 5] {
+        let refused = snapshot["out"].as_array().unwrap().iter().find(|o| o["s"] == s).unwrap_or_else(|| panic!("no outcome for {s}: {snapshot}"));
+        assert_eq!(refused["ok"], false);
+    }
+
+    rig.bridge.set_trust(Trust::NoNewThreads);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 6, "t": "script", "id": "t1", "sc": "lint" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 2, "like any message, under No new threads");
+
+    rig.bridge.set_trust(Trust::ReadOnly);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 5, "q": [{ "s": 7, "t": "script", "id": "t1", "sc": "lint" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 2, "refused under Read-only");
+    let _ = std::fs::remove_file(&settings);
+}
+
+#[test]
+fn a_projects_scripts_are_worked_out_as_t3s_own_dropdown_does() {
+    let own = [json!({ "id": "own" })];
+    let ids = |settings: Value, own: &[Value]| -> Vec<String> { resolved_scripts(&settings, "p1", own).iter().map(|s| str_of(&s["id"]).to_string()).collect() };
+    let one = |id: &str| json!([{ "id": id }]);
+
+    assert_eq!(ids(json!({ "projectSettingsFolded": true, "defaultProjectScripts": one("all"), "projectSettingsOverrides": { "p1": { "defaultProjectScripts": one("mine") } } }), &own), ["mine"]);
+    assert_eq!(ids(json!({ "projectSettingsFolded": true, "projectSettingsOverrides": { "p1": { "defaultProjectScripts": [] } }, "defaultProjectScripts": one("all") }), &own), Vec::<String>::new());
+    assert_eq!(ids(json!({ "projectSettingsFolded": true, "defaultProjectScripts": one("all"), "projectScriptOverrides": { "p1": one("old") } }), &own), ["all"], "folded: the older settings no longer count");
+    assert_eq!(ids(json!({ "projectScriptOverrides": { "p1": one("old") }, "defaultProjectScripts": one("all") }), &own), ["old"]);
+    assert_eq!(ids(json!({ "projectScriptOverrides": { "p1": null }, "defaultProjectScripts": one("all") }), &own), ["all"]);
+    assert_eq!(ids(json!({ "defaultProjectScripts": one("all") }), &own), ["own"]);
+    assert_eq!(ids(json!({ "defaultProjectScripts": one("all") }), &[]), ["all"]);
+    assert_eq!(ids(Value::Null, &own), ["own"]);
+}
+
+#[test]
+fn only_t3_on_this_pc_can_say_which_scripts_a_project_has() {
+    let script = json!([{ "id": "p1", "title": "app", "scripts": [{ "id": "old", "name": "leftover", "command": "npm run old" }] }]);
+    let mut rig = Rig::new(18_660_000);
+    rig.t3.projects.lock().unwrap().insert("mac".into(), script.clone());
+    rig.bridge.set_t3_settings(Some(std::env::temp_dir().join("t3wow-no-such-settings.json")));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["view"]["sna"], true, "a linked machine's list can't be known");
+    assert!(snapshot["view"]["scr"].is_null(), "and its leftover list isn't shown");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "script", "e": "mac", "id": "t1", "sc": "old" }] }));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty(), "nothing to run");
+
+    // Connected to a T3 elsewhere: this PC's disk says nothing about its projects.
+    let mut rig = Rig::new(18_670_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["view"]["sna"], true);
+}
+
+#[test]
 fn opening_another_thread_while_the_open_one_is_read_drops_that_read() {
     let mut rig = Rig::new(18_700_000);
     *rig.t3.links.lock().unwrap() = json!([]);

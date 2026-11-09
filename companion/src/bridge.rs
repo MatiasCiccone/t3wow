@@ -306,6 +306,35 @@ fn thread_settings(thread: &Value, config: Option<&Value>) -> Option<Value> {
     Some(cfg)
 }
 
+/// The settings `resolved_scripts` reads.
+const SCRIPT_SETTINGS: [&str; 4] = ["projectSettingsOverrides", "projectSettingsFolded", "defaultProjectScripts", "projectScriptOverrides"];
+
+/// A project's scripts as T3's own dropdown works them out (its `resolveProjectScripts`), from
+/// T3's settings and the project's own list.
+fn resolved_scripts<'a>(settings: &'a Value, project: &str, own: &'a [Value]) -> &'a [Value] {
+    fn list(value: &Value) -> &[Value] {
+        value.as_array().map_or(&[], Vec::as_slice)
+    }
+    if let Some(chosen) = settings["projectSettingsOverrides"][project]["defaultProjectScripts"].as_array() {
+        return chosen;
+    }
+    let defaults = list(&settings["defaultProjectScripts"]);
+    if settings["projectSettingsFolded"] == true {
+        return defaults;
+    }
+    match settings["projectScriptOverrides"].get(project) {
+        Some(Value::Null) => defaults,
+        Some(legacy) => list(legacy),
+        None if own.is_empty() => defaults,
+        None => own,
+    }
+}
+
+/// The message that asks a thread's agent to run one of its project's saved scripts.
+fn script_request(name: &str, command: &str) -> String {
+    format!("Run this project's saved script \"{name}\" in this thread's folder:\n\n```\n{command}\n```\n\nIf it keeps running, like a dev server, leave it running in the background. Then tell me how it went.")
+}
+
 fn str_of(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
@@ -512,6 +541,10 @@ pub struct Bridge {
     /// T3's folder of provider caches, while the T3 in use is the one on this PC: MCP doesn't
     /// list skills and commands, and only this PC's are on this disk.
     provider_caches: Option<PathBuf>,
+    /// T3's settings file, while the T3 in use is the one on this PC.
+    t3_settings: Option<PathBuf>,
+    /// What it last said about scripts (`read_script_settings`).
+    script_settings: Option<Value>,
     settled_totals: BTreeMap<String, u64>,
     /// Per machine: which of its three lists have more threads than were listed.
     list_more: BTreeMap<String, [bool; LIST_COUNT]>,
@@ -1075,6 +1108,8 @@ impl Bridge {
             new_worktrees: BTreeMap::new(),
             catalogs: BTreeMap::new(),
             provider_caches: None,
+            t3_settings: None,
+            script_settings: None,
             settled_totals: BTreeMap::new(),
             list_more: BTreeMap::new(),
             list_limits: LIST_LIMITS,
@@ -1139,6 +1174,11 @@ impl Bridge {
     /// Applies the tray's "Commands from the game" from the next command on.
     pub fn set_provider_caches(&mut self, dir: Option<PathBuf>) {
         self.provider_caches = dir;
+    }
+
+    pub fn set_t3_settings(&mut self, file: Option<PathBuf>) {
+        self.t3_settings = file;
+        self.script_settings = None;
     }
 
     pub fn set_trust(&mut self, trust: Trust) {
@@ -1643,6 +1683,24 @@ impl Bridge {
                     }
                     self.drafts.retain(|_, images| !images.is_empty());
                     self.note("Image removed.");
+                }
+                // T3's tools can't run a saved script, so the thread's agent is asked to. Any
+                // addon can draw commands: the game names a script of the open thread's
+                // project, and what it runs comes from T3.
+                "script" if !id.is_empty() => {
+                    let project = self.view_data.as_ref().filter(|v| v["id"] == id.as_str() && v["e"] == env.as_str()).map(|v| str_of(&v["pid"]).to_string()).unwrap_or_default();
+                    let script = self
+                        .project_scripts(&env, &project)
+                        .unwrap_or(&[])
+                        .iter()
+                        .find(|s| s["id"] == command["sc"])
+                        .ok_or_else(|| T3Error::Other("that script isn't saved in this thread's project any more".into()))?;
+                    let name = str_of(&script["name"]).to_string();
+                    let message = script_request(&name, str_of(&script["command"]));
+                    let args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
+                    self.client.call("t3_thread_send", with_args(args, &env_arg))?;
+                    self.note(&format!("Asked the agent to run \"{}\".", plain(&name, 40)));
+                    self.view_changed();
                 }
                 "refresh" => self.view_changed(),
                 // Show more: the next poll lists more of that group, up to its cap.
@@ -2341,6 +2399,9 @@ impl Bridge {
         if self.out_of_time() {
             return;
         }
+        if self.env_arg(env).is_empty() {
+            self.read_script_settings();
+        }
         let args = with_args(json!({ "limit": 100 }), &self.env_arg(env));
         match self.client.call("t3_project_list", args) {
             Ok(page) => {
@@ -2358,6 +2419,25 @@ impl Bridge {
                 Err(error) => self.log(&format!("preferences ({env}): {error}")),
             }
         }
+    }
+
+    /// What T3 lists for a project. None when that can't be known: T3 works it out from the
+    /// settings of the machine the project is on, which only this PC's disk shows, and its
+    /// tools return only the project's own list, which those settings usually replace.
+    fn project_scripts(&self, env: &str, project: &str) -> Option<&[Value]> {
+        static NO_SETTINGS: Value = Value::Null;
+        self.t3_settings.as_ref().filter(|_| self.env_arg(env).is_empty())?;
+        let own = self.projects.get(env).and_then(|list| list.iter().find(|p| p["id"] == project)).and_then(|p| p["scripts"].as_array()).map_or(&[][..], Vec::as_slice);
+        Some(resolved_scripts(self.script_settings.as_ref().unwrap_or(&NO_SETTINGS), project, own))
+    }
+
+    /// The part of T3's settings that says which scripts this PC's projects have. Settings that
+    /// can't be read just now (T3 may be rewriting them) keep what they last said.
+    fn read_script_settings(&mut self) {
+        let Some(file) = &self.t3_settings else { return };
+        let Some(Value::Object(mut settings)) = std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok()) else { return };
+        settings.retain(|key, _| SCRIPT_SETTINGS.contains(&key.as_str()));
+        self.script_settings = Some(Value::Object(settings));
     }
 
     /// What a machine offers. A failed read keeps the last one, and waits as long as a good
@@ -2754,6 +2834,10 @@ impl Bridge {
         let branch = plain(str_of(&thread["branch"]), 80);
         if !branch.is_empty() {
             built["br"] = json!(branch);
+        }
+        // Its project, for that project's saved scripts (`snapshot` swaps it for them).
+        if let Some(project) = thread["projectId"].as_str() {
+            built["pid"] = json!(project);
         }
         // What it runs on and with what permissions, for the selectors over the box.
         if let Some(cfg) = thread_settings(thread, read.config.as_ref()) {
@@ -3314,6 +3398,14 @@ impl Bridge {
             let links = self.threads.get(str_of(&data["e"])).and_then(|list| list.iter().find(|t| t["threadId"] == data["id"])).map(pull_request_links);
             if let Some(links) = links.filter(|l| !l.is_empty()) {
                 data["prs"] = json!(links);
+            }
+            // By name and id only: what a script runs stays out of the game.
+            if let Some(project) = data.as_object_mut().and_then(|d| d.remove("pid")) {
+                match self.project_scripts(str_of(&data["e"]), str_of(&project)) {
+                    Some([]) => {}
+                    Some(scripts) => data["scr"] = json!(scripts.iter().map(|s| json!({ "id": s["id"], "n": plain(str_of(&s["name"]), 40) })).collect::<Vec<_>>()),
+                    None => data["sna"] = json!(true),
+                }
             }
             data["e"] = json!(env_index(str_of(&data["e"])));
             data
