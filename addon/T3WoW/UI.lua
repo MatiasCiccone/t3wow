@@ -3233,6 +3233,25 @@ end
 
 local toasts, toastPool = {}, {}
 
+-- The waits you've been told about, kept across /reload (machine id by "machine:thread").
+-- A notification counts once it ran its time or was clicked: one a reload wiped, one
+-- pushed off by newer ones or one never shown doesn't.
+-- On UI, not a local of its own: the file has all of Lua's 200 locals in one chunk.
+UI.Waits = { caughtUp = {} }
+function UI.Waits.Seen()
+    T3WoWDB = T3WoWDB or {}
+    T3WoWDB.seenWaiting = T3WoWDB.seenWaiting or {}
+    return T3WoWDB.seenWaiting
+end
+function UI.Waits.Key(envId, threadId) return tostring(envId) .. ":" .. tostring(threadId) end
+function UI.Waits.NeedsYou(status) return EVENT_SETTING[status] == "onWaiting" end
+function UI.Waits.MarkSeen(toast)
+    if toast.waitKey then UI.Waits.Seen()[toast.waitKey] = toast.envId end
+end
+function UI.Waits.Reading(envId, threadId)
+    return frame:IsShown() and selected and selected.id == threadId and selected.env == envId
+end
+
 local function layoutToasts()
     for index, toast in ipairs(toasts) do
         toast:ClearAllPoints()
@@ -3296,6 +3315,7 @@ local function newToast()
         -- Left-click opens the thread in the T3 WoW window (an approval: in T3, the only
         -- place it can be given); right-click only dismisses.
         local threadId, envId, inT3 = self.threadId, self.envId, self.inT3
+        UI.Waits.MarkSeen(self)
         removeToast(self)
         if mouse == "LeftButton" and threadId then
             if inT3 then openInT3(threadId, envId) else UI.OpenThread(threadId, envId) end
@@ -3318,7 +3338,10 @@ local function toastUpdate(self)
     end
     local fading = shown - self.duration
     if fading <= 0 then return self:SetAlpha(1) end
-    if fading >= 0.6 then return removeToast(self) end
+    if fading >= 0.6 then
+        UI.Waits.MarkSeen(self)
+        return removeToast(self)
+    end
     self:SetAlpha(1 - fading / 0.6)
 end
 
@@ -3336,6 +3359,7 @@ local function showToast(event)
         end
     end
     toast.threadId, toast.envId, toast.inT3 = event.id, event.e, event.s == "approval" and settings().approvalOpensT3 == true
+    toast.waitKey = event.id and UI.Waits.NeedsYou(event.s) and UI.Waits.Key(event.e, event.id) or nil
     local icon = STATUS_ICON[event.s] or "check"
     local r, g, b = hexColor(s[2])
     toast.circle:SetColors({ r, g, b, 0.18 })
@@ -3376,7 +3400,7 @@ end
 function UI.Alert(event)
     local s = settings()
     -- Nothing to announce about the thread you're reading.
-    if frame:IsShown() and selected and selected.id == event.id and selected.env == event.e then
+    if UI.Waits.Reading(event.e, event.id) then
         return "not shown: you were reading that thread"
     end
     if not s[EVENT_SETTING[event.s] or "onCompleted"] then return "not shown: turned off in Settings" end
@@ -3658,6 +3682,48 @@ local function announce(data)
     print(tag .. " connected to T3." .. (waiting > 0 and format(" |cffff8000%d %s you.|r", waiting, waiting == 1 and "thread needs" or "threads need") or ""))
 end
 
+-- Alerts come from a thread changing status, so a thread already waiting when the UI
+-- session starts gets none. The first update that lists a machine's threads in this
+-- session shows a notification, without a sound, for each wait you haven't been told
+-- about. Only this session's updates: one left in a slot can be out of date.
+function UI.Waits.CatchUp(data)
+    if not ns.Link.IsCurrent(data) then return end
+    local s = settings()
+    local seen = UI.Waits.Seen()
+    local threads = data.threads or {}
+    local listed, waiting = {}, {}
+    for _, t in ipairs(threads) do
+        local envId = envIdOf(t.e)
+        if envId then
+            listed[envId] = true
+            if UI.Waits.NeedsYou(t.s) then waiting[UI.Waits.Key(envId, t.id)] = true end
+        end
+    end
+    -- A wait that's over is forgotten, so the thread's next one notifies.
+    for key, envId in pairs(seen) do
+        if listed[envId] and not waiting[key] then seen[key] = nil end
+    end
+    for _, toast in ipairs(toasts) do
+        if listed[toast.envId] and not waiting[toast.waitKey] then toast.waitKey = nil end
+    end
+    if s.toasts and s.onWaiting then
+        -- From the end of the list: the newest are shown last, so they stay if there are too many.
+        for index = #threads, 1, -1 do
+            local t = threads[index]
+            local envId = envIdOf(t.e)
+            if envId and not UI.Waits.caughtUp[envId] and UI.Waits.NeedsYou(t.s) and not t.set and not t.sn
+                and not seen[UI.Waits.Key(envId, t.id)] and not UI.Waits.Reading(envId, t.id) then
+                local onScreen = false
+                for _, toast in ipairs(toasts) do
+                    onScreen = onScreen or (toast.threadId == t.id and toast.envId == envId)
+                end
+                if not onScreen then showToast({ s = t.s, t = t.t or "", id = t.id, e = envId }) end
+            end
+        end
+    end
+    for envId in pairs(listed) do UI.Waits.caughtUp[envId] = true end
+end
+
 -- What the companion says about commands sent from here: a failed one gives its text
 -- back (and drops its "(sending)" echo, or the "Sending…" on Send answer); a started
 -- thread opens, if you are still in the New Thread composer.
@@ -3716,6 +3782,7 @@ end
 function UI.OnInbox(data)
     announce(data)
     inbox = data
+    UI.Waits.CatchUp(data)
     if not restartSaid and restartNote() then
         restartSaid = true
         print("|cff8f8fffT3 WoW|r |cffff8000" .. restartNote() .. ".|r")
@@ -3738,6 +3805,8 @@ function UI.ForgetLogin()
     askState.k, askState.picks, askState.sent, askState.sentAt = nil, {}, nil, nil
     Selectors.Forget()
     announced = false
+    UI.Waits.caughtUp = {}
+    T3WoWDB.seenWaiting = nil
     while #toasts > 0 do removeToast(toasts[#toasts]) end
     UI.Refresh()
 end
