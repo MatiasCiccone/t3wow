@@ -211,6 +211,8 @@ assert(Link.Pending() == 2, "the saved message was dropped")
 assert(#notices == 0, notices[1])
 -- The header-only frame tells the companion this UI session is here.
 assert(not plain_frames[#plain_frames]:find('"q"', 1, true), plain_frames[#plain_frames])
+-- And which command waits, so the companion's first answer can't ack it away unsent.
+assert(plain_frames[#plain_frames]:find('"pt":{"s":5}', 1, true), plain_frames[#plain_frames])
 update({ lm = 1 })
 assert(#frames_drawn > 0, "nothing drawn once the companion said so")
 tick(6)

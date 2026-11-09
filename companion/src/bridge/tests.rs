@@ -4741,6 +4741,38 @@ fn after_a_crash_rolls_numbers_back_a_long_command_still_runs() {
 }
 
 #[test]
+fn the_wait_after_a_reload_names_the_long_command_so_the_first_ack_cannot_drop_it() {
+    // The old session got as far as 9; the saved command is numbered 2 after a crash, or 9
+    // itself if it failed and that news went with the old session. Either way it must stay.
+    for pending in [2u64, 9] {
+        let mut rig = Rig::new(50_000_000);
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 9, "t": "send", "id": "t1", "m": "before" }] }));
+        rig.bridge.tick();
+        assert_eq!(rig.bridge.link.acked["c1"], 9);
+
+        // Only the header until the game knows this companion takes parts.
+        rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "p": 1, "pt": { "s": pending } }));
+        assert_eq!(rig.bridge.link.acked["c1"], pending - 1);
+        rig.advance(5000);
+        rig.bridge.tick();
+        let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+        assert!(inbox.contains(&format!("u=\"ui2\",ack={},", pending - 1)), "{inbox}");
+
+        // Then the parts run it.
+        let command = json!({ "s": pending, "t": "send", "id": "t1", "m": "w".repeat(6000) });
+        let parts = cut(&command, 2591);
+        let count = parts.len();
+        for (i, part) in parts.iter().enumerate() {
+            send_parts(&mut rig, part_frame(i + 1, count, pending, false, "ui2", part));
+        }
+        rig.advance(5000);
+        rig.bridge.tick();
+        assert_eq!(rig.t3.calls_to("t3_thread_send").last().unwrap()["message"], command["m"]);
+        assert_eq!(rig.bridge.link.acked["c1"], pending);
+    }
+}
+
+#[test]
 fn unreadable_parts_come_back_as_a_failure_so_the_game_stops_drawing_them() {
     for (zlib, bytes) in [(true, b"not zlib at all".to_vec()), (false, b"{not json".to_vec())] {
         let mut rig = Rig::new(45_000_000);
