@@ -505,15 +505,19 @@ fn put_back(app: &App, slots: &Slots, asked: bool) -> Option<RestartNote> {
     if repair.created > 0 {
         log::line(&format!("Created {} missing addon files", repair.created));
     }
-    if repair.addon.is_none() && repair.created == 0 {
+    if repair.slots_moved > 0 {
+        log::line(&format!("Moved {} slot addons to Slot.xml", repair.slots_moved));
+    }
+    if repair.addon.is_none() && repair.created == 0 && repair.slots_moved == 0 {
         if asked {
             app.notify(Notice::new(Level::Info, "Addon files: nothing missing", format!("Every T3 WoW file is in {}.", slots.addons_dir.display())));
         }
         return None;
     }
-    let what = match &repair.addon {
-        Some(addon) => format!("The addon was {addon}"),
-        None => format!("{} missing addon files were put back", repair.created),
+    let what = match (&repair.addon, repair.slots_moved) {
+        (Some(addon), _) => format!("The addon was {addon}"),
+        (None, 0) => format!("{} missing addon files were put back", repair.created),
+        (None, _) => "The update slots were changed so addon managers leave them alone".to_string(),
     };
     let notice = if asked {
         // Said now, whether WoW runs or not.
@@ -973,6 +977,26 @@ mod tests {
         assert!(notices[0].text.contains("missing addon files were put back"), "{}", notices[0].text);
         assert!(!slots.missing_files());
         assert_eq!(std::fs::read_to_string(&inbox).unwrap(), "T3WoW_Inbox = {}", "the slot's update stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_install_from_before_slot_xml_is_told_once_to_restart_wow() {
+        let dir = std::env::temp_dir().join(format!("t3wow-slot-xml-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let slots = Slots::new(&dir, "16001");
+        slots.install().unwrap();
+        crate::slots::make_slots_old(&dir, "16001");
+        let app = App::new();
+
+        let note = put_back(&app, &slots, false).expect("a note to restart WoW");
+        assert!(note.line.contains("not /reload"), "{}", note.line);
+        let notice = note.notice.expect("said once WoW is seen running");
+        assert_eq!(notice.title, "Restart WoW to load the new addon");
+        assert!(notice.text.contains("update slots were changed"), "{}", notice.text);
+        assert!(notice.text.contains(RESTART_WOW), "{}", notice.text);
+
+        assert!(put_back(&app, &slots, false).is_none(), "nothing more to say next time");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
