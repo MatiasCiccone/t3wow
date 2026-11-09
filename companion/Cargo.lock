@@ -1546,6 +1546,7 @@ version = "0.10.0"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
+ "miniz_oxide 0.9.1",
  "png",
  "regex",
  "rfd",

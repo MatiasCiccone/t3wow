@@ -41,6 +41,12 @@ local CHECKIN_AFTER = { 600, 1200, 1800 }
 -- in a row went unanswered: as a nudge in signal mode, and on the timer. Once the
 -- companion counts as not answering (ACK_PATIENCE), nudges stop and the timer slows down.
 local NUDGE_BACKOFF, QUEUE_BACKOFF, STALLED_SECONDS = { 5, 10, 20, 60 }, { 3, 3, 10, 20, 60 }, 60
+-- How long each part of a long command stays on the strip. The companion reads the screen
+-- four times a second and acks once, when it has them all; a part it missed comes round
+-- again. Slower while it isn't answering: each new part redraws the whole strip.
+local PART_SECONDS, PART_STALLED_SECONDS = 0.5, 2
+local TOO_LONG = "That message is too long to send from the game."
+local UPDATE_COMPANION = "That message is too long for your T3 WoW companion: update the companion, or shorten the message."
 
 local floor, format = math.floor, string.format
 local db
@@ -67,6 +73,8 @@ local state = {
     queueSince = nil,
     syncUntil = 0,
     signalCheck = nil,
+    longOk = nil, -- whether the companion takes commands in parts; nil until it answers
+    long = nil, -- the command going out in parts: { s, parts, z, index, at, shown }
 }
 Link.state = state
 
@@ -205,8 +213,41 @@ end
 function Link.Images() return state.images == true end
 
 local frameSeq = 0
+
+-- The first command alone doesn't fit a frame. Draws its next part and returns true, or
+-- returns false if that can't work.
+local function renderPart(header, command)
+    if state.longOk == nil then
+        -- Only a command saved before a /reload gets here this early: wait for the
+        -- companion's first update, which this header-only frame asks for.
+        frameSeq = frameSeq + 1
+        renderStrip(Codec.Encode(frameSeq, Codec.Json(header)))
+        return true
+    end
+    if not state.longOk then
+        ns.UI.Notice(UPDATE_COMPANION)
+        return false
+    end
+    local long = state.long
+    if not long then
+        local parts, z = Codec.Split(Codec.Json(command))
+        if not parts then
+            ns.UI.Notice(TOO_LONG)
+            return false
+        end
+        long = { s = command.s, parts = parts, z = z, index = 1, at = GetTime() }
+        state.long = long
+        trace(format("send #%d in %d part(s)%s", command.s, #parts, z and ", compressed" or ""))
+    end
+    header.pt = { s = long.s, i = long.index, n = #long.parts, z = long.z and 1 or nil }
+    frameSeq = frameSeq + 1
+    renderStrip(Codec.EncodePart(frameSeq, Codec.Json(header), long.parts[long.index]))
+    return true
+end
+
 function Link.Render()
     if not own then return strip:Hide() end
+    if state.long and (not own.queue[1] or own.queue[1].s ~= state.long.s) then state.long = nil end
     if #own.queue == 0 then
         state.queueSince = nil
         if GetTime() >= state.syncUntil then return strip:Hide() end
@@ -229,9 +270,10 @@ function Link.Render()
         payload = candidate
     end
     if not payload then
-        -- A single command that can never fit: drop it rather than block the queue.
+        header.q = nil
+        if renderPart(header, own.queue[1]) then return end
+        -- A single command that can never be sent: drop it rather than block the queue.
         table.remove(own.queue, 1)
-        ns.UI.Notice("That message is too long to send from the game.")
         return Link.Render()
     end
     frameSeq = frameSeq + 1
@@ -250,15 +292,18 @@ function Link.Send(command)
     return command.s
 end
 
--- Whether a command fits in a frame on its own. One that doesn't can never be sent, so
--- the window checks before it clears what you typed.
+-- Whether a command can be sent, on its own in a frame or in parts. One that can't never
+-- will be, so the window checks before it clears what you typed. If not, also says why
+-- when that isn't the plain length (nil: the caller's own "too long" words).
 function Link.Fits(command)
     local alone = {}
     for key, value in pairs(command) do alone[key] = value end
     alone.s = (own and own.seq or 0) + 1
     local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1,
         lid = db and db.login, im = state.images and 1 or nil, dc = 1, wk = 1, g = state.inStep, q = { alone } }
-    return #Codec.Json(header) <= Codec.MAX_PAYLOAD
+    if #Codec.Json(header) <= Codec.MAX_PAYLOAD then return true end
+    if state.longOk == false then return false, UPDATE_COMPANION end
+    return Codec.Split(Codec.Json(alone)) ~= nil
 end
 
 function Link.Pending() return own and #own.queue or 0 end
@@ -366,6 +411,15 @@ local function receive(inbox)
     if (inStep ~= 0 and renewed) or (inStep == 0 and wasInStep ~= 0) then
         state.syncUntil = math.max(state.syncUntil, GetTime() + SYNC_SECONDS)
         Link.Render()
+    end
+    -- Whether this companion takes long commands. Only an update written for this UI session
+    -- says: one left in a slot may come from before the companion was updated.
+    if inbox.u == nil or inbox.u == state.uiSession then
+        local longOk = inbox.lm == 1
+        if longOk ~= state.longOk then
+            state.longOk = longOk
+            if #own.queue > 0 then Link.Render() end
+        end
     end
     -- An update written for an earlier UI session (u) carries that session's ack, which
     -- can be past this session's command numbers after a crash: leave the queue alone.
@@ -564,6 +618,17 @@ poller:SetScript("OnUpdate", function(_, delta)
     local now = GetTime()
     if strip:IsShown() and #own.queue == 0 and now >= state.syncUntil then strip:Hide() end
     updateCapability(now)
+    local long = state.long
+    if long and #long.parts > 1 and now - long.at >= (Link.Stalled() and PART_STALLED_SECONDS or PART_SECONDS) then
+        long.at = now
+        long.index = long.index % #long.parts + 1
+        -- The wait for an answer (nudges, Stalled) starts once every part has been shown.
+        if not long.shown then
+            state.queueSince = now
+            long.shown = long.index == 1
+        end
+        Link.Render()
+    end
     local watching = signalling()
     if watching ~= state.wasSignalling then
         -- Tell the companion right away: it raises signals only once it sees we watch them.

@@ -30,6 +30,20 @@ return table.concat(out)`);
   }
 });
 
+test("the addon draws exactly the part frames the companion joins", () => {
+  const { long } = JSON.parse(fixture("parts.json"));
+  assert.equal(long.length, 2);
+  for (const { frames } of long) {
+    for (const { seq, header, part, cells } of frames) {
+      const bytes = [...Buffer.from(part, "base64")].map((b) => `\\${b}`).join("");
+      const drawn = runLua(`local out = {}
+for i, v in ipairs(Codec.EncodePart(${seq}, [==[${header}]==], "${bytes}")) do out[i] = string.format("%d", v) end
+return table.concat(out)`);
+      assert.equal(drawn, cells);
+    }
+  }
+});
+
 test("the inbox the companion writes loads in the game with every field intact", () => {
   const inbox = JSON.parse(fixture("inbox.json"));
   const source = fixture("inbox.lua").replace("T3WoW_Inbox =", "local T3WoW_Inbox =");

@@ -44,13 +44,13 @@ fn cell(px: &[u8], stride: usize, w: usize, h: usize, x: usize, y: usize) -> Opt
     Some(bit(px[i + 2]) * 4 + bit(px[i + 1]) * 2 + bit(px[i]))
 }
 
-/// Finds the strip (its first cells are `magic`, within SEARCH pixels of the corner) and
+/// Finds the strip (its first cells are one of `magics`, within SEARCH pixels of the corner) and
 /// reads just the cells its frame needs, so the scene behind it doesn't change the result.
-pub fn sample(px: &[u8], stride: usize, w: usize, h: usize, magic: &[u8]) -> Option<Vec<u8>> {
+pub fn sample(px: &[u8], stride: usize, w: usize, h: usize, magics: &[Vec<u8>]) -> Option<Vec<u8>> {
     let half = CELL_PX / 2;
     for dy in 0..=SEARCH {
         for dx in 0..=SEARCH {
-            let found = magic.iter().enumerate().all(|(i, &m)| cell(px, stride, w, h, dx + i * CELL_PX + half, dy + half) == Some(m));
+            let found = magics.iter().any(|magic| magic.iter().enumerate().all(|(i, &m)| cell(px, stride, w, h, dx + i * CELL_PX + half, dy + half) == Some(m)));
             if !found {
                 continue;
             }
@@ -213,7 +213,7 @@ mod win {
     }
 
     /// Copies the window's top-left corner from the screen and looks for the strip.
-    pub fn sample_window(hwnd: HWND, magic: &[u8]) -> Sampled {
+    pub fn sample_window(hwnd: HWND, magics: &[Vec<u8>]) -> Sampled {
         unsafe {
             if IsIconic(hwnd) != 0 {
                 return Sampled::NotCapturable;
@@ -256,7 +256,7 @@ mod win {
             if lines == 0 {
                 return Sampled::NotCapturable;
             }
-            match sample(&pixels, w * 4, w, h, magic) {
+            match sample(&pixels, w * 4, w, h, magics) {
                 Some(cells) => Sampled::Cells(cells),
                 None => Sampled::NoStrip,
             }
@@ -355,7 +355,7 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{decode_cells, encode_frame};
+    use crate::codec::{decode_cells, encode_frame, encode_part_frame};
 
     /// A BGRA image of the strip drawn at (dx, dy) on a grey background, like the game draws it.
     fn draw(cells: &[u8], dx: usize, dy: usize) -> (Vec<u8>, usize, usize) {
@@ -382,6 +382,13 @@ mod tests {
         let (px, w, h) = draw(&encode_frame(42, payload), 3, 2);
         let cells = sample(&px, w * 4, w, h, &magic_cells()).expect("strip found");
         assert_eq!(decode_cells(&cells).unwrap().payload, payload);
+    }
+
+    #[test]
+    fn a_part_frame_on_screen_is_found_too() {
+        let (px, w, h) = draw(&encode_part_frame(9, r#"{"k":"a"}"#, &[1, 2, 0, 255]), 1, 4);
+        let cells = sample(&px, w * 4, w, h, &magic_cells()).expect("strip found");
+        assert_eq!(decode_cells(&cells).unwrap().part, Some(vec![1, 2, 0, 255]));
     }
 
     #[test]

@@ -8,6 +8,13 @@ Codec.MAGIC1, Codec.MAGIC2, Codec.VERSION = 0x54, 0x33, 1
 Codec.CELL_PX, Codec.CELLS_PER_ROW, Codec.MAX_ROWS = 4, 200, 40
 -- 3 bits per cell; header 7 bytes + checksum 2 bytes.
 Codec.MAX_PAYLOAD = math.floor(Codec.CELLS_PER_ROW * Codec.MAX_ROWS * 3 / 8) - 9
+-- A frame of version 2 carries one part of a command too long for a frame: its payload is
+-- the usual JSON header, a zero byte (JSON never holds one), then the part's raw bytes.
+-- Keep the limits in step with companion/src/bridge.rs.
+Codec.VERSION_PART = 2
+Codec.PART_BYTES = Codec.MAX_PAYLOAD - 400 -- leaves room for the header
+Codec.MAX_PARTS = 16
+Codec.MAX_LONG_JSON = 64000
 
 local floor, byte, char, format = math.floor, string.byte, string.char, string.format
 
@@ -62,11 +69,11 @@ function Codec.Fletcher16(bytes, first, last)
 end
 
 --- Frame bytes: 'T' '3' version seqHi seqLo lenHi lenLo payload... sum1 sum2
-function Codec.Frame(seq, payload)
+function Codec.Frame(seq, payload, version)
     local length = #payload
     if length > Codec.MAX_PAYLOAD then return nil end
     seq = seq % 65536
-    local bytes = { Codec.MAGIC1, Codec.MAGIC2, Codec.VERSION,
+    local bytes = { Codec.MAGIC1, Codec.MAGIC2, version or Codec.VERSION,
         floor(seq / 256), seq % 256, floor(length / 256), length % 256 }
     for index = 1, length do bytes[#bytes + 1] = byte(payload, index) end
     local s1, s2 = Codec.Fletcher16(bytes, 3, #bytes)
@@ -99,6 +106,40 @@ end
 function Codec.Encode(seq, payload)
     local bytes = Codec.Frame(seq, payload)
     return bytes and Codec.Cells(bytes) or nil
+end
+
+function Codec.EncodePart(seq, header, part)
+    local bytes = Codec.Frame(seq, header .. "\0" .. part, Codec.VERSION_PART)
+    return bytes and Codec.Cells(bytes) or nil
+end
+
+--- `text` zlib-compressed by the client, or nil when that isn't smaller or can't be trusted:
+--- the API is missing on older clients, and the companion can only read zlib.
+function Codec.Zlib(text)
+    local api, method = C_EncodingUtil, Enum and Enum.CompressionMethod and Enum.CompressionMethod.Zlib
+    if not (api and api.CompressString and api.DecompressString and method) then return nil end
+    local ok, out = pcall(api.CompressString, text, method)
+    if not ok or type(out) ~= "string" or #out < 2 or #out >= #text then return nil end
+    local first, second = byte(out, 1, 2)
+    if first % 16 ~= 8 or (first * 256 + second) % 31 ~= 0 then return nil end
+    local same, back = pcall(api.DecompressString, out, method)
+    if not same or back ~= text then return nil end
+    return out
+end
+
+--- A command's JSON as parts of at most PART_BYTES (cut anywhere: the companion joins
+--- the bytes before reading them), and whether they are compressed; nil if it's too long.
+function Codec.Split(json)
+    if #json > Codec.MAX_LONG_JSON then return nil end
+    local compressed = Codec.Zlib(json)
+    local body = compressed or json
+    local count = math.ceil(#body / Codec.PART_BYTES)
+    if count > Codec.MAX_PARTS then return nil end
+    local parts = {}
+    for index = 1, count do
+        parts[index] = body:sub((index - 1) * Codec.PART_BYTES + 1, index * Codec.PART_BYTES)
+    end
+    return parts, compressed ~= nil
 end
 
 return Codec

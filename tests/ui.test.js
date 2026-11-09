@@ -426,7 +426,7 @@ local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o =
 local view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask }
 inboxWith(ENVS, { threads = { thread }, view = view })
 UI.Select(thread)
-local long = string.rep('"', 2400)
+local long = string.rep('"', 33000) -- each one doubles once escaped: past the limit in parts
 typeText(long)
 local before = #queue()
 click("Submit answer")
@@ -466,13 +466,34 @@ test("an overlong message stays in the box instead of being dropped", () => {
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
 inboxWith(ENVS, { threads = { thread } })
 UI.Select(thread)
--- 2400 bytes (the box's limit) of quotes: each one doubles once escaped.
-local long = string.rep('"', 2400)
+-- Quotes double once escaped, so this is past the limit in parts. Only expanded picks can
+-- take a message there: the box itself stops at 16000 bytes.
+local long = string.rep('"', 33000)
 typeText(long)
 local before = #queue()
 click("Send")
 assert(#queue() == before, "sent")
 assert(typed() == long, "box cleared")
+return "ok"
+`);
+});
+
+test("a message too long for an older companion stays in the box and says to update it", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+Link.state.longOk = false
+local said
+local notice = UI.Notice
+UI.Notice = function(text) said = text; notice(text) end
+local long = string.rep("x", 4000)
+typeText(long)
+local before = #queue()
+click("Send")
+assert(#queue() == before, "sent")
+assert(typed() == long, "box cleared")
+assert(said and said:find("update the companion", 1, true), tostring(said))
 return "ok"
 `);
 });
