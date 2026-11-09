@@ -366,6 +366,12 @@ fn swap_files(exe: &Path, bytes: &[u8], rename: impl Fn(&Path, &Path) -> io::Res
         let _ = fs::remove_file(&new);
         return Err(format!("can't write the update next to the exe: {error}"));
     }
+    // fs::write makes an ordinary file: without this the updated program wouldn't start.
+    #[cfg(not(windows))]
+    if let Err(error) = make_executable(&new) {
+        let _ = fs::remove_file(&new);
+        return Err(format!("can't make the update executable: {error}"));
+    }
     if let Err(error) = rename(exe, &old) {
         let _ = fs::remove_file(&new);
         return Err(format!("can't move the running exe aside: {error}"));
@@ -379,6 +385,12 @@ fn swap_files(exe: &Path, bytes: &[u8], rename: impl Fn(&Path, &Path) -> io::Res
         });
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn make_executable(file: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(file, fs::Permissions::from_mode(0o755))
 }
 
 /// Removes the previous exes and unfinished downloads earlier updates left behind.
@@ -611,6 +623,16 @@ mod tests {
         fs::write(dir.join("t3wow.exe.new"), b"from 0.4.1").unwrap();
         clean_up_at(&exe);
         assert!(leftovers(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_updated_program_can_be_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, exe) = exe_dir("executable");
+        update_exe(&exe, "9.0.0", || Ok(b"new exe".to_vec()), |from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755);
         let _ = fs::remove_dir_all(&dir);
     }
 

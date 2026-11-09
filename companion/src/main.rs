@@ -7,14 +7,24 @@
 // Release builds have no console window; commands attach to the one they were run from.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Off Windows the capture, key watcher, update menu and tray aren't built yet, which leaves
+// what only they use unused.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod app;
 mod bridge;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod capture;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod clip;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod codec;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod config;
 #[cfg(windows)]
 mod dialog;
+#[cfg(target_os = "macos")]
+mod keychain;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
 mod log;
 mod lua;
@@ -26,6 +36,7 @@ mod t3;
 #[cfg(windows)]
 mod tray;
 mod updater;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod wow;
 
 use config::Config;
@@ -52,6 +63,36 @@ mod single_instance {
     #[cfg(windows)]
     static mut HANDLE: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
 
+    /// Kept open for as long as the companion runs; the system lets go of the lock when the
+    /// process ends, however it ends.
+    #[cfg(not(windows))]
+    static LOCK: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+    /// The lock on `path`, or None when another companion holds it (or it can't be taken:
+    /// like Windows, better not to start than to risk two writing the slots).
+    #[cfg(not(windows))]
+    pub(super) fn take_lock(path: &std::path::Path) -> Option<std::fs::File> {
+        use std::fs::{OpenOptions, TryLockError};
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = match OpenOptions::new().create(true).truncate(false).write(true).open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                crate::log::line(&format!("Couldn't open {}: {error}", path.display()));
+                return None;
+            }
+        };
+        match file.try_lock() {
+            Ok(()) => Some(file),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Error(error)) => {
+                crate::log::line(&format!("Couldn't lock {}: {error}", path.display()));
+                None
+            }
+        }
+    }
+
     pub fn acquire() -> bool {
         #[cfg(windows)]
         unsafe {
@@ -61,11 +102,22 @@ mod single_instance {
             HANDLE = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             return !HANDLE.is_null() && GetLastError() != ERROR_ALREADY_EXISTS;
         }
+        #[cfg(not(windows))]
+        if let Some(file) = take_lock(&crate::config::config_dir().join("companion.lock")) {
+            *LOCK.lock().unwrap() = Some(file);
+        } else {
+            return false;
+        }
         #[allow(unreachable_code)]
         true
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn release() {
+        #[cfg(not(windows))]
+        {
+            *LOCK.lock().unwrap() = None;
+        }
         #[cfg(windows)]
         unsafe {
             if !HANDLE.is_null() {
@@ -107,6 +159,21 @@ fn parse_args() -> Args {
     args
 }
 
+/// The command, as the messages below name it.
+const BIN: &str = if cfg!(windows) { "t3wow.exe" } else { "t3wow" };
+
+#[cfg(not(windows))]
+const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
+
+  t3wow                start the companion
+  t3wow run            run in this terminal instead, logging here
+  t3wow install        [--wow <_forever_ folder>] [--interface 16001]   reinstall the addon from scratch
+  t3wow login          [--origin http://<host>:<port> | local]          sign in to T3 again (local: the T3 on this Mac)
+  t3wow status         [--origin http://<host>:<port> | local]          check the addon install and the T3 connection
+  t3wow uninstall      remove the addon
+  t3wow update         install the newest release, if there is one";
+
+#[cfg(windows)]
 const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
 
   t3wow.exe            start in the system tray (what double-clicking does)
@@ -149,6 +216,11 @@ fn older_t3_note(client: &t3::McpClient) -> Option<String> {
 }
 
 fn command(args: Args) -> Result<(), String> {
+    // Only the commands that use the sign-in: `help` or `install` shouldn't bring up a prompt.
+    #[cfg(target_os = "macos")]
+    if matches!(args.command.as_deref(), Some("login" | "status")) {
+        keychain::read_at_startup();
+    }
     let config = Config::load();
     let command = args.command.as_deref().unwrap_or("help");
     // Some(None) is the T3 on this PC.
@@ -187,7 +259,7 @@ fn command(args: Args) -> Result<(), String> {
                 .map_err(|e| if e.starts_with("T3 Code isn't running") { "T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.".into() } else { e })?;
             println!("Signed in to {} ({}).", connected.origin, connected.scope.unwrap_or_default());
             if connected.read_only {
-                println!("Warning: {}", t3::READ_ONLY_NOTE.replace("Sign in again", "Run t3wow.exe login again"));
+                println!("Warning: {}", t3::READ_ONLY_NOTE.replace("Sign in again", &format!("Run {BIN} login again")));
             }
             if let Some(note) = t3::target().and_then(|t| t.token.map(|token| t3::McpClient::new(&t.origin, &token))).as_ref().and_then(older_t3_note) {
                 println!("{note}");
@@ -198,18 +270,23 @@ fn command(args: Args) -> Result<(), String> {
             let slots = Slots::for_wow(&dir, &interface);
             match slots.installed_version() {
                 Some(version) if slots.installed() => println!("WoW: {} (addon installed, {version}; companion ships {})", dir.display(), slots::shipped_version()),
-                _ => println!("WoW: {} (addon NOT installed: run t3wow.exe install)", dir.display()),
+                _ => println!("WoW: {} (addon NOT installed: run {BIN} install)", dir.display()),
             }
             #[cfg(windows)]
             println!("WoW client: {}", if capture::find_wow(&dir).is_some() { "running" } else { "not running" });
             let t3::Target { origin, token, key } = target(&origin).ok_or("T3: not running on this PC")?;
-            let token = token.ok_or(format!("T3 ({origin}): not signed in: run t3wow.exe login"))?;
+            // The sign-in is saved but out of reach: "not signed in" would be wrong.
+            #[cfg(target_os = "macos")]
+            if let Some(problem) = keychain::blocked().filter(|_| token.is_none()) {
+                return Err(format!("T3 ({origin}): {problem}"));
+            }
+            let token = token.ok_or(format!("T3 ({origin}): not signed in: run {BIN} login"))?;
             let client = t3::McpClient::new(&origin, &token);
             use t3::T3;
             let links = client.call("t3_environment_links", serde_json::json!({})).map_err(|e| format!("T3 ({origin}): {e}"))?;
             if Config::load().sign_in_read_only(&key) {
                 println!("T3: {origin}, signed in, read only");
-                println!("  {}", t3::READ_ONLY_NOTE.replace("Sign in again", "Run t3wow.exe login again"));
+                println!("  {}", t3::READ_ONLY_NOTE.replace("Sign in again", &format!("Run {BIN} login again")));
             } else {
                 println!("T3: {origin}, signed in");
             }
@@ -276,5 +353,22 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::single_instance::take_lock;
+
+    #[test]
+    fn a_second_companion_is_turned_away_until_the_first_lets_go() {
+        let dir = std::env::temp_dir().join(format!("t3wow-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("made-for-it").join("companion.lock");
+        let first = take_lock(&path).expect("the first one starts");
+        assert!(take_lock(&path).is_none(), "the second one doesn't");
+        drop(first);
+        assert!(take_lock(&path).is_some(), "the next one starts once the first has gone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

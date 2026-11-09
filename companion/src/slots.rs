@@ -177,6 +177,12 @@ impl Slots {
         Slots { addon_dir: addons_dir.join(ADDON), addons_dir, interface: interface.to_string(), font, alt_font }
     }
 
+    /// For other modules' tests: they run anywhere, with or without Windows' fonts.
+    #[cfg(test)]
+    pub fn with_fixture_fonts(addons_dir: impl Into<PathBuf>, interface: &str) -> Slots {
+        Slots::with_fonts(addons_dir, interface, Some(b"fixture font bytes".to_vec()), Some(b"fixture font bytes".to_vec()))
+    }
+
     pub fn for_wow(wow_dir: &Path, interface: &str) -> Slots {
         Slots::new(wow_dir.join("Interface").join("AddOns"), interface)
     }

@@ -5,6 +5,9 @@
 # services that run as the owner's account), so it uses that machine's Rust, which CI leaves
 # alone: update it there with rustup update. The checkout keeps target/ between runs (each
 # runner has its own), so a build recompiles only what changed, and nothing is cached on GitHub.
+# test-macos lints and tests the macOS support in progress on a GitHub-hosted Mac. It's off
+# (if: false) while the Actions allowance is spent: hosted macOS minutes count ten times.
+# Run the same steps on a Mac before merging macOS work.
 # Actions are pinned to commit SHAs (Dependabot keeps them current).
 name: CI
 
@@ -51,3 +54,31 @@ jobs:
           name: t3wow-exe
           path: companion/target/release/t3wow.exe
           if-no-files-found: error
+
+  test-macos:
+    if: false
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: companion
+
+      - run: npm ci
+
+      - name: Tests (addon Lua and companion)
+        run: npm test
+
+      - name: Lint
+        run: cargo clippy --manifest-path companion/Cargo.toml --all-targets -- -D warnings

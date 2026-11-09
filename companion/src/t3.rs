@@ -128,7 +128,14 @@ pub fn open_browser(url: &str) {
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    if let Ok(mut child) = std::process::Command::new("open").arg(url).spawn() {
+        // It exits at once; waited for so it doesn't stay behind as a zombie.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
@@ -239,6 +246,11 @@ pub fn connect(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Connected, String> {
     use crate::config::{canonical_origin, server_label, unencrypted_over_network, Config};
+    // Before the browser: a new sign-in couldn't be saved anyway.
+    #[cfg(target_os = "macos")]
+    if let Some(problem) = crate::keychain::blocked() {
+        return Err(format!("Can't sign in: {problem}."));
+    }
     let mut config = Config::load();
     let before = config.origin.as_deref().map(canonical_origin);
     if let Some(origin) = &switch_to {

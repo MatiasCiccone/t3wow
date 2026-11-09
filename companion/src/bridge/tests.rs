@@ -2856,6 +2856,13 @@ fn pages_and_embedded_files_are_found_in_t3s_text() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn off_windows_embedded_files_are_found_by_their_absolute_paths() {
+    let found = embedded_files(r#"![one](/Users/you/one.png) ![](file:///Users/you/two%20x.jpg) ![rel](pics/z.png) ![host](file://box/three.png)"#);
+    assert_eq!(found, vec![("one".to_string(), PathBuf::from("/Users/you/one.png")), (String::new(), PathBuf::from("/Users/you/two x.jpg"))]);
+}
+
 #[test]
 fn a_picture_whose_file_is_gone_is_forgotten_at_start() {
     let dir = std::env::temp_dir().join(format!("t3wow-state-{}", std::process::id()));
@@ -3352,7 +3359,11 @@ fn without_pictures_in_the_game_a_paste_still_works_with_no_small_picture() {
     rig.bridge.tick();
     assert_eq!(rig.bridge.snapshot()["att"], json!([{ "d": "new", "i": 1, "w": 2, "h": 2 }]));
     assert!(rig.written.lock().unwrap().images.is_empty());
+    // The game is only told it can paste where the clipboard can be read.
+    #[cfg(windows)]
     assert_eq!(rig.bridge.snapshot()["pi"], true);
+    #[cfg(not(windows))]
+    assert!(rig.bridge.snapshot().get("pi").is_none());
 }
 
 /// What T3 says a machine offers, in the shape it answers (see the probe in the PR).

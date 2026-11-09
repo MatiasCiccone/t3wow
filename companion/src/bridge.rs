@@ -330,6 +330,11 @@ fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
             };
             let bytes = path.as_bytes();
             let absolute = bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/');
+            // Off Windows a path starts at /, which file:/// has just taken off.
+            #[cfg(not(windows))]
+            let path = if !absolute && target.starts_with("file:///") { format!("/{path}") } else { path };
+            #[cfg(not(windows))]
+            let absolute = absolute || path.starts_with('/');
             absolute.then(|| (c[1].trim().to_string(), PathBuf::from(path)))
         })
         .collect()
@@ -699,6 +704,7 @@ fn new_login_stamp() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum CaptureMessage {
     /// The WoW client process changed: Some(key) when one runs, None when none does.
     Wow(Option<String>),
@@ -4848,7 +4854,9 @@ impl Bridge {
         // A refused sign-in, else one that can only read: the game's top line says either.
         out.insert("auth".into(), json!(self.auth_error.as_deref().or(self.sign_in_read_only.then_some(READ_ONLY_LINE))));
         // This companion pastes images (the game offers Ctrl+V for them), and the ones pasted
-        // so far, by the message they go with (left out when there are none).
+        // so far, by the message they go with (left out when there are none). Only Windows
+        // can read the clipboard so far (`clip::read_image`).
+        #[cfg(windows)]
         out.insert("pi".into(), json!(true));
         let pasted: Vec<Value> = self
             .drafts
