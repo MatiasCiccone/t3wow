@@ -649,6 +649,10 @@ pub struct Bridge {
     painter: Option<Box<dyn Painter>>,
     /// The game's addon can show pictures this UI session (its frames say `im`).
     images_ok: bool,
+    /// The game's addon draws what an agent did as collapsed rows (its frames say `wk`).
+    work_ok: bool,
+    /// The rows opened most recently, until the game has had them (it keeps them after).
+    details: Vec<Detail>,
     /// The game's addon draws delegated tasks as cards (its frames say `dc`).
     cards_ok: bool,
     /// The open thread's pages found so far (see `read_view_scan`).
@@ -688,6 +692,399 @@ struct ScanCache {
     cards: Vec<FoundCard>,
     /// Where the thread's context was compacted (T3 draws a line there).
     compactions: Vec<u64>,
+    /// What it did between its messages, by position.
+    work: Vec<FoundWork>,
+    /// The run each item read belongs to and when it was last touched, by position: what
+    /// a finished turn folds, and for how long a steered part of it went on.
+    runs: BTreeMap<u64, (String, i64)>,
+}
+
+/// What an activity item did, for the row T3 folds it into.
+#[derive(Clone, Copy, PartialEq)]
+enum WorkKind {
+    Thought,
+    Question,
+    Read,
+    Edit,
+    Command,
+    Search,
+    Web,
+    Tool,
+}
+
+/// Something the agent did between its messages, which T3 draws as a collapsed row.
+#[derive(Clone)]
+struct FoundWork {
+    position: u64,
+    kind: WorkKind,
+    /// A thought's or question's start, or T3's title for a tool (many have none).
+    label: String,
+    /// False: still under way, so the scan comes back for it.
+    ended: bool,
+    /// A question: what you answered (its tool call is read once for that), and when.
+    answer: Option<String>,
+    answered: bool,
+    at: i64,
+}
+
+impl FoundWork {
+    fn from_item(item: &Value, position: u64, now: i64) -> Option<FoundWork> {
+        let text = str_of(&item["text"]);
+        let kind = match str_of(&item["type"]) {
+            "reasoning" => WorkKind::Thought,
+            "user_input_request" => WorkKind::Question,
+            "command_execution" => WorkKind::Command,
+            "file_change" => WorkKind::Edit,
+            "web_search" => WorkKind::Web,
+            "dynamic_tool" => match tool_name(text) {
+                "Read" => WorkKind::Read,
+                "Edit" | "Write" | "NotebookEdit" => WorkKind::Edit,
+                "Bash" | "PowerShell" => WorkKind::Command,
+                "Grep" | "Glob" | "ToolSearch" => WorkKind::Search,
+                "WebSearch" | "WebFetch" => WorkKind::Web,
+                _ => WorkKind::Tool,
+            },
+            _ => return None,
+        };
+        // A question can wait for you as long as it likes: its answer is looked for once it ends.
+        let stale = kind != WorkKind::Question && now - iso_seconds(str_of(&item["updatedAt"])) * 1000 >= WORK_STALE_MS;
+        let ended = stale || matches!(str_of(&item["status"]), "completed" | "failed" | "declined" | "cancelled" | "interrupted" | "error");
+        let label = match kind {
+            WorkKind::Thought => text.replace("**", ""),
+            // Still waiting: its card, further down, has the question.
+            WorkKind::Question if !ended => "Input requested".to_string(),
+            WorkKind::Question => question_start(text),
+            _ => str_of(&item["title"]).to_string(),
+        };
+        Some(FoundWork { position, kind, label: plain(&label, WORK_LABEL_CHARS), ended, answer: None, answered: false, at: iso_seconds(str_of(&item["updatedAt"])) })
+    }
+
+    fn is_tool(&self) -> bool {
+        !matches!(self.kind, WorkKind::Thought | WorkKind::Question)
+    }
+}
+
+/// The tool a dynamic_tool item ran, from its text (cut short, so not always valid JSON).
+fn tool_name(text: &str) -> &str {
+    text.split_once("\"toolName\": \"").and_then(|(_, rest)| rest.split_once('"')).map_or("", |(name, _)| name)
+}
+
+/// The start of a question from a user_input_request's text (JSON, cut short). A question
+/// with no words to show (an id that is a slug) is just said to have been asked.
+fn question_start(text: &str) -> String {
+    let start = text.split_once("\"question\": \"").or_else(|| text.split_once("\"id\": \"")).map_or("", |(_, rest)| rest);
+    let mut out = String::new();
+    let mut chars = start.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push(' '),
+                Some(escaped) => out.push(escaped),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    if out.contains(' ') { out } else { "Asked a question".to_string() }
+}
+
+/// A row's sentence: T3's title for a single tool that has one, else what the tools did.
+fn work_summary(rows: &[&FoundWork]) -> String {
+    if let [only] = rows {
+        if !only.label.is_empty() {
+            return only.label.clone();
+        }
+    }
+    let phrases: Vec<String> = [
+        (WorkKind::Read, "read", "file", "files"),
+        (WorkKind::Edit, "edited", "file", "files"),
+        (WorkKind::Command, "ran", "command", "commands"),
+        (WorkKind::Search, "ran", "search", "searches"),
+        (WorkKind::Tool, "used", "tool", "tools"),
+    ]
+    .iter()
+    .filter_map(|(kind, verb, one, many)| {
+        // Searching the code and the web read the same here (only their icons differ).
+        let n = rows.iter().filter(|r| r.kind == *kind || (*kind == WorkKind::Search && r.kind == WorkKind::Web)).count();
+        (n > 0).then(|| format!("{verb} {n} {}", if n == 1 { one } else { many }))
+    })
+    .collect();
+    let sentence = match phrases.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [one, two] => format!("{one} and {two}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    };
+    let mut letters = sentence.chars();
+    letters.next().map_or(String::new(), |first| first.to_uppercase().chain(letters).collect())
+}
+
+/// The rows the game shows, each with where it goes among the view's items. Tools in a row
+/// fold into one, until a thought, a question or something shown (`walls`) comes between.
+/// `done_before`: a thread still working shows only what its last message came after, so a
+/// stretch of work reaches the game once it is finished and costs no updates of its own.
+fn work_rows(work: &[FoundWork], first: u64, done_before: Option<u64>, walls: &[u64]) -> Vec<(u64, Value)> {
+    // k: its icon, for what all of it was; a mix of tools is just tools.
+    fn row(rows: &[&FoundWork], from: u64, text: String, out: &mut Vec<(u64, Value)>) {
+        let last = rows[rows.len() - 1].position;
+        let icon = match rows[0].kind {
+            _ if rows.iter().any(|r| r.kind != rows[0].kind) => "t",
+            WorkKind::Thought => "b",
+            WorkKind::Read => "r",
+            WorkKind::Edit => "e",
+            WorkKind::Command => "c",
+            WorkKind::Search => "s",
+            WorkKind::Web => "w",
+            _ => "t",
+        };
+        out.push((rows[0].position * 2, json!({ "r": "a", "x": text, "w": { "p": from, "l": last, "k": icon } })));
+    }
+    fn flush(tools: &mut Vec<&FoundWork>, out: &mut Vec<(u64, Value)>) {
+        if !tools.is_empty() {
+            row(tools, tools[0].position, work_summary(tools), out);
+            tools.clear();
+        }
+    }
+    let mut out = Vec::new();
+    let mut tools: Vec<&FoundWork> = Vec::new();
+    for item in work.iter().filter(|w| w.position >= first && done_before.is_none_or(|p| w.position < p)) {
+        if item.is_tool() {
+            let walled = tools.last().is_some_and(|prev| walls.iter().any(|w| *w > prev.position && *w < item.position));
+            if walled || tools.first().is_some_and(|start| item.position - start.position >= WORK_ROW_SPAN) {
+                flush(&mut tools, &mut out);
+            }
+            tools.push(item);
+            continue;
+        }
+        flush(&mut tools, &mut out);
+        if !item.label.is_empty() {
+            // A question's answer is in the tool call just before it, read along with it.
+            let from = if item.kind == WorkKind::Question { item.position.saturating_sub(1) } else { item.position };
+            row(&[item], from, item.label.clone(), &mut out);
+            if item.kind == WorkKind::Question {
+                if let Some((_, shown)) = out.last_mut() {
+                    if item.ended {
+                        shown["w"]["q"] = json!({ "a": item.answer, "at": item.at });
+                    } else {
+                        shown["w"]["k"] = json!("q");
+                        shown["w"]["still"] = json!(1);
+                    }
+                }
+            }
+        }
+    }
+    flush(&mut tools, &mut out);
+    out
+}
+
+/// A length of time as T3 says it: "22s", "2m 47s", "1h 5s".
+fn format_duration(seconds: i64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let parts = [(seconds / 3600, "h"), (seconds % 3600 / 60, "m"), (seconds % 60, "s")];
+    parts.iter().filter(|(n, _)| *n > 0).map(|(n, unit)| format!("{n}{unit}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Folds each finished turn under a "Worked for" row, by T3's rules: all it did goes
+/// inside but its last message, its questions, whatever isn't a message, row or card (a
+/// picture, a compaction's line) and a task still running. Nothing ending badly folds. A
+/// folded item says `f`, the name of its row (whose `w.l` is the same). The turn still
+/// going is headed by a row saying since when (`w.live`); the game keeps its clock. A
+/// message of yours sent into a turn under way (a steer) splits it: what came after folds
+/// under its own "Continued for" row, below that message.
+fn fold_turns(all: &mut Vec<(u64, Value)>, positions: &[u64], run_at: &BTreeMap<u64, (String, i64)>, recent: &Value) {
+    struct Turn<'a> {
+        run: &'a str,
+        members: Vec<usize>,
+        /// Where each steer falls among the members, and when it was sent.
+        steers: Vec<(usize, i64)>,
+    }
+    let mut turns: Vec<Turn> = Vec::new();
+    for (i, (order, item)) in all.iter().enumerate() {
+        let Some((run, at)) = run_at.get(&(order / 2)) else { continue };
+        let known = turns.iter_mut().find(|t| t.run == run.as_str());
+        if item["r"] == "u" {
+            // T3's read doesn't say it's a steer, but the message that starts a run comes
+            // before all it did. Back-to-back steers split once, after the last of them.
+            if let Some(turn) = known.filter(|t| !t.members.is_empty() && order.is_multiple_of(2)) {
+                if turn.steers.last().is_some_and(|(start, _)| *start == turn.members.len()) {
+                    turn.steers.pop();
+                }
+                turn.steers.push((turn.members.len(), *at));
+            }
+            continue;
+        }
+        match known {
+            Some(turn) => turn.members.push(i),
+            None => turns.push(Turn { run, members: vec![i], steers: Vec::new() }),
+        }
+    }
+    let mut folds: Vec<(usize, Value, Vec<usize>)> = Vec::new();
+    let latest = recent.as_array().and_then(|runs| runs.first()).filter(|r| working(str_of(&r["status"])));
+    if let Some(latest) = latest {
+        let started = iso_seconds(str_of(if latest["startedAt"].is_string() { &latest["startedAt"] } else { &latest["requestedAt"] }));
+        if started > 0 {
+            let at = turns.iter().find(|t| latest["runId"] == t.run).map_or(all.len(), |t| t.members[0]);
+            folds.push((at, json!({ "r": "a", "x": "Working…", "w": { "l": "live", "live": started, "still": 1 } }), Vec::new()));
+        }
+    }
+    for Turn { run, members, steers } in turns {
+        let Some(info) = recent.as_array().and_then(|runs| runs.iter().find(|r| r["runId"] == run && r["status"] == "completed")) else { continue };
+        let is_message = |i: usize| all[i].0.is_multiple_of(2) && positions.contains(&(all[i].0 / 2));
+        let last_message = members.iter().rposition(|i| is_message(*i));
+        let hidden: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(at, i)| {
+                let item = &all[**i].1;
+                let (row, card) = (item["w"].is_object(), item["d"].is_object());
+                let inside = (is_message(**i) || row || card) && !item["w"]["q"].is_object() && item["d"]["s"] != "running";
+                Some(*at) != last_message && inside && (row || last_message.is_none_or(|last| *at < last))
+            })
+            .map(|(_, i)| *i)
+            .collect();
+        if hidden.is_empty() {
+            continue;
+        }
+        let seconds = iso_seconds(str_of(&info["completedAt"])) - iso_seconds(str_of(&info["startedAt"]));
+        let starts: Vec<usize> = std::iter::once(0).chain(steers.iter().map(|(start, _)| *start)).collect();
+        for (n, start) in starts.iter().enumerate() {
+            let part = &members[*start..starts.get(n + 1).copied().unwrap_or(members.len())];
+            let inside: Vec<usize> = hidden.iter().copied().filter(|i| part.contains(i)).collect();
+            if inside.is_empty() {
+                continue;
+            }
+            // The first row keeps the whole turn's time, as T3's does.
+            let label = if n == 0 {
+                if seconds > 0 { format!("Worked for {}", format_duration(seconds)) } else { "Worked".to_string() }
+            } else {
+                // A row stands for every tool it folds, up to its last position.
+                let spans = part.iter().map(|i| (all[*i].0 / 2, all[*i].1["w"]["l"].as_u64().unwrap_or(all[*i].0 / 2)));
+                let ended = spans.flat_map(|(from, to)| run_at.range(from..=to)).map(|(_, (_, at))| *at).max().unwrap_or(0);
+                let since = ended - steers[n - 1].1;
+                if since > 0 { format!("Continued for {}", format_duration(since)) } else { "Continued".to_string() }
+            };
+            let name = format!("f{}", all[part[0]].0);
+            folds.push((part[0], json!({ "r": "a", "x": label, "w": { "l": name, "fold": 1 } }), inside));
+        }
+    }
+    // From the last: placing a row moves what comes after it.
+    folds.sort_by_key(|(first, ..)| std::cmp::Reverse(*first));
+    for (first, row, hidden) in folds {
+        for i in hidden {
+            all[i].1["f"] = row["w"]["l"].clone();
+        }
+        let order = all.get(first).map_or(u64::MAX, |(order, _)| *order);
+        all.insert(first, (order, row));
+    }
+}
+
+/// A row opened in the game: all it did, in the pieces a message with code is drawn from.
+struct Detail {
+    env: String,
+    id: String,
+    last: u64,
+    body: Vec<Value>,
+    failed: bool,
+}
+
+/// What a tool call took, as text: its command or path when it has one, else all of it.
+fn tool_input(input: &Value) -> String {
+    input["command"].as_str().or(input["file_path"].as_str()).map(str::to_string).unwrap_or_else(|| serde_json::to_string_pretty(input).unwrap_or_default())
+}
+
+/// What a tool call gave back, as text.
+fn tool_output(output: &Value) -> String {
+    let text = output.as_str().or(output["content"].as_str()).or(output["stdout"].as_str()).or(output["file"]["content"].as_str()).or(output["text"].as_str());
+    match text {
+        Some(text) => text.to_string(),
+        None if output.is_null() => String::new(),
+        None => serde_json::to_string_pretty(output).unwrap_or_default(),
+    }
+}
+
+/// Text in code boxes, DETAIL_PIECE characters or so each, from what `left` allows.
+fn push_code(out: &mut Vec<Value>, left: &mut usize, text: &str) {
+    let mut piece = String::new();
+    let mut length = 0;
+    for c in text.trim_end().chars().take(*left) {
+        piece.push(c);
+        length += 1;
+        *left -= 1;
+        if length >= DETAIL_PIECE && (c == '\n' || length >= DETAIL_PIECE + 500) {
+            out.push(json!({ "c": std::mem::take(&mut piece) }));
+            length = 0;
+        }
+    }
+    if !piece.trim().is_empty() {
+        out.push(json!({ "c": piece }));
+    }
+}
+
+/// The questions of a row, each with its options and what you answered.
+fn question_segments(questions: &[Value], answers: &Value) -> Vec<Value> {
+    questions
+        .iter()
+        .map(|question| {
+            let asked = question["question"].as_str().or(question["id"].as_str()).unwrap_or("");
+            let mut text = wow_text(asked, 2000);
+            for option in question["options"].as_array().into_iter().flatten() {
+                text.push_str(&format!("\n• {}", plain(str_of(&option["label"]), 200)));
+            }
+            if let Some(answer) = answers[asked].as_str() {
+                text.push_str(&format!("\n\nYou answered: {}", plain(answer, 2000)));
+            }
+            json!(text)
+        })
+        .collect()
+}
+
+/// What a row's items did, for the game: DETAIL_CHARS at most.
+fn detail_segments(items: &[Value]) -> Vec<Value> {
+    let call_of = |item: &Value| serde_json::from_str::<Value>(str_of(&item["text"])).ok().filter(|call| call["toolName"].is_string());
+    if let Some(request) = items.iter().find(|item| item["type"] == "user_input_request") {
+        let asked = items.iter().filter_map(call_of).find(|call| call["toolName"] == "AskUserQuestion" && call["output"]["questions"].is_array());
+        if let Some(call) = asked {
+            return question_segments(call["output"]["questions"].as_array().map(Vec::as_slice).unwrap_or_default(), &call["output"]["answers"]);
+        }
+        let questions = serde_json::from_str::<Value>(str_of(&request["text"])).unwrap_or(Value::Null);
+        return question_segments(questions.as_array().map(Vec::as_slice).unwrap_or_default(), &Value::Null);
+    }
+    let mut out = Vec::new();
+    let mut left = DETAIL_CHARS;
+    for item in items {
+        if left == 0 {
+            break;
+        }
+        let text = str_of(&item["text"]);
+        match str_of(&item["type"]) {
+            "reasoning" => {
+                let thought = wow_text(&text.replace("**", ""), left);
+                left = left.saturating_sub(thought.chars().count());
+                out.push(json!(thought));
+            }
+            "command_execution" | "file_change" | "web_search" => push_code(&mut out, &mut left, text),
+            "dynamic_tool" => {
+                let title = str_of(&item["title"]);
+                let heading = if title.trim().is_empty() { tool_name(text) } else { title };
+                out.push(json!(plain(heading, 200)));
+                match call_of(item) {
+                    Some(call) => {
+                        push_code(&mut out, &mut left, &tool_input(&call["input"]));
+                        push_code(&mut out, &mut left, &tool_output(&call["output"]));
+                    }
+                    None => push_code(&mut out, &mut left, text),
+                }
+            }
+            _ => {}
+        }
+    }
+    if left == 0 {
+        out.push(json!("… the rest is in T3"));
+    }
+    out
 }
 
 /// A task the open thread delegated, as its activity shows it (T3 draws it as a card).
@@ -760,6 +1157,23 @@ impl FoundCard {
     }
 }
 
+/// What an update would show, for telling whether anything changed. A thread being busy
+/// moves its time and its place in the list, which alone isn't worth one of the 200 slots:
+/// the next update with anything to show brings them.
+fn without_times(data: &Value) -> Value {
+    let mut data = data.clone();
+    if let Some(threads) = data["threads"].as_array_mut() {
+        threads.iter_mut().filter_map(Value::as_object_mut).for_each(|t| {
+            t.remove("at");
+        });
+        threads.sort_by_key(|t| format!("{}:{}", t["e"], t["id"]));
+    }
+    if let Some(view) = data["view"].as_object_mut() {
+        view.remove("at");
+    }
+    data
+}
+
 /// The part of a T3 id after its kind ("turn-item:", "thread:", "node:").
 fn task_part(id: &str) -> &str {
     id.split_once(':').map_or(id, |(_, rest)| rest)
@@ -814,6 +1228,17 @@ const CARD_CHARS: usize = 600;
 const CARD_BODY_CHARS: usize = 400;
 /// Activity pages read in one poll at most while looking for pages.
 const SCAN_PAGES: usize = 4;
+/// How long a row's one line can be.
+const WORK_LABEL_CHARS: usize = 140;
+/// A tool call still "running" this long was left behind: it's treated as ended.
+const WORK_STALE_MS: i64 = 600_000;
+/// How much of a row is read and sent when it is opened, how long each code box of it is
+/// about, and how many opened rows are kept for the game.
+const DETAIL_CHARS: usize = 30_000;
+const DETAIL_PIECE: usize = 4_000;
+const DETAILS_KEPT: usize = 3;
+/// A row covers at most this many positions: all T3 returns in the one read that opens it.
+const WORK_ROW_SPAN: u64 = 100;
 /// A picture that couldn't be drawn is tried again after this long.
 const PICTURE_RETRY_MS: i64 = 300_000;
 /// A page's item is read a piece at a time, this many pieces at most (html_render takes
@@ -995,6 +1420,8 @@ enum Step {
     /// picture to draw (a request at a time for a page's HTML), then the view with them.
     ViewScan,
     ViewCard(String),
+    /// What you answered a question, from its position.
+    ViewAnswer(u64),
     ViewDraw(usize),
     ViewPictures,
 }
@@ -1185,6 +1612,8 @@ impl Bridge {
             painter: None,
             images_ok: false,
             cards_ok: false,
+            work_ok: false,
+            details: Vec::new(),
             scan: None,
             picture_errors: HashMap::new(),
             clipboard: Box::new(clip::read_image),
@@ -1428,6 +1857,12 @@ impl Bridge {
             self.cards_ok = cards_ok;
             self.view_changed();
         }
+        // And one that draws what the agent did as rows.
+        let work_ok = frame["wk"] == 1;
+        if work_ok != self.work_ok {
+            self.work_ok = work_ok;
+            self.view_changed();
+        }
         let l = frame["l"].as_u64().unwrap_or(0) as u32;
         // Until the game watches signals (it learns the starting file from its first update,
         // and some clients can't use them) it loads slots on a timer and reports where it is.
@@ -1543,6 +1978,11 @@ impl Bridge {
                         view.depth += 1;
                     }
                     self.view_changed();
+                }
+                "detail" => {
+                    if let (Some(first), Some(last), true) = (command["p"].as_u64(), command["l"].as_u64(), self.view.as_ref().is_some_and(|v| v.env == env && v.id == id)) {
+                        self.open_detail(&env, &id, first, last)?;
+                    }
                 }
                 "send" if !id.is_empty() && (!message.is_empty() || with_images) => {
                     if with_images {
@@ -1986,6 +2426,7 @@ impl Bridge {
             Step::ViewAskRead(request_id) => self.read_view_request(request_id),
             Step::ViewScan => self.read_view_scan(),
             Step::ViewCard(item_id) => self.read_view_card(item_id),
+            Step::ViewAnswer(position) => self.read_view_answer(position),
             Step::ViewDraw(i) => self.draw_picture(i),
             Step::ViewPictures => {
                 self.place_pictures();
@@ -2960,10 +3401,12 @@ impl Bridge {
         let View { env, id, .. } = read.view.clone();
         let mut cache = match self.scan.take().filter(|c| c.env == env && c.id == id && c.from <= first) {
             Some(cache) => cache,
-            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new() },
+            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new(), work: Vec::new(), runs: BTreeMap::new() },
         };
         let mut args = json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 200 });
-        if let Some(after) = cache.upto.or(first.checked_sub(1)) {
+        // Back to what was still under way, whose title and text may have come since.
+        let unfinished = cache.work.iter().filter(|w| !w.ended).map(|w| w.position).min().and_then(|p| p.checked_sub(1));
+        if let Some(after) = [cache.upto.or(first.checked_sub(1)), unfinished].into_iter().flatten().min() {
             args["afterPosition"] = json!(after);
         }
         let result = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env))) {
@@ -2977,6 +3420,19 @@ impl Bridge {
         let mut waiting = false;
         for item in result["items"].as_array().into_iter().flatten() {
             let Some(position) = item["position"].as_u64() else { continue };
+            if let Some(run) = item["runId"].as_str() {
+                cache.runs.insert(position, (run.to_string(), iso_seconds(str_of(&item["updatedAt"]))));
+            }
+            if let Some(mut work) = FoundWork::from_item(item, position, now) {
+                match cache.work.iter_mut().find(|w| w.position == position) {
+                    Some(known) => {
+                        work.answer = known.answer.take();
+                        work.answered = known.answered;
+                        *known = work;
+                    }
+                    None => cache.work.push(work),
+                }
+            }
             if item["type"] == "subagent" {
                 let card = FoundCard::from_item(item, position);
                 match cache.cards.iter_mut().find(|c| c.item_id == card.item_id) {
@@ -2989,7 +3445,11 @@ impl Bridge {
             let compaction = item["type"] == "compaction";
             if compaction || (item["type"] == "dynamic_tool" && is_page_item(str_of(&item["text"]))) {
                 match str_of(&item["status"]) {
-                    "completed" if compaction => cache.compactions.push(position),
+                    "completed" if compaction => {
+                        if !cache.compactions.contains(&position) {
+                            cache.compactions.push(position);
+                        }
+                    }
                     "completed" => {
                         let item_id = str_of(&item["itemId"]).to_string();
                         if !item_id.is_empty() && !cache.pages.iter().any(|p| p.item_id == item_id) {
@@ -3052,6 +3512,12 @@ impl Bridge {
             _ => Vec::new(),
         };
         let reads = if late { 0 } else { cards.len().min(CARD_READS_PER_POLL) };
+        // Questions whose answer hasn't been looked for yet.
+        let answers: Vec<u64> = match (self.work_ok, self.scan.as_ref()) {
+            (true, Some(scan)) => scan.work.iter().filter(|w| w.kind == WorkKind::Question && w.ended && !w.answered && w.position >= first).map(|w| w.position).collect(),
+            _ => Vec::new(),
+        };
+        let answer_reads = if late { 0 } else { answers.len().min(CARD_READS_PER_POLL) };
         let mut drawing: Vec<Drawing> = Vec::new();
         let mut later = false;
         for picture in &pictures {
@@ -3073,11 +3539,12 @@ impl Bridge {
         }
         let Some(read) = self.view_read() else { return };
         read.pictures = pictures;
-        read.again |= later || reads < cards.len();
+        read.again |= later || reads < cards.len() || answer_reads < answers.len();
         let steps: Vec<Step> = cards
             .into_iter()
             .take(reads)
             .map(Step::ViewCard)
+            .chain(answers.into_iter().take(answer_reads).map(Step::ViewAnswer))
             .chain((0..drawing.len()).map(Step::ViewDraw))
             .chain([Step::ViewPictures])
             .collect();
@@ -3103,6 +3570,25 @@ impl Bridge {
                 *card = FoundCard::from_item(&item, position);
                 card.full = card.ended();
             }
+        }
+        Ok(())
+    }
+
+    /// What you answered the question at `position`: its AskUserQuestion call comes just
+    /// before it. Read once; a provider with no such call shows the question alone.
+    fn read_view_answer(&mut self, position: u64) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        let mut args = json!({ "threadId": id, "view": "activity", "limit": 2, "maxCharsPerItem": DETAIL_CHARS });
+        if let Some(after) = position.checked_sub(2) {
+            args["afterPosition"] = json!(after);
+        }
+        let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
+        let call = result["items"].as_array().into_iter().flatten().filter_map(|item| serde_json::from_str::<Value>(str_of(&item["text"])).ok()).find(|call| call["toolName"] == "AskUserQuestion");
+        let answer = call.and_then(|call| call["output"]["answers"].as_object().map(|answers| answers.values().filter_map(Value::as_str).map(|a| plain(a, 200)).collect::<Vec<_>>().join(" · ")));
+        if let Some(found) = self.scan.as_mut().and_then(|scan| scan.work.iter_mut().find(|w| w.position == position)) {
+            found.answer = answer.filter(|a| !a.is_empty());
+            found.answered = true;
         }
         Ok(())
     }
@@ -3237,9 +3723,20 @@ impl Bridge {
                 placed.push((position * 2, json!({ "r": "a", "x": "Context compacted", "rule": 1 })));
             }
         }
+        if self.work_ok {
+            let Some(read) = self.view_read() else { return };
+            let first = read.positions.first().copied().unwrap_or(u64::MAX);
+            let still_working = read.built.as_ref().is_some_and(|built| working(str_of(&built["s"])));
+            let done_before = still_working.then(|| read.positions.last().copied().unwrap_or(0));
+            let walls: Vec<u64> = read.positions.iter().copied().chain(placed.iter().map(|(order, _)| order / 2)).collect();
+            let rows = self.scan.as_ref().map(|scan| work_rows(&scan.work, first, done_before, &walls)).unwrap_or_default();
+            placed.extend(rows);
+        }
+        let work_ok = self.work_ok;
+        let run_at = self.scan.as_ref().filter(|_| work_ok).map(|scan| scan.runs.clone()).unwrap_or_default();
         let Some(read) = self.view_read() else { return };
         read.again |= again;
-        if let Some(built) = read.built.as_mut().filter(|_| !placed.is_empty()) {
+        if let Some(built) = read.built.as_mut().filter(|_| !placed.is_empty() || work_ok) {
             let items = built["items"].as_array().cloned().unwrap_or_default();
             let mut all: Vec<(u64, Value)> = read.positions.iter().map(|p| p * 2).zip(items).collect();
             all.extend(placed);
@@ -3247,6 +3744,9 @@ impl Bridge {
             // A message that is only its images is just the pictures, with no empty bubble.
             let pictures: HashSet<u64> = all.iter().filter(|(_, item)| item["im"].is_object() || item["lost"] == 1).map(|(order, _)| *order).collect();
             all.retain(|(order, item)| !(item["r"] == "u" && str_of(&item["x"]).trim().is_empty() && pictures.contains(&(order + 1))));
+            if work_ok {
+                fold_turns(&mut all, &read.positions, &run_at, &read.runs);
+            }
             built["items"] = json!(all.into_iter().map(|(_, item)| item).collect::<Vec<_>>());
         }
         self.name_links();
@@ -3256,7 +3756,30 @@ impl Bridge {
     /// Whether the open thread's activity is read: for pictures, or for delegated tasks'
     /// cards. An addon that shows neither needs only the messages.
     fn scans(&self) -> bool {
-        self.cards_ok || (self.images_ok && self.painter.is_some())
+        self.cards_ok || self.work_ok || (self.images_ok && self.painter.is_some())
+    }
+
+    /// Reads what a row did, in one request, for the update that answers the click. A
+    /// failure is shown where the row's contents would be, and can be tried again.
+    fn open_detail(&mut self, env: &str, id: &str, first: u64, last: u64) -> Result<(), T3Error> {
+        let limit = (last.saturating_sub(first) + 1).min(WORK_ROW_SPAN);
+        let mut args = json!({ "threadId": id, "view": "activity", "limit": limit, "maxCharsPerItem": DETAIL_CHARS });
+        if let Some(after) = first.checked_sub(1) {
+            args["afterPosition"] = json!(after);
+        }
+        let (body, failed) = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(env))) {
+            Ok(result) => (detail_segments(result["items"].as_array().map(Vec::as_slice).unwrap_or_default()), false),
+            Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+            Err(T3Error::Other(error)) => {
+                self.log(&format!("couldn't read a row of the thread: {error}"));
+                (vec![json!(format!("Couldn't read this from T3: {}", plain(&error, 160)))], true)
+            }
+        };
+        self.details.retain(|d| !(d.env == env && d.id == id && d.last == last));
+        self.details.push(Detail { env: env.to_string(), id: id.to_string(), last, body, failed });
+        let excess = self.details.len().saturating_sub(DETAILS_KEPT);
+        self.details.drain(..excess);
+        Ok(())
     }
 
     /// The thread links in the built view, named: a delegated task's or a listed thread's
@@ -3486,6 +4009,15 @@ impl Bridge {
                     None => data["sna"] = json!(true),
                 }
             }
+            let details: Vec<Value> = self
+                .details
+                .iter()
+                .filter(|d| d.env == str_of(&data["e"]) && d.id == str_of(&data["id"]))
+                .map(|d| if d.failed { json!({ "l": d.last, "b": d.body, "bad": 1 }) } else { json!({ "l": d.last, "b": d.body }) })
+                .collect();
+            if !details.is_empty() {
+                data["det"] = json!(details);
+            }
             data["e"] = json!(env_index(str_of(&data["e"])));
             data
         });
@@ -3627,7 +4159,7 @@ impl Bridge {
                 json!([data["view"]["id"], data["view"]["more"], data["view"]["ask"]["k"], data["view"]["approval"]])
             },
         });
-        let hash = hash_of(if self.window_open { &data } else { &urgent });
+        let hash = hash_of(&if self.window_open { without_times(&data) } else { urgent.clone() });
         if Some(hash) == self.last_published_hash {
             return;
         }

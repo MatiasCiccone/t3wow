@@ -1205,12 +1205,17 @@ local function messageString(index)
         fs.hover = Skin.Box(messageChild, { shape = "control", fill = "hover", free = true, sub = -7 })
         fs.hover:Hide()
         hit:SetScript("OnClick", function(self)
+            if self.work then return UI.Work.Toggle(self.work) end
             if self.picture then return Pictures.Zoom(self.picture) end
             openCopy(self.copyText)
         end)
         hit:SetScript("OnEnter", function(self)
             Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
-            Skin.Tooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
+            if self.work then
+                Skin.Tooltip:AddLine(UI.Work.open[self.work.l] and "Click to collapse" or "Click to expand")
+            else
+                Skin.Tooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
+            end
             Skin.Tooltip:Show()
         end)
         hit:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
@@ -1219,6 +1224,7 @@ local function messageString(index)
         hit:HookScript("OnHide", function() fs.hover:Hide() end)
         hit:Hide()
         hit.picture = false
+        hit.work = false
         fs.hit = hit
         messageStrings[index] = fs
     end
@@ -2273,6 +2279,157 @@ function Handoff.Place(text)
     line.right:Show()
 end
 
+-- What the agent did between its messages, as T3 draws it: a dimmed line with a chevron,
+-- collapsed until clicked. item.w = { p, l }: the row's first and last positions in the
+-- thread (l names the row). What's in it is read when it's first opened and kept here, so
+-- closing and opening it again costs nothing. view.det = { { l, b = segments, bad } }.
+UI.Work = { open = {}, bodies = {}, asked = {}, retry = {} }
+do
+    local Work = UI.Work
+    local ROW_GAP, GROUP_GAP = 10, 14
+    local WORK_ICON = { b = "brain", c = "terminal", t = "hammer", q = "message", r = "eye", e = "pencil", s = "search", w = "globe" }
+
+    -- How long since `since` (a time from the companion, on this PC's clock), as T3 says it.
+    local function elapsed(since)
+        local seconds = math.max(0, time() - since)
+        if seconds < 60 then return seconds .. "s" end
+        local parts = {}
+        for _, part in ipairs({ { floor(seconds / 3600), "h" }, { floor(seconds % 3600 / 60), "m" }, { seconds % 60, "s" } }) do
+            if part[1] > 0 then parts[#parts + 1] = part[1] .. part[2] end
+        end
+        return table.concat(parts, " ")
+    end
+
+    -- Every second: the running turn's clock. Kept here, so it spends no updates.
+    function Work.Tick()
+        if Work.live then Work.live:SetText("Working for " .. elapsed(Work.liveSince)) end
+    end
+
+    -- Takes in the contents that have arrived. Another thread starts over.
+    function Work.Take(view)
+        if Work.thread ~= view.id then
+            Work.thread, Work.open, Work.bodies, Work.asked, Work.retry = view.id, {}, {}, {}, {}
+        end
+        for _, d in ipairs(type(view.det) == "table" and view.det or {}) do
+            if type(d) == "table" and type(d.b) == "table" and (Work.asked[d.l] or Work.retry[d.l]) then
+                Work.bodies[d.l], Work.asked[d.l], Work.retry[d.l] = d.b, nil, d.bad == 1 or nil
+            end
+        end
+    end
+
+    function Work.Toggle(w)
+        local opening = not Work.open[w.l]
+        Work.open[w.l] = opening or nil
+        if opening and not w.fold and (Work.retry[w.l] or not Work.bodies[w.l]) and not Work.asked[w.l] then
+            Work.bodies[w.l], Work.retry[w.l], Work.asked[w.l] = nil, nil, true
+            ns.Link.Send({ t = "detail", e = selected.env, id = selected.id, p = w.p, l = w.l })
+        end
+        renderView()
+    end
+
+    function Work.Place(fs, w, text)
+        if not rawget(fs, "chevron") then
+            fs.chevron = Skin.Glyph(messageChild, "chevron", 12, "dim", "OVERLAY")
+            fs.workText = messageChild:CreateFontString(nil, "OVERLAY")
+            fs.workText:SetFontObject(Skin.fonts.muted)
+            fs.workText:SetJustifyH("LEFT")
+            fs.workText:SetWordWrap(false)
+            fs.workIcon = Skin.Glyph(messageChild, "message", 14, "muted", "OVERLAY")
+            fs.workAnswer = messageChild:CreateFontString(nil, "OVERLAY")
+            fs.workAnswer:SetFontObject(Skin.fonts.strong)
+            fs.workAnswer:SetJustifyH("LEFT")
+            fs.workAnswer:SetWordWrap(false)
+            fs.workTime = messageChild:CreateFontString(nil, "OVERLAY")
+            fs.workTime:SetFontObject(Skin.fonts.small)
+            fs.workTime:SetWordWrap(false)
+        end
+        fs.bubble:Hide()
+        local open = Work.open[w.l] == true
+        local width = messageWidth() - 8
+        Skin.PointGlyph(fs.chevron, not open)
+        -- Rows sit close together, and a group as far from the message above as from the one
+        -- below. A message leaves 18 under it (more around a bubble or a code box: kept).
+        if flow.last then flow.gap = flow.rowLast == flow.last and ROW_GAP or flow.gap - (18 - GROUP_GAP) end
+        -- The turn still going, which opens nothing and tells its own time.
+        if w.live then
+            fs.workText:SetWidth(width)
+            fs.workText:SetText("Working for " .. elapsed(w.live))
+            place(fs.workText, 4, GROUP_GAP)
+            flow.rowLast = fs.workText
+            Work.live, Work.liveSince = fs.workText, w.live
+            anchorMessage(fs, fs.workText, 0, fs.workText, 0, width)
+            return
+        end
+        -- "Worked for": its text, with the chevron right after it. What it folds is drawn
+        -- (or not) as the conversation's own items.
+        if w.fold then
+            fs.workText:SetWidth(width - 18)
+            fs.workText:SetText(text)
+            local textWidth = math.min(width - 18, math.ceil(fs.workText:GetStringWidth() or 0) + 1)
+            fs.workText:SetWidth(textWidth)
+            place(fs.workText, 4, GROUP_GAP)
+            flow.rowLast = fs.workText
+            fs.chevron:ClearAllPoints()
+            fs.chevron:SetPoint("LEFT", fs.workText, "RIGHT", 6, 0)
+            fs.chevron:Show()
+            anchorMessage(fs, fs.workText, 0, fs.workText, 0, textWidth + 18)
+            return
+        end
+        -- An icon for what it was on the left, the chevron at the right edge. A question
+        -- also says what you answered and when.
+        local q = type(w.q) == "table" and w.q or nil
+        local first = fs.workIcon
+        first:SetTexture("Interface\\AddOns\\T3WoW\\Media\\" .. (q and "message" or WORK_ICON[w.k] or "hammer"))
+        place(first, 4, open and ROW_GAP or GROUP_GAP)
+        flow.rowLast = first
+        -- The game finds a new file only when it starts: one started before this version
+        -- draws no icon rather than a square. Faded, not hidden: the row hangs from it.
+        local file = not first.GetTextureFilePath or first:GetTextureFilePath()
+        first:SetAlpha((file ~= nil and file ~= "") and 1 or 0)
+        fs.chevron:ClearAllPoints()
+        fs.chevron:SetPoint("LEFT", first, "LEFT", width - 12, 0)
+        -- A question still waiting opens nothing: its card is further down.
+        fs.chevron:SetShown(not w.still)
+        local textX, textWidth = 20, width - 40
+        if q then
+            fs.workTime:SetText(type(q.at) == "number" and q.at > 0 and type(date) == "function" and date("%H:%M", q.at) or "")
+            local timeWidth = math.ceil(fs.workTime:GetStringWidth() or 0) + 1
+            fs.workTime:SetWidth(timeWidth)
+            fs.workTime:ClearAllPoints()
+            fs.workTime:SetPoint("LEFT", first, "LEFT", width - 20 - timeWidth, 0)
+            fs.workTime:Show()
+            local answerWidth = 0
+            local answer = type(q.a) == "string" and q.a or ""
+            if answer ~= "" then
+                local most = floor(width * 0.3)
+                fs.workAnswer:SetWidth(most)
+                fs.workAnswer:SetText(answer)
+                answerWidth = math.min(most, math.ceil(fs.workAnswer:GetStringWidth() or 0) + 1)
+                fs.workAnswer:SetWidth(answerWidth)
+            end
+            textWidth = width - 20 - 20 - timeWidth - 10 - (answerWidth > 0 and answerWidth + 10 or 0)
+            if answerWidth > 0 then
+                fs.workAnswer:ClearAllPoints()
+                fs.workAnswer:SetPoint("LEFT", first, "LEFT", textX + textWidth + 10, 0)
+                fs.workAnswer:Show()
+            end
+        end
+        fs.workText:ClearAllPoints()
+        fs.workText:SetPoint("LEFT", first, "LEFT", textX, 0)
+        fs.workText:SetWidth(math.max(20, textWidth))
+        fs.workText:SetText(text)
+        fs.workText:Show()
+        anchorMessage(fs, first, 0, first, 0, width)
+        if not open then return end
+        local color, shown = "|cff" .. Skin.Hex("muted"), {}
+        for i, seg in ipairs(Work.bodies[w.l] or { "Loading…" }) do
+            shown[i] = type(seg) == "string" and (color .. seg .. "|r") or seg
+        end
+        Mono.Place(shown, false)
+        flow.gap = flow.gap - (18 - GROUP_GAP)
+    end
+end
+
 function renderView()
     -- The conversation is hidden while the window is resized, and drawn when you let go.
     if Sizing.from then return end
@@ -2292,7 +2449,15 @@ function renderView()
             fs.lostBox:Hide()
             fs.lostIcon:Hide()
         end
+        if rawget(fs, "chevron") then
+            fs.chevron:Hide()
+            fs.workText:Hide()
+            fs.workIcon:Hide()
+            fs.workAnswer:Hide()
+            fs.workTime:Hide()
+        end
     end
+    UI.Work.live = nil
     Mono.Release()
     Pictures.Release()
     Handoff.Release()
@@ -2344,6 +2509,7 @@ function renderView()
         fit(true)
         return
     end
+    UI.Work.Take(view)
     flowStart(0)
     if view.more then
         earlier:SetPoint("TOP", messageChild, "TOP", 0, 0)
@@ -2352,29 +2518,40 @@ function renderView()
     end
     local items = view.items or {}
     local count = #items
+    -- Its row says the turn is going, in place of the line at the end.
+    local liveRow = false
     for i, item in ipairs(items) do
-        local fs = messageString(i)
-        if item.ho then Handoff.Place("Context handoff · " .. item.ho) end
-        local rule = item.rule == 1
-        local card = type(item.d) == "table"
-        local lost = not card and item.lost == 1
-        local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
-        if rule then
-            Handoff.Place(item.x)
-        elseif card then
-            placeCard(fs, item.d)
-        elseif lost then
-            Pictures.Lost(fs, item.r == "u")
-        elseif not picture then
-            placeMessage(fs, item.x, item.r == "u", item.g)
+        liveRow = liveRow or (type(item.w) == "table" and item.w.live ~= nil)
+        -- Inside a finished turn's "Worked for" row (f names it), while that is closed.
+        if type(item.f) ~= "string" or UI.Work.open[item.f] then
+            local fs = messageString(i)
+            if item.ho then Handoff.Place("Context handoff · " .. item.ho) end
+            local rule = item.rule == 1
+            local work = type(item.w) == "table" and item.w or false
+            local card = type(item.d) == "table"
+            local lost = not card and item.lost == 1
+            local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
+            if work then
+                UI.Work.Place(fs, work, item.x)
+            elseif rule then
+                Handoff.Place(item.x)
+            elseif card then
+                placeCard(fs, item.d)
+            elseif lost then
+                Pictures.Lost(fs, item.r == "u")
+            elseif not picture then
+                placeMessage(fs, item.x, item.r == "u", item.g)
+            end
+            -- Copying takes the message's text, not its segments: the code with its markdown.
+            fs.hit.copyText = item.x
+            -- A picture enlarges instead.
+            fs.hit.picture = picture and item.im or false
+            -- A row opens instead.
+            fs.hit.work = work
+            -- A picture that couldn't be loaded has nothing to enlarge or copy; a delegated
+            -- task's card isn't a message to copy.
+            fs.hit:SetShown(not lost and not rule and not card and not (work and work.still))
         end
-        -- Copying takes the message's text, not its segments: the code with its markdown.
-        fs.hit.copyText = item.x
-        -- A picture enlarges instead.
-        fs.hit.picture = picture and item.im or false
-        -- A picture that couldn't be loaded has nothing to enlarge or copy; a delegated
-        -- task's card isn't a message to copy.
-        fs.hit:SetShown(not lost and not rule and not card)
     end
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may
@@ -2396,7 +2573,7 @@ function renderView()
         end
     end
     renderAsk(view)
-    if WORKING[status] then
+    if WORKING[status] and not liveRow then
         placeMessage(messageString(count + 2), "|cff" .. Skin.Hex("muted") .. "Working…|r", false)
     end
     -- Sized now from what the game has laid out; `settle` sizes it again as text heights
@@ -4323,6 +4500,7 @@ frame:SetScript("OnUpdate", function(_, delta)
     ticker = ticker + delta
     if ticker < 1 then return end
     ticker = 0
+    UI.Work.Tick()
     -- No word on an answer for a while: let it be sent again.
     if askState.sent and GetTime() - (askState.sentAt or 0) >= ANSWER_TIMEOUT then
         askState.sent = nil

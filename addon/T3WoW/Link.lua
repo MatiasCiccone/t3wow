@@ -214,7 +214,7 @@ function Link.Render()
         state.queueSince = state.queueSince or GetTime()
     end
     local header = { k = own.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
-        p = (not signalling()) and 1 or nil, lid = db.login, im = state.images and 1 or nil, dc = 1 }
+        p = (not signalling()) and 1 or nil, lid = db.login, im = state.images and 1 or nil, dc = 1, wk = 1 }
     -- An empty queue still sends a header-only sync frame.
     local commands = {}
     local payload = (#own.queue == 0) and Codec.Json(header) or nil
@@ -257,7 +257,7 @@ function Link.Fits(command)
     for key, value in pairs(command) do alone[key] = value end
     alone.s = (own and own.seq or 0) + 1
     local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1,
-        lid = db and db.login, im = state.images and 1 or nil, dc = 1, q = { alone } }
+        lid = db and db.login, im = state.images and 1 or nil, dc = 1, wk = 1, q = { alone } }
     return #Codec.Json(header) <= Codec.MAX_PAYLOAD
 end
 

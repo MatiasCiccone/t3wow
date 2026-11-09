@@ -678,8 +678,8 @@ fn with_the_window_open_routine_changes_wait_but_answers_go_out_at_once() {
     rig.bridge.tick();
     assert_eq!(rig.publishes(), 2);
 
-    // Another routine change, then the 10 s gap passes.
-    rig.t3.set("running", "2026-11-06T10:00:09Z");
+    // A change you can see but that answers nothing, then the 10 s gap passes.
+    rig.t3.set("queued", "2026-11-06T10:00:09Z");
     rig.advance(4_000);
     rig.bridge.tick();
     assert_eq!(rig.publishes(), 2);
@@ -3272,4 +3272,361 @@ fn only_this_pcs_t3_lists_its_composers_and_a_bad_read_keeps_the_last() {
     rig.bridge.tick();
     assert_eq!(rig.bridge.snapshot()["picks"], expected);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn tool_item(position: u64, name: &str, title: Option<&str>) -> Value {
+    let text = json!({ "toolName": name, "input": { "file_path": "a.lua" }, "output": { "file": { "content": format!("body of {name}") } } });
+    json!({
+        "position": position, "itemId": format!("i{position}"), "type": "dynamic_tool", "status": "completed", "title": title,
+        "text": serde_json::to_string_pretty(&text).unwrap(), "updatedAt": "2026-11-06T10:00:30Z",
+    })
+}
+
+fn said(position: u64, kind: &str, text: &str) -> Value {
+    json!({ "position": position, "itemId": format!("i{position}"), "type": kind, "status": "completed", "text": text, "updatedAt": "2026-11-06T10:00:30Z" })
+}
+
+/// Thread t1 open in a game that draws rows: you asked, it thought, said something, used
+/// three tools, said something else and used one more.
+fn work_rig(start_ms: i64, status: &str) -> Rig {
+    let mut rig = Rig::new(start_ms);
+    let activity = vec![
+        said(0, "user_message", "go"),
+        said(1, "reasoning", "**Looking around**\nmore of it"),
+        said(2, "assistant_message", "first"),
+        tool_item(3, "Read", Some("Read a.lua")),
+        said(4, "command_execution", "$ npm test\nok"),
+        tool_item(5, "mcp__t3__unwatch", None),
+        said(6, "assistant_message", "second"),
+        tool_item(7, "Grep", Some("Searched a in b")),
+    ];
+    let messages: Vec<Value> = activity.iter().filter(|i| str_of(&i["type"]).ends_with("_message")).cloned().collect();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    rig.t3.set(status, "2026-11-06T10:00:40Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    rig
+}
+
+fn texts(rig: &Rig) -> Vec<String> {
+    view_items(rig).iter().map(|i| str_of(&i["x"]).to_string()).collect()
+}
+
+#[test]
+fn what_an_agent_did_shows_as_rows_where_t3_shows_them_with_tools_in_a_row_folded() {
+    let rig = work_rig(50_000_000, "completed");
+    assert_eq!(texts(&rig), ["go", "Looking around more of it", "first", "Read 1 file, ran 1 command, and used 1 tool", "second", "Searched a in b"]);
+    let items = view_items(&rig);
+    assert_eq!(items[3]["w"], json!({ "p": 3, "l": 5, "k": "t" }));
+    assert_eq!(items[1]["w"], json!({ "p": 1, "l": 1, "k": "b" }));
+    assert!(items[2]["w"].is_null());
+}
+
+#[test]
+fn a_game_that_draws_no_rows_gets_none() {
+    let mut rig = Rig::new(51_000_000);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["go", "done"]));
+    rig.t3.activity.lock().unwrap().insert("t1".into(), vec![said(0, "user_message", "go"), tool_item(1, "Read", None), said(2, "assistant_message", "done")]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "dc": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(texts(&rig), ["go", "done"]);
+}
+
+#[test]
+fn a_stretch_of_work_shows_only_once_it_is_finished() {
+    let mut rig = work_rig(52_000_000, "running");
+    assert_eq!(texts(&rig), ["go", "Looking around more of it", "first", "Read 1 file, ran 1 command, and used 1 tool", "second"]);
+    // The turn ends: the last stretch has nothing after it, and shows.
+    rig.t3.set("completed", "2026-11-06T10:01:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(texts(&rig).last().unwrap(), "Searched a in b");
+}
+
+#[test]
+fn a_tool_read_while_running_gets_its_title_once_it_ends() {
+    let mut rig = Rig::new(53_000_000);
+    let mut running = tool_item(1, "Read", None);
+    running["status"] = json!("running");
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![said(0, "user_message", "go")]);
+    rig.t3.activity.lock().unwrap().insert("t1".into(), vec![said(0, "user_message", "go"), running]);
+    rig.t3.set("completed", "2026-11-06T10:00:40Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(texts(&rig), ["go", "Read 1 file"]);
+    rig.t3.activity.lock().unwrap().get_mut("t1").unwrap()[1] = tool_item(1, "Read", Some("Read a.lua"));
+    rig.t3.set("completed", "2026-11-06T10:01:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(texts(&rig), ["go", "Read a.lua"]);
+}
+
+#[test]
+fn opening_a_row_reads_all_of_it_in_one_request_for_the_update_that_answers_the_click() {
+    let mut rig = work_rig(54_000_000, "completed");
+    let before = rig.t3.calls_to("t3_thread_read").len();
+    rig.advance(5_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 2, "l": 1, "wk": 1, "q": [{ "s": 3, "t": "detail", "id": "t1", "p": 3, "l": 5 }] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["ack"], 3);
+    let detail = &snapshot["view"]["det"][0];
+    assert_eq!(detail["l"], 5);
+    let body = detail["b"].as_array().unwrap();
+    assert_eq!(body[0], "Read a.lua");
+    assert_eq!(body[1]["c"], "a.lua");
+    assert_eq!(body[2]["c"], "body of Read");
+    assert_eq!(body[3]["c"], "$ npm test\nok");
+    assert_eq!(body[4], "mcp__t3__unwatch");
+    let reads = rig.t3.calls_to("t3_thread_read");
+    let opened: Vec<&Value> = reads[before..].iter().filter(|a| a["limit"] == 3).collect();
+    assert_eq!(opened.len(), 1, "{:?}", &reads[before..]);
+    assert_eq!((opened[0]["afterPosition"].clone(), opened[0]["maxCharsPerItem"].clone()), (json!(2), json!(DETAIL_CHARS)));
+}
+
+#[test]
+fn a_question_row_shows_what_was_asked_and_what_you_answered() {
+    let questions = json!([{ "question": "Merge it now?", "options": [{ "label": "Yes" }, { "label": "No" }] }]);
+    let call = json!({ "toolName": "AskUserQuestion", "input": {}, "output": { "questions": questions, "answers": { "Merge it now?": "not yet" } } });
+    let items = vec![
+        json!({ "type": "dynamic_tool", "text": serde_json::to_string_pretty(&call).unwrap() }),
+        json!({ "type": "user_input_request", "text": serde_json::to_string_pretty(&questions).unwrap() }),
+    ];
+    assert_eq!(detail_segments(&items), vec![json!("Merge it now?\n• Yes\n• No\n\nYou answered: not yet")]);
+    assert_eq!(question_start("[\n  {\n    \"id\": \"Is this \\\"ok\\\" with you?\","), "Is this \"ok\" with you?");
+    assert_eq!(question_start("[\n  {\n    \"id\": \"q1\","), "Asked a question");
+}
+
+fn in_run(mut item: Value, run: &str) -> Value {
+    item["runId"] = json!(run);
+    item
+}
+
+/// Thread t1 open in a game that draws rows, with `activity`, the given runs, and `status`.
+fn fold_rig(start_ms: i64, status: &str, activity: Vec<Value>, runs: Value) -> Rig {
+    let mut rig = Rig::new(start_ms);
+    let messages: Vec<Value> = activity.iter().filter(|i| str_of(&i["type"]).ends_with("_message")).cloned().collect();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    *rig.t3.runs.lock().unwrap() = runs;
+    rig.t3.set(status, "2026-11-06T10:03:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    rig
+}
+
+fn a_turn() -> Vec<Value> {
+    vec![
+        said(0, "user_message", "go"),
+        in_run(said(1, "reasoning", "thinking it over"), "r1"),
+        in_run(said(2, "assistant_message", "working on it"), "r1"),
+        in_run(tool_item(3, "Read", None), "r1"),
+        in_run(said(4, "assistant_message", "all done"), "r1"),
+    ]
+}
+
+fn run_of(id: &str, status: &str) -> Value {
+    json!({ "runId": id, "status": status, "startedAt": "2026-11-06T10:00:00Z", "completedAt": "2026-11-06T10:02:47Z" })
+}
+
+#[test]
+fn a_finished_turn_folds_under_worked_for_with_its_last_message_outside() {
+    let rig = fold_rig(60_000_000, "completed", a_turn(), json!([run_of("r1", "completed")]));
+    let items = view_items(&rig);
+    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "thinking it over", "working on it", "Read 1 file", "all done"]);
+    let name = items[1]["w"]["l"].clone();
+    assert_eq!(items[1]["w"]["fold"], 1);
+    assert_eq!([items[2]["f"].clone(), items[3]["f"].clone(), items[4]["f"].clone()], [name.clone(), name.clone(), name]);
+    assert!(items[0]["f"].is_null() && items[5]["f"].is_null(), "{items:?}");
+}
+
+#[test]
+fn a_turn_that_is_running_or_ended_badly_stays_open() {
+    for status in ["running", "interrupted", "failed"] {
+        let rig = fold_rig(61_000_000, "completed", a_turn(), json!([run_of("r1", status)]));
+        assert!(view_items(&rig).iter().all(|i| i["f"].is_null() && i["w"]["fold"].is_null()), "{status}");
+    }
+}
+
+#[test]
+fn a_question_stays_out_of_the_fold_with_what_you_answered_and_when() {
+    let questions = json!([{ "question": "Merge it now?", "options": [{ "label": "Yes" }] }]);
+    let call = json!({ "toolName": "AskUserQuestion", "input": {}, "output": { "questions": questions, "answers": { "Merge it now?": "not yet" } } });
+    let mut asked = tool_item(3, "AskUserQuestion", None);
+    asked["text"] = json!(serde_json::to_string_pretty(&call).unwrap());
+    let mut request = in_run(said(4, "user_input_request", ""), "r1");
+    request["text"] = json!(serde_json::to_string_pretty(&questions).unwrap());
+    let mut activity = a_turn();
+    activity.pop();
+    activity.push(in_run(asked, "r1"));
+    activity.push(request);
+    activity.push(in_run(said(5, "assistant_message", "all done"), "r1"));
+    let mut rig = fold_rig(62_000_000, "completed", activity, json!([run_of("r1", "completed")]));
+    // The answer comes from reading its tool call, once.
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    let question = items.iter().find(|i| i["x"] == "Merge it now?").unwrap();
+    assert!(question["f"].is_null(), "{question}");
+    assert_eq!(question["w"]["q"], json!({ "a": "not yet", "at": iso_seconds("2026-11-06T10:00:30Z") }));
+    let answer_reads = rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| a["limit"] == 2).count();
+    assert_eq!(answer_reads, 1);
+}
+
+#[test]
+fn a_question_still_waiting_for_you_is_never_taken_for_over() {
+    let waiting = json!({ "type": "user_input_request", "status": "running", "text": "", "updatedAt": "2026-11-06T10:00:30Z" });
+    let long_after = (iso_seconds("2026-11-06T10:00:30Z") + 3_600) * 1000;
+    let found = FoundWork::from_item(&waiting, 4, long_after).unwrap();
+    assert!(!found.ended);
+    assert_eq!(found.label, "Input requested");
+    let row = &work_rows(&[found], 0, None, &[])[0].1;
+    assert_eq!((row["x"].clone(), row["w"]["k"].clone(), row["w"]["still"].clone()), (json!("Input requested"), json!("q"), json!(1)));
+    assert!(row["w"]["q"].is_null(), "{row}");
+    let mut tool = tool_item(5, "Read", None);
+    tool["status"] = json!("running");
+    assert!(FoundWork::from_item(&tool, 5, long_after).unwrap().ended, "a tool left running does count as over");
+}
+
+#[test]
+fn a_turn_whose_run_is_not_known_to_have_finished_stays_open() {
+    let rig = fold_rig(63_000_000, "completed", a_turn(), json!([]));
+    assert!(view_items(&rig).iter().all(|i| i["f"].is_null() && i["w"]["fold"].is_null()));
+}
+
+fn at(mut item: Value, time: &str) -> Value {
+    item["updatedAt"] = json!(time);
+    item
+}
+
+#[test]
+fn a_message_sent_into_a_turn_splits_it_at_that_message_with_each_part_folded_on_its_own() {
+    let activity = vec![
+        said(0, "user_message", "go"),
+        in_run(said(1, "reasoning", "thinking it over"), "r1"),
+        in_run(said(2, "assistant_message", "working on it"), "r1"),
+        at(in_run(said(3, "user_message", "first rebase"), "r1"), "2026-11-06T10:01:00Z"),
+        in_run(tool_item(4, "Read", None), "r1"),
+        in_run(said(5, "assistant_message", "rebasing"), "r1"),
+        at(in_run(said(6, "assistant_message", "all done"), "r1"), "2026-11-06T10:02:47Z"),
+    ];
+    let rig = fold_rig(67_000_000, "completed", activity, json!([run_of("r1", "completed")]));
+    let items = view_items(&rig);
+    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "thinking it over", "working on it", "first rebase", "Continued for 1m 47s", "Read 1 file", "rebasing", "all done"]);
+    // Each opens only its own part, and the message between them is in neither.
+    assert_eq!(items[1]["w"]["l"], "f2");
+    assert_eq!((items[2]["f"].clone(), items[3]["f"].clone()), (json!("f2"), json!("f2")));
+    assert!(items[4]["f"].is_null(), "{}", items[4]);
+    assert_eq!(items[5]["w"]["l"], "f8");
+    assert_eq!((items[6]["f"].clone(), items[7]["f"].clone()), (json!("f8"), json!("f8")));
+    assert!(items[8]["f"].is_null(), "{}", items[8]);
+}
+
+#[test]
+fn a_continued_part_lasts_until_the_last_tool_of_its_rows() {
+    let activity = vec![
+        said(0, "user_message", "go"),
+        in_run(said(1, "assistant_message", "working on it"), "r1"),
+        at(in_run(said(2, "user_message", "one"), "r1"), "2026-11-06T10:01:00Z"),
+        at(in_run(tool_item(3, "Read", None), "r1"), "2026-11-06T10:01:10Z"),
+        at(in_run(tool_item(4, "Read", None), "r1"), "2026-11-06T10:01:50Z"),
+        at(in_run(said(5, "user_message", "two"), "r1"), "2026-11-06T10:02:00Z"),
+        at(in_run(tool_item(6, "Read", None), "r1"), "2026-11-06T10:02:10Z"),
+        at(in_run(said(7, "assistant_message", "all done"), "r1"), "2026-11-06T10:02:30Z"),
+    ];
+    let rig = fold_rig(69_000_000, "completed", activity, json!([run_of("r1", "completed")]));
+    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "working on it", "one", "Continued for 50s", "Read 2 files", "two", "Continued for 30s", "Read 1 file", "all done"]);
+}
+
+#[test]
+fn back_to_back_messages_sent_into_a_turn_split_it_once_after_the_last() {
+    let activity = vec![
+        said(0, "user_message", "go"),
+        in_run(said(1, "assistant_message", "working on it"), "r1"),
+        at(in_run(said(2, "user_message", "one"), "r1"), "2026-11-06T10:00:40Z"),
+        at(in_run(said(3, "user_message", "two"), "r1"), "2026-11-06T10:01:00Z"),
+        in_run(tool_item(4, "Read", None), "r1"),
+        at(in_run(said(5, "assistant_message", "all done"), "r1"), "2026-11-06T10:02:00Z"),
+    ];
+    let rig = fold_rig(68_000_000, "completed", activity, json!([run_of("r1", "completed")]));
+    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "working on it", "one", "two", "Continued for 1m", "Read 1 file", "all done"]);
+}
+
+#[test]
+fn durations_read_as_t3_says_them() {
+    assert_eq!(format_duration(22), "22s");
+    assert_eq!(format_duration(167), "2m 47s");
+    assert_eq!(format_duration(120), "2m");
+    assert_eq!(format_duration(3605), "1h 5s");
+}
+
+#[test]
+fn a_row_covers_no_more_than_the_one_read_that_opens_it_can_return() {
+    let work: Vec<FoundWork> = (1..=130).map(|position| FoundWork { position, kind: WorkKind::Read, label: String::new(), ended: true, answer: None, answered: false, at: 0 }).collect();
+    let spans: Vec<Value> = work_rows(&work, 0, None, &[]).into_iter().map(|(_, row)| row["w"].clone()).collect();
+    assert_eq!(spans, [json!({ "p": 1, "l": 100, "k": "r" }), json!({ "p": 101, "l": 130, "k": "r" })]);
+}
+
+#[test]
+fn a_row_of_one_kind_of_work_has_its_icon_and_a_mix_has_the_hammer() {
+    let row_of = |kinds: &[WorkKind]| {
+        let work: Vec<FoundWork> = kinds.iter().enumerate().map(|(i, kind)| FoundWork { position: i as u64 + 1, kind: *kind, label: String::new(), ended: true, answer: None, answered: false, at: 0 }).collect();
+        work_rows(&work, 0, None, &[])[0].1.clone()
+    };
+    assert_eq!(row_of(&[WorkKind::Command, WorkKind::Command])["w"]["k"], "c");
+    assert_eq!(row_of(&[WorkKind::Read])["w"]["k"], "r");
+    assert_eq!(row_of(&[WorkKind::Edit])["w"]["k"], "e");
+    assert_eq!(row_of(&[WorkKind::Search])["w"]["k"], "s");
+    assert_eq!(row_of(&[WorkKind::Web])["w"]["k"], "w");
+    assert_eq!(row_of(&[WorkKind::Read, WorkKind::Command])["w"]["k"], "t");
+    assert_eq!(row_of(&[WorkKind::Search, WorkKind::Web])["x"], "Ran 2 searches");
+}
+
+#[test]
+fn the_turn_still_going_is_headed_by_when_it_started() {
+    let rig = fold_rig(64_000_000, "running", a_turn(), json!([run_of("r1", "running"), run_of("r0", "completed")]));
+    let items = view_items(&rig);
+    assert_eq!(items[0]["x"], "go");
+    assert_eq!(items[1]["w"]["live"], iso_seconds("2026-11-06T10:00:00Z"));
+    assert_eq!(items[1]["w"]["still"], 1);
+    // Not once it has ended.
+    let done = fold_rig(65_000_000, "completed", a_turn(), json!([run_of("r1", "completed")]));
+    assert!(view_items(&done).iter().all(|i| i["w"]["live"].is_null()));
+}
+
+#[test]
+fn a_turn_with_nothing_to_show_yet_still_says_it_is_working() {
+    let activity = vec![said(0, "user_message", "go")];
+    let rig = fold_rig(66_000_000, "running", activity, json!([run_of("r1", "running")]));
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert!(items[1]["w"]["live"].is_number());
+}
+
+#[test]
+fn a_long_row_is_cut_into_code_boxes_and_says_when_it_stops() {
+    let text = "line of output\n".repeat(3_000);
+    let body = detail_segments(&[json!({ "type": "command_execution", "text": text })]);
+    assert!(body.len() > 5, "{}", body.len());
+    let shown: usize = body.iter().filter_map(|s| s["c"].as_str()).map(|c| c.chars().count()).sum();
+    assert_eq!(shown, DETAIL_CHARS);
+    assert_eq!(body.last().unwrap(), "… the rest is in T3");
+    assert!(body.iter().filter_map(|s| s["c"].as_str()).all(|c| c.chars().count() <= DETAIL_PIECE + 500));
+}
+
+#[test]
+fn a_thread_only_getting_newer_spends_no_update_until_there_is_something_to_show() {
+    let mut rig = work_rig(55_000_000, "running");
+    rig.advance(20_000);
+    rig.bridge.tick();
+    let settled = rig.publishes();
+    rig.t3.set("running", "2026-11-06T10:05:00Z");
+    rig.advance(20_000);
+    rig.bridge.tick();
+    assert_eq!(rig.publishes(), settled, "a new time alone spent an update");
+    rig.t3.set("completed", "2026-11-06T10:06:00Z");
+    rig.advance(20_000);
+    rig.bridge.tick();
+    assert!(rig.publishes() > settled, "a status change didn't reach the game");
 }

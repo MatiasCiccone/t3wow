@@ -145,7 +145,7 @@ pub enum Trust {
 }
 
 /// What the game may still do under Read-only: look, and bring T3 to the front.
-const READ_ONLY_KINDS: [&str; 10] = ["hello", "ui", "open", "more", "list", "refresh", "probe", "t3", "pr", "unpaste"];
+const READ_ONLY_KINDS: [&str; 11] = ["hello", "ui", "open", "more", "detail", "list", "refresh", "probe", "t3", "pr", "unpaste"];
 
 impl Trust {
     pub const ALL: [Trust; 3] = [Trust::Full, Trust::NoNewThreads, Trust::ReadOnly];
