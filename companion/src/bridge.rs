@@ -47,10 +47,6 @@ const PENDING_RECHECK_MS: i64 = 20_000;
 /// watch can end, the PR merged, without the thread changing).
 const WATCH_RECHECK_MS: i64 = 60_000;
 
-/// How long a thread must keep waiting on you before it notifies. T3 can list a run that
-/// just ended as "waiting" for a moment before "completed"; a real question stays.
-const CONFIRM_WAITING_MS: i64 = 5_000;
-
 fn working(status: &str) -> bool {
     WORKING.contains(&status)
 }
@@ -123,6 +119,15 @@ fn pull_request_links(thread: &Value) -> Vec<Value> {
 /// Waiting on a question or an approval.
 fn needs_you(status: &str) -> bool {
     status == "waiting" || status == "approval"
+}
+
+/// T3 stores a run whose turn just ended as "waiting" until it has wrapped the run up, and
+/// its own sidebar counts that as working: only a pending request waits on you. So what T3
+/// says goes in as working, and "waiting" here always means its pending count said so.
+fn read_as_working_if_waiting(thread: &mut Value) {
+    if thread["status"] == "waiting" {
+        thread["status"] = json!("running");
+    }
 }
 
 /// T3's sidebar files subagent threads, and threads an agent launched, under the thread
@@ -522,8 +527,6 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
-    /// Threads seen waiting on you but not yet notified, and when that was first seen.
-    unconfirmed: HashMap<String, i64>,
     /// Active threads off the lists whose last reads failed, and how many times in a row.
     unlisted_misses: HashMap<String, u32>,
     /// What working threads wait on, keyed by thread: T3's list says "running" while an
@@ -1083,7 +1086,6 @@ impl Bridge {
             events: Vec::new(),
             event_seq: 0,
             last_status: HashMap::new(),
-            unconfirmed: HashMap::new(),
             unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
             watches: HashMap::new(),
@@ -1223,7 +1225,6 @@ impl Bridge {
         self.settled_totals.clear();
         self.list_more.clear();
         self.last_status.clear();
-        self.unconfirmed.clear();
         self.unlisted_misses.clear();
         self.pending_counts.clear();
         self.watches.clear();
@@ -2001,7 +2002,8 @@ impl Bridge {
     fn take_lists(&mut self, env: String, result: ThreadLists) -> Result<(), T3Error> {
         let name = if env.is_empty() { "local".to_string() } else { env.clone() };
         match result {
-            Ok((threads, settled_total, more)) => {
+            Ok((mut threads, settled_total, more)) => {
+                threads.iter_mut().for_each(read_as_working_if_waiting);
                 let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
                 steps.extend((0..threads.len()).filter(|i| may_watch(&threads[*i])).map(Step::Watch));
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
@@ -2079,9 +2081,16 @@ impl Bridge {
             // Something's pending: what it is comes next.
             Ok(_) => self.push_steps(vec![Step::QuestionKind(i, now)]),
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-            Err(T3Error::Other(message)) => self.log(&format!("pending check ({key}): {message}")),
+            Err(T3Error::Other(message)) => self.keep_last_waiting(i, key, &message),
         }
         Ok(())
+    }
+
+    /// A pending check that failed changes nothing: what the thread last waited on stands.
+    fn keep_last_waiting(&mut self, i: usize, key: String, message: &str) {
+        self.log(&format!("pending check ({key}): {message}"));
+        let status = self.pending_counts.get(&key).and_then(|p| p.status);
+        self.mark_waiting(i, key, status);
     }
 
     /// What a working thread with pending requests waits on: its count includes approvals,
@@ -2098,7 +2107,7 @@ impl Bridge {
                 self.mark_waiting(i, key, status);
             }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
-            Err(T3Error::Other(message)) => self.log(&format!("pending check ({key}): {message}")),
+            Err(T3Error::Other(message)) => self.keep_last_waiting(i, key, &message),
         }
         Ok(())
     }
@@ -2212,6 +2221,7 @@ impl Bridge {
                 Ok(read) if read["thread"].is_object() => {
                     self.unlisted_misses.remove(&key);
                     let mut thread = read["thread"].clone();
+                    read_as_working_if_waiting(&mut thread);
                     if working(str_of(&thread["status"])) && thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
                         thread["status"] = json!(if needs_you(&status) { status.as_str() } else { "waiting" });
                     }
@@ -2465,16 +2475,11 @@ impl Bridge {
         if !working(&status) && self.stopping.remove(&key).is_some() {
             self.note("Stopped.");
         }
-        let now = self.now_ms();
         let before = self.last_status.insert(key.clone(), status.clone());
-        // When it was first seen waiting on you, if that hasn't notified yet.
-        let since = self.unconfirmed.remove(&key).filter(|_| before.is_some());
         let notify = match before.as_deref() {
             // A thread new since the last list that already waits on you (an agent that
             // asked straight away) notifies too; on the first list everything is old news.
             None => needs_you(&status) && self.listed_envs.contains(env),
-            // Seen waiting on you before, not yet notified, and still waiting.
-            Some(_) if since.is_some() && needs_you(&status) => true,
             Some(before) if before == status => false,
             // Stopped working: finished, failed, stopped, or now waits on you. A run that
             // ended watching its pull request isn't done yet: it notifies when that ends.
@@ -2483,14 +2488,6 @@ impl Bridge {
             Some(before) if needs_you(before) => !active(&status) && !needs_you(&status),
             Some(_) => false,
         };
-        // Waiting on you: held until a look CONFIRM_WAITING_MS later still agrees.
-        if notify && needs_you(&status) {
-            let first = since.unwrap_or(now);
-            if now - first < CONFIRM_WAITING_MS {
-                self.unconfirmed.insert(key, first);
-                return;
-            }
-        }
         if notify {
             self.event_seq = (self.event_seq + 1).max(self.now_ms());
             self.events.push(json!({
@@ -2535,7 +2532,8 @@ impl Bridge {
         }
         let args = with_args(json!({ "threadId": view.id, "limit": 1, "maxCharsPerItem": 1, "runLimit": 50 }), &self.env_arg(&view.env));
         let head = self.client.call("t3_thread_read", args)?;
-        let thread = head["thread"].clone();
+        let mut thread = head["thread"].clone();
+        read_as_working_if_waiting(&mut thread);
         let runs = head["recentRuns"].clone();
         let item_count = thread["itemCount"].as_u64().unwrap_or(0) as usize;
         let status = str_of(&thread["status"]);
@@ -3188,7 +3186,7 @@ impl Bridge {
             }
         }
         // Waiting on something that isn't a question: an approval, which only T3 can give.
-        if self.pending_ask.is_none() && (pending || str_of(&thread["status"]) == "waiting") {
+        if self.pending_ask.is_none() && pending {
             view["approval"] = json!(true);
             if working(str_of(&thread["status"])) {
                 view["s"] = json!("approval");
