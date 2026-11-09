@@ -106,7 +106,7 @@ fn is_web_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
-/// Every pull request linked to a thread, for the open thread's header.
+/// Every pull request linked to a thread, for its row and the open thread's header.
 fn pull_request_links(thread: &Value) -> Vec<Value> {
     numbered_pull_requests(thread)
         .into_iter()
@@ -3284,6 +3284,7 @@ impl Bridge {
                 if let Some((label, state)) = pull_request_label(t) {
                     entry["pr"] = json!(label);
                     entry["ps"] = json!(state);
+                    entry["prs"] = json!(pull_request_links(t));
                 }
                 entry["at"] = json!(iso_seconds(str_of(&t["updatedAt"])));
                 let project = project_title.get(&format!("{env}:{}", str_of(&t["projectId"]))).map(String::as_str).unwrap_or("");

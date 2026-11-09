@@ -40,6 +40,48 @@ function PullRequests.Colored(number, state)
     return s and format("|cff%s%s|r", s[2], number) or number
 end
 
+-- The game can't open a browser, so the companion does.
+function PullRequests.Open(envId, threadId, pr)
+    ns.Link.Send({ t = "pr", e = envId, id = threadId, u = pr.u })
+    UI.Notice("Opening " .. pr.n .. " in your browser…")
+end
+
+function PullRequests.TextButton(parent)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetHeight(16)
+    b.label = b:CreateFontString(nil, "OVERLAY")
+    b.label:SetFontObject(Skin.fonts.small)
+    b.label:SetPoint("CENTER")
+    return b
+end
+
+function PullRequests.Fit(b) b:SetWidth((b.label:GetStringWidth() or 0) + 2) end
+
+-- A pull request's number, opening it when clicked. owner() says whose it is: machine, thread.
+function PullRequests.NewLink(parent, owner)
+    local link = PullRequests.TextButton(parent)
+    link:SetScript("OnClick", function(self)
+        local envId, threadId = owner()
+        PullRequests.Open(envId, threadId, self.pr)
+    end)
+    link:SetScript("OnEnter", function(self)
+        local state = PullRequests.STATE[self.pr.s]
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:AddLine(state and (self.pr.n .. " · " .. state[1]) or self.pr.n, 1, 1, 1)
+        if self.pr.u then GameTooltip:AddLine("Click to open in your browser", 0.7, 0.7, 0.7) end
+        GameTooltip:Show()
+    end)
+    link:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return link
+end
+
+function PullRequests.SetLink(link, pr)
+    link.pr = pr
+    link.label:SetText(PullRequests.Colored(pr.n, pr.s))
+    link:SetEnabled(pr.u ~= nil)
+    PullRequests.Fit(link)
+end
+
 local inbox
 -- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil,
 -- worktree = true to start it in a new worktree, and what you picked of pv, m (provider and
@@ -483,8 +525,9 @@ local function row(index)
         r.dot.proxy:SetSize(6, 6)
         r.age = r:CreateFontString(nil, "OVERLAY")
         r.age:SetFontObject(Skin.fonts.small)
-        r.pr = r:CreateFontString(nil, "OVERLAY")
-        r.pr:SetFontObject(Skin.fonts.small)
+        r.prLink = PullRequests.NewLink(r, function() return envIdOf(r.thread.e), r.thread.id end)
+        r.prMore = PullRequests.TextButton(r)
+        r.prMore:SetScript("OnEnter", function(self) PullRequests.ShowAll(self, r.thread) end)
         r:SetScript("OnClick", function(self) UI.Select(self.thread) end)
         r:SetScript("OnEnter", rowTooltip)
         r:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -497,16 +540,19 @@ end
 -- Comfortable: title and status pill, machine · project and age under them. Compact: a
 -- status dot, the title and the age on one line. Either way a linked pull request's number
 -- sits just before the age, and the text before it is what gets cut short.
-local function layoutRow(r, compact, hasPr)
+local function layoutRow(r, compact, hasPr, hasMore)
     r.title:ClearAllPoints()
     r.sub:ClearAllPoints()
     r.age:ClearAllPoints()
     r.status:ClearAllPoints()
     r.dot:ClearAllPoints()
-    r.pr:ClearAllPoints()
-    r.pr:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
-    r.pr:SetShown(hasPr)
-    local beforeAge = hasPr and r.pr or r.age
+    r.prLink:ClearAllPoints()
+    r.prMore:ClearAllPoints()
+    r.prMore:SetPoint("RIGHT", r.age, "LEFT", -6, 0)
+    r.prLink:SetPoint("RIGHT", hasMore and r.prMore or r.age, "LEFT", hasMore and -2 or -6, 0)
+    r.prLink:SetShown(hasPr)
+    r.prMore:SetShown(hasMore)
+    local beforeAge = (hasPr and r.prLink) or (hasMore and r.prMore) or r.age
     if compact then
         r.dot:SetPoint("LEFT", r, "LEFT", 9, 0)
         r.title:SetPoint("LEFT", 22, 0)
@@ -523,6 +569,103 @@ local function layoutRow(r, compact, hasPr)
     r.sub:SetShown(not compact)
     r.status:SetShown(not compact)
     r.dot:SetShown(compact)
+end
+
+-- A row's pull requests: one shows its number, several just +total, listed on hover. An
+-- older companion lists none, so its number and +n only show. Without a page to open, a
+-- click on them goes through to the row. Returns whether each is there, for layoutRow.
+function PullRequests.FillRow(r, t)
+    local number, more = (t.pr or ""):match("^(%S+)%s*(.*)$")
+    local prs = t.prs or {}
+    if prs[2] then number, more = nil, "+" .. #prs end
+    local only = not prs[2] and prs[1] or { n = number or "", s = number and t.ps }
+    PullRequests.SetLink(r.prLink, only)
+    r.prLink:EnableMouse(only.u ~= nil)
+    r.prMore.label:SetText(more or "")
+    r.prMore:EnableMouse(prs[2] ~= nil)
+    PullRequests.Fit(r.prMore)
+    return number ~= nil, more ~= nil and more ~= ""
+end
+
+-- What a row's +total stands for, listed on hovering it: the thread's pull requests, each
+-- opening when clicked. A tooltip can't be clicked, so this is a frame of its own, open
+-- while the pointer is on the +total or on it, with a moment to cross from one to the other.
+do
+    local LINGER, ENTRY_HEIGHT, PAD = 0.2, 18, 4
+    local popup = CreateFrame("Frame", "T3WoWPullRequests", frame)
+    popup:SetFrameStrata("FULLSCREEN_DIALOG")
+    popup:SetFrameLevel(20)
+    popup:SetClampedToScreen(true)
+    popup:EnableMouse(true)
+    Skin.Box(popup, { shape = "control", fill = "card", ring = "border", ringLayer = "BORDER" })
+    popup.entries = {}
+    popup:Hide()
+    -- Closed with the window, it stays closed when the window comes back.
+    popup:SetScript("OnHide", function(self) self:Hide() end)
+    popup:SetScript("OnUpdate", function(self, elapsed)
+        if self:IsMouseOver() or self.anchor:IsMouseOver() then
+            self.away = 0
+        else
+            self.away = self.away + elapsed
+            if self.away >= LINGER then self:Hide() end
+        end
+    end)
+
+    local function entryAt(index)
+        local entry = popup.entries[index]
+        if not entry then
+            entry = PullRequests.TextButton(popup)
+            entry:SetHeight(ENTRY_HEIGHT)
+            entry:SetPoint("TOPLEFT", PAD, -PAD - (index - 1) * ENTRY_HEIGHT)
+            entry.label:ClearAllPoints()
+            entry.label:SetPoint("LEFT", 6, 0)
+            entry:SetScript("OnClick", function(self)
+                PullRequests.Open(popup.env, popup.threadId, self.pr)
+                popup:Hide()
+            end)
+            Skin.Hover(entry)
+            popup.entries[index] = entry
+        end
+        return entry
+    end
+
+    function PullRequests.ShowAll(anchor, thread)
+        local prs = thread.prs or {}
+        popup.anchor, popup.away = anchor, 0
+        popup.env, popup.threadId = envIdOf(thread.e), thread.id
+        local count, width = #prs, 0
+        for index = 1, count do
+            local pr, entry = prs[index], entryAt(index)
+            local state = PullRequests.STATE[pr.s]
+            entry.pr = pr
+            entry.label:SetText(PullRequests.Colored(pr.n, pr.s) .. (state and format("  |cff%s%s|r", Skin.Hex("dim"), state[1]) or ""))
+            entry:SetEnabled(pr.u ~= nil)
+            entry:Show()
+            width = math.max(width, entry.label:GetStringWidth() or 0)
+        end
+        for index = count + 1, #popup.entries do
+            popup.entries[index]:Hide()
+            popup.entries[index].label:SetText("")
+        end
+        for index = 1, count do popup.entries[index]:SetWidth(width + 12) end
+        popup:SetSize(width + 12 + 2 * PAD, count * ENTRY_HEIGHT + 2 * PAD)
+        popup:ClearAllPoints()
+        popup:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", 0, -2)
+        popup:Show()
+    end
+
+    -- The list is drawn again on every update: what's open follows its thread's row, and
+    -- closes with it.
+    function PullRequests.FollowList()
+        if not popup:IsShown() then return end
+        for _, r in ipairs(rows) do
+            local t = r.thread
+            if r:IsShown() and t and t.id == popup.threadId and envIdOf(t.e) == popup.env and t.prs and t.prs[2] then
+                return PullRequests.ShowAll(r.prMore, t)
+            end
+        end
+        popup:Hide()
+    end
 end
 
 -- Show more, at the end of a group with more threads than the companion listed: the next
@@ -618,9 +761,7 @@ local function renderList()
                 rowIndex = rowIndex + 1
                 local r = row(rowIndex)
                 r.thread = t
-                layoutRow(r, compact, t.pr ~= nil)
-                local prNumber, prMore = (t.pr or ""):match("^(%S+)(.*)$")
-                r.pr:SetText(prNumber and (PullRequests.Colored(prNumber, t.ps) .. prMore) or "")
+                layoutRow(r, compact, PullRequests.FillRow(r, t))
                 r.title:SetText(t.t ~= "" and t.t or "Untitled")
                 local e = env(t.e)
                 r.sub:SetText(format("%s%s", e and e.name or "?", t.p ~= "" and (" · " .. t.p) or ""))
@@ -646,6 +787,7 @@ local function renderList()
         end
     end
     listChild:SetHeight(math.max(y, 1))
+    PullRequests.FollowList()
 end
 
 -- Search, over the list as in T3's sidebar: typing narrows the list (renderList), Enter
@@ -722,30 +864,13 @@ do
     headerLine:SetPoint("TOPRIGHT", 0, -SIZE.header)
 end
 
--- The open thread's pull requests, at the right of the line under the title. Each opens in
--- the browser: the game can't, so the companion does.
+-- The open thread's pull requests, at the right of the line under the title.
 do
     local links = {}
     local function linkAt(index)
         local link = links[index]
         if not link then
-            link = CreateFrame("Button", nil, right)
-            link:SetHeight(16)
-            link.label = link:CreateFontString(nil, "OVERLAY")
-            link.label:SetFontObject(Skin.fonts.small)
-            link.label:SetPoint("CENTER")
-            link:SetScript("OnClick", function(self)
-                ns.Link.Send({ t = "pr", e = selected.env, id = selected.id, u = self.pr.u })
-                UI.Notice("Opening " .. self.pr.n .. " in your browser…")
-            end)
-            link:SetScript("OnEnter", function(self)
-                local state = PullRequests.STATE[self.pr.s]
-                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-                GameTooltip:AddLine(state and (self.pr.n .. " · " .. state[1]) or self.pr.n, 1, 1, 1)
-                if self.pr.u then GameTooltip:AddLine("Click to open in your browser", 0.7, 0.7, 0.7) end
-                GameTooltip:Show()
-            end)
-            link:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            link = PullRequests.NewLink(right, function() return selected.env, selected.id end)
             links[index] = link
         end
         return link
@@ -758,10 +883,7 @@ do
         local leftmost
         for i = #prs, 1, -1 do
             local link = linkAt(i)
-            link.pr = prs[i]
-            link.label:SetText(PullRequests.Colored(prs[i].n, prs[i].s))
-            link:SetEnabled(prs[i].u ~= nil)
-            link:SetWidth((link.label:GetStringWidth() or 0) + 2)
+            PullRequests.SetLink(link, prs[i])
             link:ClearAllPoints()
             if leftmost then
                 link:SetPoint("RIGHT", leftmost, "LEFT", -6, 0)
