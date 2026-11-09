@@ -219,7 +219,9 @@ local frameSeq = 0
 local function renderPart(header, command)
     if state.longOk == nil then
         -- Only a command saved before a /reload gets here this early: wait for the
-        -- companion's first update, which this header-only frame asks for.
+        -- companion's first update, which this header-only frame asks for. It names the
+        -- command, so the update's ack can't be from before this UI session and drop it.
+        header.pt = { s = command.s }
         frameSeq = frameSeq + 1
         renderStrip(Codec.Encode(frameSeq, Codec.Json(header)))
         return true
