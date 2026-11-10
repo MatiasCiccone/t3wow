@@ -652,6 +652,32 @@ impl T3 for McpClient {
     }
 }
 
+/// Every tool T3 offers this sign-in, with its input schema: the live tests compare them with
+/// the ones the companion was made for.
+#[cfg(test)]
+impl McpClient {
+    pub fn list_tools(&self) -> Result<Vec<Value>, T3Error> {
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        self.ensure_ready(deadline)?;
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = cursor.as_ref().map_or_else(|| json!({}), |c| json!({ "cursor": c }));
+            let body = json!({ "jsonrpc": "2.0", "id": self.next_id.fetch_add(1, Ordering::SeqCst), "method": "tools/list", "params": params });
+            let result = match self.post(&body, true, deadline) {
+                Ok(result) => result.unwrap_or(Value::Null),
+                Err(PostError::Fail(error)) => return Err(error),
+                Err(PostError::SessionExpired) => return Err(T3Error::Other("MCP session expired".into())),
+            };
+            tools.extend(result["tools"].as_array().cloned().unwrap_or_default());
+            match result["nextCursor"].as_str() {
+                Some(next) => cursor = Some(next.to_string()),
+                None => return Ok(tools),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
