@@ -107,6 +107,18 @@ fn pull_request_label(thread: &Value) -> Option<(String, String)> {
     Some((label, str_of(&shown["state"]).to_string()))
 }
 
+/// Whether a thread's row shows its age from its latest run (it has one, it's at rest and
+/// not settled), which only a thread read has.
+fn ages_from_run(thread: &Value) -> bool {
+    let at_rest = matches!(str_of(&thread["status"]), "completed" | "idle" | "interrupted" | "cancelled" | "rolled_back");
+    at_rest && thread["settled"] != true && !str_of(&thread["latestRunId"]).is_empty()
+}
+
+/// A run's newest time (requested, started or completed), in epoch seconds; 0 if none.
+fn run_activity(run: &Value) -> i64 {
+    ["requestedAt", "startedAt", "completedAt"].iter().map(|k| iso_seconds(str_of(&run[*k]))).max().unwrap_or(0)
+}
+
 /// Only a web page goes to the browser: T3's record could hold anything Windows would run.
 fn is_web_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
@@ -740,6 +752,8 @@ pub struct Bridge {
     /// Each working thread's current run and when it started, read once per run: T3's
     /// lists don't say.
     run_starts: HashMap<String, (String, i64)>,
+    /// Each thread at rest's last activity (epoch seconds), by the updatedAt it was read at.
+    activity: HashMap<String, (String, i64)>,
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
     /// Commands waiting to run: client key, the UI session they came in, the stamp of the
@@ -1548,6 +1562,7 @@ enum Step {
     Watch(usize),
     Launcher(usize),
     RunStart(usize),
+    Activity(usize),
     Track,
     Unlisted(String, String),
     Keep,
@@ -1729,6 +1744,7 @@ impl Bridge {
             launchers: HashMap::new(),
             delegating: HashMap::new(),
             run_starts: HashMap::new(),
+            activity: HashMap::new(),
             commands: VecDeque::new(),
             queued: HashMap::new(),
             last_publish_at: 0,
@@ -1866,6 +1882,7 @@ impl Bridge {
         self.threads.clear();
         self.projects.clear();
         self.run_starts.clear();
+        self.activity.clear();
         self.new_worktrees.clear();
         self.fresh_context.clear();
         self.catalogs.clear();
@@ -2567,6 +2584,7 @@ impl Bridge {
             Step::Watch(i) => self.check_watch(i),
             Step::Launcher(i) => self.find_launcher(i),
             Step::RunStart(i) => self.read_run_start(i),
+            Step::Activity(i) => self.read_activity(i),
             Step::Track => {
                 self.track_listed();
                 Ok(())
@@ -2710,6 +2728,7 @@ impl Bridge {
                 steps.extend((0..threads.len()).filter(|i| may_watch(&threads[*i])).map(Step::Watch));
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
                 steps.extend((0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::RunStart));
+                steps.extend((0..threads.len()).filter(|i| ages_from_run(&threads[*i])).map(Step::Activity));
                 steps.extend([Step::Track, Step::Keep]);
                 if let Some(run) = self.poll_run.as_mut() {
                     run.listed = Some(Listed { env, threads, settled_total, more, seen: Vec::new() });
@@ -2910,6 +2929,33 @@ impl Bridge {
         Ok(())
     }
 
+    /// Notes when a thread at rest last had activity, which T3's sidebar ages its row from:
+    /// the newest of its latest run's times. T3's list doesn't say, so it's read again only
+    /// when the thread's updatedAt moves; until then the row ages from updatedAt.
+    fn read_activity(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some((env, id, updated)) = self.listed_thread(i) else { return Ok(()) };
+        let key = format!("{env}:{id}");
+        if self.activity.get(&key).is_none_or(|(known, _)| *known != updated) && !self.out_of_time() {
+            let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1, "runLimit": 1 }), &self.env_arg(&env));
+            match self.client.call("t3_thread_read", args) {
+                Ok(read) => {
+                    let at = read["recentRuns"].as_array().and_then(|runs| runs.first()).map_or(0, run_activity);
+                    if at > 0 {
+                        self.activity.insert(key.clone(), (updated.clone(), at));
+                    }
+                }
+                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                Err(T3Error::Other(message)) => self.log(&format!("activity ({key}): {message}")),
+            }
+        }
+        if let Some(at) = self.activity.get(&key).filter(|(known, _)| *known == updated).map(|(_, at)| *at) {
+            if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
+                thread["activityAt"] = json!(at);
+            }
+        }
+        Ok(())
+    }
+
     /// Notes where an agent-made thread came from, by its first message: the sender that
     /// launched it, a task delegated from another machine, or neither (a row of its own).
     fn find_launcher(&mut self, i: usize) -> Result<(), T3Error> {
@@ -2952,6 +2998,7 @@ impl Bridge {
         self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !ids.contains(k));
         self.watches.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         self.run_starts.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
+        self.activity.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         let gone: Vec<(String, String)> =
             self.last_status.iter().filter(|(k, _)| k.starts_with(&prefix) && !ids.contains(*k)).map(|(k, s)| (k.clone(), s.clone())).collect();
         let mut steps = Vec::new();
@@ -4207,6 +4254,14 @@ impl Bridge {
                     entry["prs"] = json!(pull_request_links(t));
                 }
                 entry["at"] = json!(iso_seconds(str_of(&t["updatedAt"])));
+                // The row's age, as T3 0.18's sidebar tells it: a settled thread's from when it
+                // was settled, any other's from its last activity (`read_activity`).
+                let settled_at = iso_seconds(str_of(&t["settledAt"]));
+                if t["settled"] == true && settled_at > 0 {
+                    entry["la"] = json!(settled_at);
+                } else if let Some(at) = t["activityAt"].as_i64() {
+                    entry["la"] = json!(at);
+                }
                 let project = project_title.get(&format!("{env}:{}", str_of(&t["projectId"]))).map(String::as_str).unwrap_or("");
                 entry["p"] = json!(plain(project, 40));
                 threads.push(entry);

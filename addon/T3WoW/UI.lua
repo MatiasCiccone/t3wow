@@ -1080,7 +1080,8 @@ local function renderList()
                 r.project:SetText(t.p or "")
                 r.sub:SetText(e and e.name or "?")
                 UI.PaintRowStatus(r, t)
-                r.age:SetText(age(t.at))
+                -- `la`: when T3's sidebar ages the row from (an older companion sends only `at`).
+                r.age:SetText(age(t.la or t.at))
                 local isSelected = selected and not selected.new and selected.id == t.id and selected.env == envIdOf(t.e)
                 r.box:SetColors(isSelected and "selected" or false, isSelected and "selectedRing" or false)
                 r:SetPoint("TOPLEFT", indent, -y)
@@ -2581,7 +2582,7 @@ function renderView()
     viewTitle:SetText((view and view.t) or (listed and listed.t) or "")
     local status = (listed and listed.s) or (view and view.s)
     local e = envById(selected.env)
-    local meta = format("%s · %s", e and e.name or "?", age(listed and listed.at))
+    local meta = format("%s · %s", e and e.name or "?", age(listed and (listed.la or listed.at)))
     -- The branch its checkout is on, last so a long one is what gets cut short. Only the
     -- open thread's read carries it (T3's list doesn't), so the list rows go without.
     if view and view.br and view.br ~= "" then
