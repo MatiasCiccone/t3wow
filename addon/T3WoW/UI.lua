@@ -26,6 +26,9 @@ local WORKING = { preparing = true, queued = true, starting = true, running = tr
 -- A thread whose agent watches a pull request (its checks, its reviews) after its run ended:
 -- T3's sidebar files it under Working as "Waiting", though there's no run to stop.
 local function inWorking(status) return WORKING[status] or status == "watching" end
+-- A run Stop can cancel: working, or waiting on something only T3 can answer (an approval,
+-- a card), whose run goes on until it's answered. On UI: the file is out of locals.
+function UI.Stoppable(status) return WORKING[status] == true or status == "approval" or status == "card" end
 local STATUS = {
     preparing = { "Working", "60a5fa", "spinner" }, queued = { "Queued", "60a5fa", "spinner" }, starting = { "Working", "60a5fa", "spinner" },
     running = { "Working", "60a5fa", "spinner" }, completed = { "Finished", "40c040" }, failed = { "Failed", "ff4040" },
@@ -3881,7 +3884,7 @@ function UI.ComposerButton()
     local isStopping = stopping ~= nil and selected ~= nil and stopping.env == selected.env and stopping.id == selected.id
     local writing = input:GetText():find("%S") ~= nil or #Paste.For(Paste.DraftKey()) > 0
     local answering = pendingAsk() ~= nil
-    local showStop = ((listed ~= nil and WORKING[listed.s] == true) or isStopping) and not writing and not answering
+    local showStop = ((listed ~= nil and UI.Stoppable(listed.s)) or isStopping) and not writing and not answering
     stop:SetShown(showStop)
     send:SetShown(not showStop and not answering)
     Selectors.PlaceRow((answering and askSend) or (showStop and stop) or send)
@@ -3967,7 +3970,7 @@ local function renderStatus()
     local listed = selectedThread()
     local isStopping = stopping ~= nil and selected ~= nil and stopping.env == selected.env and stopping.id == selected.id
     stop:SetText(isStopping and "Stopping…" or "Stop")
-    stop:SetEnabled(not isStopping and listed ~= nil and WORKING[listed.s] == true and not blockedReason("stop"))
+    stop:SetEnabled(not isStopping and listed ~= nil and UI.Stoppable(listed.s) and not blockedReason("stop"))
     UI.ComposerButton()
     send:SetText((selected and selected.new and "Start") or "Send")
     send:SetEnabled(selected ~= nil and not blockedReason((selected.new and "new") or "send"))
@@ -4649,7 +4652,7 @@ function UI.OnInbox(data)
     notice = takeOutcomes(data)
     -- The run ended (or the thread dropped off the list's working states): Stop is done.
     local t = stopping and listedThread(stopping.env, stopping.id)
-    if t and not WORKING[t.s] then stopping = nil end
+    if t and not UI.Stoppable(t.s) then stopping = nil end
     UI.Refresh()
 end
 

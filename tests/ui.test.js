@@ -3254,6 +3254,11 @@ local open = find("Button", "Open in T3")
 assert(open and open:IsShown(), "no Open in T3")
 open.scripts.OnClick(open, "LeftButton")
 assert(sent().t == "t3" and sent().id == "t1", tostring(sent().t))
+-- Stop cancels the waiting run from here, as the line says.
+local stop = find("Button", "Stop")
+assert(stop and stop:IsShown() and stop.enabled, "no Stop")
+stop.scripts.OnClick(stop, "LeftButton")
+assert(sent().t == "stop" and sent().id == "t1", tostring(sent().t))
 
 -- A machine link waits the same way.
 view.card = { k = "link", l = "Mac mini" }
