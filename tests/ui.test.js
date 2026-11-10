@@ -291,6 +291,23 @@ return "ok"
 `);
 });
 
+test("a row and its header age from when T3 says (la), else from updatedAt (at)", () => {
+  run(`
+-- Touched just now, but its last reply came two hours ago: T3 0.18 says 2h.
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), la = time() - 7200, p = "" }
+inboxWith(ENVS, { threads = { thread } })
+assert(showing("^2h$"), "the row doesn't age from la")
+assert(not showing("^now$"), "the row ages from at")
+UI.Select(thread)
+assert(showing(" · 2h$"), "the header doesn't age from la")
+-- An older companion sends only at.
+thread.la = nil
+inboxWith(ENVS, { threads = { thread } })
+assert(showing("^now$"), "no age from at")
+return "ok"
+`);
+});
+
 test("a message T3 refused comes back to the box and its '(sending)' line goes", () => {
   run(`
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }

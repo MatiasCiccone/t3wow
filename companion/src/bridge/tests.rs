@@ -1886,6 +1886,44 @@ fn a_working_thread_says_when_its_run_started_from_one_read_per_run() {
 }
 
 #[test]
+fn a_row_ages_from_its_last_run_or_when_it_was_settled_as_in_t3() {
+    let mut rig = Rig::new(34_000_000);
+    // Touched long after its last run ended (a sweep, a pull request linked): T3 0.18 ages
+    // the row from the run, not from updatedAt.
+    *rig.t3.threads.lock().unwrap() = vec![
+        json!({ "threadId": "t1", "projectId": "p1", "title": "Replied", "status": "completed", "latestRunId": "r1", "updatedAt": "2026-11-06T10:57:00.000Z" }),
+        json!({ "threadId": "t2", "projectId": "p1", "title": "Settled", "status": "completed", "latestRunId": "r1", "settled": true, "settledAt": "2026-11-06T08:00:00.000Z", "updatedAt": "2026-11-06T10:58:00.000Z" }),
+        json!({ "threadId": "t3", "projectId": "p1", "title": "No run", "status": "idle", "updatedAt": "2026-11-06T09:00:00.000Z" }),
+    ];
+    *rig.t3.runs.lock().unwrap() = json!([{ "runId": "r1", "requestedAt": "2026-11-06T04:06:16.064Z", "startedAt": "2026-11-06T04:06:16.089Z", "completedAt": "2026-11-06T04:07:43.686Z" }]);
+    let age = |rig: &Rig, id: &str| {
+        let snapshot = rig.bridge.snapshot();
+        let row = snapshot["threads"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+        row["la"].as_i64().unwrap_or_else(|| row["at"].as_i64().unwrap())
+    };
+    let reads = |rig: &Rig| rig.t3.calls_to("t3_thread_read").iter().filter(|a| a["threadId"] == "t1" && a["runLimit"] == 1 && a["environmentId"].is_null()).count();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(age(&rig, "t1"), iso_seconds("2026-11-06T04:07:43.686Z"), "the newest time of its latest run");
+    assert_eq!(age(&rig, "t2"), iso_seconds("2026-11-06T08:00:00.000Z"), "when it was settled");
+    assert_eq!(age(&rig, "t3"), iso_seconds("2026-11-06T09:00:00.000Z"), "no run: updatedAt");
+    let once = reads(&rig);
+    assert_eq!(once, 1, "read once");
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(reads(&rig), once, "not read again while the thread is unchanged");
+
+    // Another run ended: the thread moved, so it's read again.
+    rig.t3.threads.lock().unwrap()[0]["updatedAt"] = json!("2026-11-06T11:30:05.000Z");
+    *rig.t3.runs.lock().unwrap() = json!([{ "runId": "r2", "requestedAt": "2026-11-06T11:20:00.000Z", "startedAt": "2026-11-06T11:20:01.000Z", "completedAt": "2026-11-06T11:30:00.000Z" }]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(age(&rig, "t1"), iso_seconds("2026-11-06T11:30:00.000Z"));
+}
+
+#[test]
 fn a_time_is_written_as_t3_writes_them() {
     assert_eq!(iso_from_seconds(0), "1970-01-01T00:00:00.000Z");
     assert_eq!(iso_from_seconds(1_709_210_096), "2024-02-29T12:34:56.000Z", "a leap day");
