@@ -8,9 +8,9 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow-releases/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
 
-## Made for T3 Code 0.17.0
+## Made for T3 Code 0.18.0
 
-**T3 WoW is developed and tested against the stable release of T3 Code, version 0.17.0.** On any other version, including pre-release builds, parts of it may not work.
+**T3 WoW is developed and tested against the stable release of T3 Code, version 0.18.0.** On any other version, including pre-release builds, parts of it may not work.
 
 ## Highlights
 
@@ -77,7 +77,7 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 ## What you need
 
 - Windows, with WoW: Forever in windowed or borderless windowed mode (exclusive fullscreen blocks screen capture).
-- T3 Code desktop 0.17.0, the stable release, running on the same PC or on another machine this PC can reach over the network (run t3wow.exe login --origin http://<host>:<port> once to point the companion at it). Threads on other machines also appear when you link those machines to T3.
+- T3 Code desktop 0.18.0, the stable release, running on the same PC or on another machine this PC can reach over the network (run t3wow.exe login --origin http://<host>:<port> once to point the companion at it). Threads on other machines also appear when you link those machines to T3.
 - The T3 WoW companion, t3wow.exe, from https://github.com/MatiasCiccone/t3wow-releases.
 
 ## Setting up
@@ -121,6 +121,6 @@ Each UI session has 200 updates, and the companion only spends one when somethin
 - If you see "Waiting for the companion…", check that T3 WoW is running in the tray, that the game is windowed, and that nothing covers the top-left corner. **Open log** in the tray menu shows what the companion sees.
 - If you see "Slot addons blocked", enable the T3 WoW slot addons in the AddOns list. If a game patch changed the interface version, choose Match WoW's interface version in the companion's tray menu, then restart WoW.
 - If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu.
-- If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.17.0.
+- If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.18.0.
 
 T3 WoW is MIT licensed.
