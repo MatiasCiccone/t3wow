@@ -172,6 +172,7 @@ Needs Node.js 20+ (for the addon's tests and the release scripts) and Rust 1.90 
 ```sh
 npm ci
 npm test            # the addon's Lua (in fengari), release signing, and the companion (cargo test)
+npm run test:live   # the companion and the addon against the real T3 you're signed in to (see below)
 npm run build:exe   # dist/t3wow.exe, Windows only
 npm run screenshots # redraws assets/screenshots from the addon's code (needs Chrome)
 ```
@@ -182,6 +183,14 @@ npm run screenshots # redraws assets/screenshots from the addon's code (needs Ch
 - `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400).
 
 `cargo test -- --ignored` in `companion/` also runs the test that draws with the real Edge (Windows with Edge or Chrome only).
+
+**Live tests** (`npm run test:live`) check the companion and the addon against the real T3 the companion is signed in to (`t3wow.exe login` first). Run them after every T3 Code update and before every release. They take a minute or two and start a few short agent runs on the cheapest model T3 offers (Haiku when there is one; `T3WOW_LIVE_MODEL=<provider>/<model>` picks another). The runs go in their own T3 project, **T3 WoW live tests**, which the first run creates in an empty folder (`%APPDATA%	3wow\live-tests`), and their threads are archived at the end. Three checks:
+
+- Every call the companion makes is answered in the shape the unit tests' `FakeT3` answers it. If T3 renames or drops a field, this fails and names it: fix the fake, and the unit tests then show what in the companion needs to change. Fields T3 sends only sometimes are listed in `OPTIONAL` in `companion/src/bridge/tests/live.rs`.
+- Every command the game can send, sent as the frames the addon draws: New Thread, Send, a pasted image (the agent must say what color it is), the model row, Snooze, Settle and undoing them, Stop, and answering an agent's question. Each is checked in T3 itself and in what the companion writes for the game. Steps that depend on what a model chooses to do (asking the question, the run still going when Stop arrives) are tried up to 3 times.
+- Every update written for the game (saved under `companion/target/live/`) is loaded, in order, into the real addon in the simulated game (`tests/live-replay.js`). None may raise a Lua error, and at set points the window must show the agent's reply or the question's buttons.
+
+They can't run in CI, which has no signed-in T3. What they leave to a check in the game: WoW itself (signal fonts, slot addons, the screen strip, drawing, sounds, the interface version) and the tray.
 
 Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against another repository; release builds ignore it.
 
@@ -197,7 +206,7 @@ Without one it builds unsigned, and Windows SmartScreen warns on first run. This
 
 **Repository rules:** pull requests merge by rebase only (linear history), branches are deleted after merging, and Dependabot opens security fixes and weekly updates. `.github/rulesets/main.json` protects `main`: no force pushes or deletion, linear history, changes only through pull requests that pass CI (`test`) and get the code owner's review (`.github/CODEOWNERS`); repository admins can bypass. GitHub enforces rulesets on public repositories, or on private ones with GitHub Pro; apply it with `gh api repos/MatiasCiccone/t3wow/rulesets --input .github/rulesets/main.json`.
 
-**Releasing:** set the same version in `companion/Cargo.toml`, `addon/T3WoW/T3WoW.toc` and `package.json`, then push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The Release workflow checks that all three match the tag and checks the release key, runs the tests, builds on Windows, signs the SHA-256 file once signing is set up, and publishes `t3wow.exe`, `t3wow.exe.sha256`, `t3wow.exe.sha256.sig` when signed (what the updater downloads and checks) and `T3WoW-v0.4.0.zip` (the addon alone, for CurseForge) to the public `MatiasCiccone/t3wow-releases`. The notes list the `feat` and `fix` commit subjects since the previous tag, without their prefixes; other commits stay out. It needs two secrets:
+**Releasing:** run `npm run test:live` (see **Live tests** above), then set the same version in `companion/Cargo.toml`, `addon/T3WoW/T3WoW.toc` and `package.json`, then push a tag (`git tag v0.4.0 && git push origin v0.4.0`). The Release workflow checks that all three match the tag and checks the release key, runs the tests, builds on Windows, signs the SHA-256 file once signing is set up, and publishes `t3wow.exe`, `t3wow.exe.sha256`, `t3wow.exe.sha256.sig` when signed (what the updater downloads and checks) and `T3WoW-v0.4.0.zip` (the addon alone, for CurseForge) to the public `MatiasCiccone/t3wow-releases`. The notes list the `feat` and `fix` commit subjects since the previous tag, without their prefixes; other commits stay out. It needs two secrets:
 
 - `RELEASES_TOKEN`: a fine-grained token with Contents read and write on `t3wow-releases` only.
 - `T3WOW_SIGNING_KEY`: the release key's private half (until it's set up, see below, releases go out unsigned).

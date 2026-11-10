@@ -4112,3 +4112,5 @@ fn a_read_only_sign_in_shows_on_the_game_s_top_line_until_one_can_change_threads
     assert!(rig.bridge.snapshot()["auth"].is_null());
     assert!(!latest(&rig).contains("Read-only T3 sign-in"), "{}", latest(&rig));
 }
+
+mod live;
