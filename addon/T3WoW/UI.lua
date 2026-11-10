@@ -31,6 +31,8 @@ local STATUS = {
     running = { "Working", "60a5fa", "spinner" }, completed = { "Finished", "40c040" }, failed = { "Failed", "ff4040" },
     -- As T3 says it: Input, in its indigo, with a question mark; "notice" is for a notification, where the one word says little.
     waiting = { "Input", "a5b4fc", "question", notice = "Awaiting input" }, approval = { "Approval", "fbbf24", "shield", notice = "Approve in T3" }, interrupted = { "Stopped", "a0a0a0" }, cancelled = { "Stopped", "a0a0a0" },
+    -- A card only T3's own window can answer (a secret, a machine link): T3 says Input too.
+    card = { "Input", "a5b4fc", "question", notice = "Answer in T3" },
     idle = { "Idle", "a0a0a0" }, rolled_back = { "Rolled back", "a0a0a0" }, watching = { "Waiting", "ffd100" },
 }
 -- A linked pull request's state, in the colors GitHub gives them. Another state keeps the
@@ -1025,7 +1027,7 @@ local function renderList()
             local key = t.e .. ":" .. t.par
             launched[key] = launched[key] or {}
             table.insert(launched[key], t)
-        elseif searching or not (t.par or t.ag) or parent or t.set or inWorking(t.s) or t.s == "waiting" or t.s == "approval" then
+        elseif searching or not (t.par or t.ag) or parent or t.set or inWorking(t.s) or t.s == "waiting" or t.s == "approval" or t.s == "card" then
             table.insert(groups[groupOf(t)], t)
         end
     end
@@ -2242,6 +2244,20 @@ local function renderAsk(view)
             place(fs, x, 10)
             place(approvalOpen, x, 18 + SIZE.card)
             showCard(fs, approvalOpen)
+        elseif view.card then
+            -- The game never takes the answer: what goes between it and the companion sits
+            -- in files on disk, so a secret typed here would land there in plain text.
+            local fs = askString(1)
+            fs:SetFontObject(Skin.fonts.text)
+            fs:SetWidth(width)
+            local label = (view.card.l and view.card.l ~= "") and view.card.l or nil
+            local asks = view.card.k == "link" and ("T3 asks you to link " .. (label or "a machine") .. ".")
+                or ("T3 asks you for a secret" .. (label and (": " .. label) or "") .. ".")
+            fs:SetText("|cff" .. warn .. asks .. "|r Answer it in T3: the game never takes it, so don't type it in the message box. Open in T3 brings it up on this thread; Stop cancels the run from here.")
+            flow.gap = flow.gap + SIZE.card
+            place(fs, x, 10)
+            place(approvalOpen, x, 18 + SIZE.card)
+            showCard(fs, approvalOpen)
         end
         return
     end
@@ -2728,7 +2744,10 @@ end)
 setPlaceholder = function()
     local asking = pendingAsk() ~= nil
     local blocked = blockedReason((selected and selected.new) and "new" or (asking and "answer" or "send"))
+    local view = inbox and inbox.view
+    local card = not asking and isSelectedView(view) and view.card
     placeholder:SetText(blocked or (asking and "Type your own answer, or pick one above")
+        or (card and "Answer T3's card in T3, not here (a message goes to the agent)")
         or (inbox and inbox.pi and "Message the agent (Shift+Enter for a new line, Ctrl+V pastes images too)")
         or "Message the agent (Shift+Enter for a new line)")
 end
@@ -3963,7 +3982,7 @@ local DEFAULTS = {
 }
 local EVENT_SETTING = {
     completed = "onCompleted", idle = "onCompleted", rolled_back = "onCompleted",
-    waiting = "onWaiting", approval = "onWaiting", failed = "onFailed", interrupted = "onStopped", cancelled = "onStopped",
+    waiting = "onWaiting", approval = "onWaiting", card = "onWaiting", failed = "onFailed", interrupted = "onStopped", cancelled = "onStopped",
 }
 local DURATIONS = { 5, 8, 15, 30, 0 } -- 0: until clicked
 
@@ -4024,7 +4043,7 @@ end
 local TOAST_WIDTH, TOAST_HEIGHT, TOAST_GAP, TOAST_LIMIT = 320, 60, 6, 10
 -- A notification's icon: a circle in the status color with a check, a cross or a "?".
 local STATUS_ICON = {
-    completed = "check", idle = "check", rolled_back = "check", waiting = "?", approval = "?",
+    completed = "check", idle = "check", rolled_back = "check", waiting = "?", approval = "?", card = "?",
     failed = "close", interrupted = "close", cancelled = "close",
 }
 
@@ -4146,8 +4165,8 @@ local function newToast()
     toast:EnableMouse(true)
     toast:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     toast:SetScript("OnClick", function(self, mouse)
-        -- Left-click opens the thread in the T3 WoW window (an approval: in T3, the only
-        -- place it can be given); right-click only dismisses.
+        -- Left-click opens the thread in the T3 WoW window (an approval or a card, with the
+        -- setting on: in T3, the only place it can be answered); right-click only dismisses.
         local threadId, envId, inT3 = self.threadId, self.envId, self.inT3
         UI.Waits.MarkSeen(self)
         removeToast(self)
@@ -4192,7 +4211,7 @@ local function showToast(event)
             break
         end
     end
-    toast.threadId, toast.envId, toast.inT3 = event.id, event.e, event.s == "approval" and settings().approvalOpensT3 == true
+    toast.threadId, toast.envId, toast.inT3 = event.id, event.e, (event.s == "approval" or event.s == "card") and settings().approvalOpensT3 == true
     toast.waitKey = event.id and UI.Waits.NeedsYou(event.s) and UI.Waits.Key(event.e, event.id) or nil
     local icon = STATUS_ICON[event.s] or "check"
     local r, g, b = hexColor(s[2])
@@ -4455,6 +4474,7 @@ do
     checkbox("Is stopped", "onStopped")
     -- Off by default: a stray click mid-fight shouldn't pull you out of the game. Off, an
     -- approval's notification opens the thread here, and its Open in T3 button goes on.
+    -- It goes for a card only T3 can answer (a secret, a machine link) too.
     checkbox("Clicking an approval opens T3", "approvalOpensT3")
     layoutY = layoutY - 8
 

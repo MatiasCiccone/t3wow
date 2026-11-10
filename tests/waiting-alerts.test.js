@@ -65,6 +65,28 @@ return "ok"
 `, { ui: true });
 });
 
+test("a thread waiting on a card only T3 can answer (a secret) notifies like an approval", () => {
+  runGame(`${HELPERS}
+update({ thread("t1", "card") })
+assert(count() == 1, "no notification")
+assert(top().head.text:find("Answer in T3", 1, true), top().head.text)
+assert(top().sub.text:find("click to open$"), top().sub.text)
+return "ok"
+`, { ui: true });
+  // With "Clicking an approval opens T3" on, a click opens it in T3.
+  runGame(`${HELPERS}
+T3WoWDB.settings = T3WoWDB.settings or {}
+T3WoWDB.settings.approvalOpensT3 = true
+update({ thread("t2", "card") })
+local toast = top()
+assert(toast.sub.text:find("click to open in T3", 1, true), toast.sub.text)
+toast.scripts.OnClick(toast, "LeftButton")
+local last = Link.Queue()[#Link.Queue()]
+assert(last and last.t == "t3" and last.id == "t2", "not opened in T3: " .. tostring(last and last.t))
+return "ok"
+`, { ui: true });
+});
+
 test("a notification that ran its time isn't shown again by the next reload", () => {
   runGame(`${HELPERS}
 update({ thread("t1", "waiting") })

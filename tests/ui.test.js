@@ -3236,6 +3236,39 @@ return "ok"
 `);
 });
 
+test("a thread waiting on T3's secret card says Input, names the secret and points to T3, which alone takes it", () => {
+  run(`
+local envs = { { id = "local", name = "PC", ok = true } }
+local thread = { e = 1, id = "t1", t = "Deploy", s = "card", set = false, at = time(), p = "web" }
+local view = { e = 1, id = "t1", t = "Deploy", s = "card", items = {}, card = { k = "secret", l = "GitHub token" } }
+inboxWith(envs, { threads = { thread }, view = view })
+local row
+for _, f in ipairs(frames) do if f.kind == "Button" and rawget(f, "thread") and f.thread.id == "t1" then row = f end end
+assert(row.status.label == "Input" and row.status.hexColor == "a5b4fc", row.status.label)
+UI.Select(thread)
+assert(showing("T3 asks you for a secret: GitHub token%."), "the card isn't named")
+assert(showing("Answer it in T3"), "doesn't say where to answer it")
+assert(showing("^Answer T3's card in T3, not here"), "the message box invites the secret")
+assert(not find("Button", "Submit answer") or not find("Button", "Submit answer"):IsShown(), "the game offers to take it")
+local open = find("Button", "Open in T3")
+assert(open and open:IsShown(), "no Open in T3")
+open.scripts.OnClick(open, "LeftButton")
+assert(sent().t == "t3" and sent().id == "t1", tostring(sent().t))
+
+-- A machine link waits the same way.
+view.card = { k = "link", l = "Mac mini" }
+inboxWith(envs, { threads = { thread }, view = view })
+assert(showing("T3 asks you to link Mac mini%."), "the link card isn't named")
+
+-- Answered in T3: back to Working, and the line goes.
+thread.s, view.s, view.card = "running", "running", nil
+inboxWith(envs, { threads = { thread }, view = view })
+assert(not showing("T3 asks you"), "still asking")
+assert(not find("Button", "Open in T3"):IsShown(), "Open in T3 stays")
+return "ok"
+`);
+});
+
 test("a thread back from a snooze says Woke until it's opened, as in T3", () => {
   run(`
 local envs = { { id = "local", name = "PC", ok = true } }

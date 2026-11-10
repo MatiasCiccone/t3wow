@@ -138,9 +138,45 @@ fn pull_request_links(thread: &Value) -> Vec<Value> {
         .collect()
 }
 
-/// Waiting on a question or an approval.
+/// Waiting on a question, an approval, or a card only T3 can answer.
 fn needs_you(status: &str) -> bool {
-    status == "waiting" || status == "approval"
+    status == "waiting" || status == "approval" || status == CARD
+}
+
+/// The status a working thread gets while its agent waits on a card that only T3's own
+/// window can answer: a secret (`request_secret`) or a machine link. T3's sidebar says
+/// "Awaiting Input" and notifies, but its thread list and pending count leave the card out:
+/// only the card's item in the thread's activity says it waits.
+const CARD: &str = "card";
+
+/// How many of a working thread's latest activity items its pending check reads, to find a
+/// waiting card: the agent stops at the card, so it is among the last few.
+const CARD_LOOKBACK: u64 = 4;
+
+/// What a waiting card asks for, from one of a working thread's latest activity items: its
+/// kind ("secret" or "link") and T3's label for it. A card inherited from another thread
+/// (a fork) can only be answered there, and T3 doesn't count it.
+fn waiting_card(item: &Value) -> Option<Card> {
+    let kind = match str_of(&item["type"]) {
+        "secret_request" => "secret",
+        "link_request" => "link",
+        _ => return None,
+    };
+    if item["status"] != "waiting" || item["visibility"].as_str().is_some_and(|v| v != "local") {
+        return None;
+    }
+    Some(Card { kind, label: plain(str_of(&item["title"]), 120) })
+}
+
+/// The read that checks what a working thread waits on: its pending count, and its latest
+/// few activity items (titles only), where a waiting card shows. `item_count` is the
+/// thread's from its list.
+fn pending_read_args(id: &str, item_count: u64) -> Value {
+    let mut args = json!({ "threadId": id, "view": "activity", "limit": CARD_LOOKBACK, "maxCharsPerItem": 1 });
+    if let Some(after) = item_count.checked_sub(CARD_LOOKBACK + 1) {
+        args["afterPosition"] = json!(after);
+    }
+    args
 }
 
 /// T3 stores a run whose turn just ended as "waiting" until it has wrapped the run up, and
@@ -1464,8 +1500,18 @@ struct Pending {
     updated: String,
     read_at: i64,
     /// What it waits on: None, or the status the game shows ("waiting" for a question,
-    /// "approval" for a permission prompt, which T3's pending list leaves out).
+    /// "approval" for a permission prompt, which T3's pending list leaves out, CARD for a
+    /// card only T3 can answer).
     status: Option<&'static str>,
+    /// The card, when it waits on one.
+    card: Option<Card>,
+}
+
+/// A card only T3 can answer: "secret" or "link", and what it asks for.
+#[derive(Clone, Debug, PartialEq)]
+struct Card {
+    kind: &'static str,
+    label: String,
 }
 
 #[derive(Clone, Debug)]
@@ -2780,6 +2826,12 @@ impl Bridge {
         Some((listed.env.clone(), str_of(&thread["threadId"]).to_string(), str_of(&thread["updatedAt"]).to_string()))
     }
 
+    /// The `i`th thread's item count, from its list.
+    fn listed_item_count(&self, i: usize) -> u64 {
+        let listed = self.poll_run.as_ref().and_then(|run| run.listed.as_ref());
+        listed.and_then(|l| l.threads.get(i)).and_then(|t| t["itemCount"].as_u64()).unwrap_or(0)
+    }
+
     fn listed_mut(&mut self) -> Option<&mut Listed> {
         self.poll_run.as_mut()?.listed.as_mut()
     }
@@ -2795,8 +2847,9 @@ impl Bridge {
     }
 
     /// A working thread whose agent waits on a question shows as "waiting" (Needs you),
-    /// as in T3's sidebar, so it notifies and leaves the Working group. The thread's
-    /// pending count is read again only when it changed or the count is old.
+    /// as in T3's sidebar, so it notifies and leaves the Working group; one waiting on a
+    /// card only T3 can answer shows as CARD. The thread (its pending count and its latest
+    /// few items) is read again only when it changed or the read is old.
     fn check_question(&mut self, i: usize) -> Result<(), T3Error> {
         let Some((env, id, updated)) = self.listed_thread(i) else { return Ok(()) };
         let key = format!("{env}:{id}");
@@ -2812,11 +2865,14 @@ impl Bridge {
             self.mark_waiting(i, key, status);
             return Ok(());
         }
-        let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&env));
+        let args = with_args(pending_read_args(&id, self.listed_item_count(i)), &self.env_arg(&env));
         match self.client.call("t3_thread_read", args) {
             Ok(read) if read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0) == 0 => {
-                self.pending_counts.insert(key.clone(), Pending { updated, read_at: now, status: None });
-                self.mark_waiting(i, key, None);
+                // The newest waiting card, as T3's sidebar picks it.
+                let card = read["items"].as_array().into_iter().flatten().rev().find_map(waiting_card);
+                let status = card.is_some().then_some(CARD);
+                self.pending_counts.insert(key.clone(), Pending { updated, read_at: now, status, card });
+                self.mark_waiting(i, key, status);
             }
             // Something's pending: what it is comes next.
             Ok(_) => self.push_steps(vec![Step::QuestionKind(i, now)]),
@@ -2843,7 +2899,7 @@ impl Bridge {
             Ok(list) => {
                 let questions = list["requestIds"].as_array().is_some_and(|ids| !ids.is_empty());
                 let status = Some(if questions { "waiting" } else { "approval" });
-                self.pending_counts.insert(key.clone(), Pending { updated, read_at, status });
+                self.pending_counts.insert(key.clone(), Pending { updated, read_at, status, card: None });
                 self.mark_waiting(i, key, status);
             }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
@@ -4174,6 +4230,14 @@ impl Bridge {
             if working(str_of(&thread["status"])) {
                 view["s"] = json!("approval");
             }
+        }
+        // Waiting on a card only T3 can answer (a secret, a machine link): the window names
+        // it and points to T3. The game never takes the answer: what goes between it and the
+        // companion sits in files on disk.
+        let card = self.pending_counts.get(&format!("{env}:{id}")).and_then(|p| p.card.clone());
+        if let Some(card) = card.filter(|_| !pending && working(str_of(&thread["status"]))) {
+            view["card"] = json!({ "k": card.kind, "l": card.label });
+            view["s"] = json!(CARD);
         }
         self.view_data = Some(view);
         // Pictures not ready yet: read the view again next poll.
