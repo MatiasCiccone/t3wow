@@ -50,6 +50,7 @@ function inboxWith(envs, extra)
   for _, t in ipairs(extra and extra.threads or {}) do data.threads[#data.threads + 1] = t end
   for _, p in ipairs(extra and extra.projects or {}) do data.projects[#data.projects + 1] = p end
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
+  data.auth = extra and extra.auth
   data.more = extra and extra.more
   data.att, data.pi = extra and extra.att, extra and extra.pi
   data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
@@ -1840,6 +1841,19 @@ function PlaySound(kit) played[#played + 1] = "kit" .. kit end` });
     "notification-input.mp3@SFX", "notification-input.mp3@SFX",
     "notification-completion.mp3@SFX", "kit3081",
   ].join(" "));
+});
+
+test("a read-only T3 sign-in shows on the pill, as a refused one does, until the companion stops saying so", () => {
+  // The companion's line (bridge.rs READ_ONLY_LINE) comes in the inbox's auth field.
+  const out = run(`
+local line = "Read-only T3 sign-in: sign in again from the tray menu, pick Auto or Full access"
+inboxWith(ENVS, { auth = line, trust = "readonly" })
+assert(showing("^|cffff4040" .. line:gsub("%-", "%%-") .. "|r$"), "the pill doesn't say it")
+inboxWith(ENVS)
+assert(showing("^|cff40c040Connected|r$"), "still read only after a sign-in with more access")
+return "ok"
+`);
+  assert.equal(out, "ok");
 });
 
 test("the pill's Reload UI soon is a click that reloads, and only while it says so", () => {

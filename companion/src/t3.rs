@@ -165,6 +165,25 @@ fn status_and_json(response: Result<ureq::http::Response<ureq::Body>, ureq::Erro
     Ok((status, response.body_mut().read_json().unwrap_or(Value::Null)))
 }
 
+/// The scope T3 needs to send, answer, stop and settle (and to start threads).
+const OPERATE_SCOPE: &str = "orchestration:operate";
+
+/// Whether a token T3 granted `scope` (space-separated, as its token response says) can
+/// change threads. T3 Code 0.18.0's Read only level grants `orchestration:read` alone;
+/// Supervised through Auto add `orchestration:operate`, and Full access more on top.
+pub fn scope_can_operate(scope: &str) -> bool {
+    scope.split_whitespace().any(|s| s == OPERATE_SCOPE)
+}
+
+/// What to pick on T3's sign-in page, said before it opens.
+pub const PICK_ACCESS_NOTE: &str =
+    "Pick Auto on T3's sign-in page, or Full access if your threads run in full access. With Read only, the game can't send anything.";
+
+/// Said after a sign-in that can only read, and on the tray menu and the game's top line
+/// while it's the one in use.
+pub const READ_ONLY_NOTE: &str =
+    "The sign-in is Read only: T3 refuses every message, answer, new thread, Stop and Settle from the game. Sign in again and pick Auto or Full access.";
+
 /// Said before signing in to a T3 on another machine over plain HTTP.
 pub const PLAIN_HTTP_NOTE: &str =
     "This T3 uses plain HTTP: the sign-in token crosses your network unencrypted. That's fine on a home network you trust; anywhere else, use HTTPS.";
@@ -177,6 +196,8 @@ pub struct Connected {
     pub label: String,
     /// The access a new sign-in got; None when the sign-in saved for this T3 still worked.
     pub scope: Option<String>,
+    /// The sign-in now in use (new or saved) can only read (`scope_can_operate`).
+    pub read_only: bool,
     /// The companion now uses another T3 than before.
     pub switched: bool,
 }
@@ -236,9 +257,10 @@ pub fn connect(
         Some(login(&target.origin, &target.key, log, on_browser, cancelled)?)
     };
     let mut saved = Ok(());
-    Config::update(|c| saved = c.apply_sign_in(&target.key, signed.as_ref().map(|s| (s.token.as_str(), s.expires_at)), switch_to.clone()));
+    let config = Config::update(|c| saved = c.apply_sign_in(&target.key, signed.as_ref().map(|s| (s.token.as_str(), s.expires_at, s.scope.as_str())), switch_to.clone()));
     saved?;
-    Ok(Connected { origin: target.origin, label, scope: signed.map(|s| s.scope), switched })
+    let read_only = config.sign_in_read_only(&target.key);
+    Ok(Connected { origin: target.origin, label, scope: signed.map(|s| s.scope), read_only, switched })
 }
 
 /// Whether anything answers HTTP at `origin` (any status will do), so an unreachable T3 is
@@ -249,8 +271,8 @@ fn reachable(origin: &str) -> Result<(), String> {
 
 /// T3's MCP sign-in: register a public client (once per server: the client id is saved under
 /// `key`), send the user to the approval page, receive the code on a loopback port, exchange
-/// it with PKCE. The approval page is where the user picks the access (Full access lets it
-/// write to full-access threads). `cancelled` ends the wait early.
+/// it with PKCE. The approval page is where the user picks the access: Read only can't send,
+/// and Full access lets it write to full-access threads. `cancelled` ends the wait early.
 fn login(origin: &str, key: &str, log: &dyn Fn(&str), on_browser: &dyn Fn(), cancelled: &dyn Fn() -> bool) -> Result<SignIn, String> {
     use crate::config::Config;
     let state = random_url_safe(16);
@@ -308,8 +330,8 @@ fn login(origin: &str, key: &str, log: &dyn Fn(&str), on_browser: &dyn Fn(), can
     };
 
     let authorize = authorize_url(&client_id);
-    log("Opening the T3 sign-in page. Choose Full access so you can message your full-access threads.");
-    log("If it asks for a pairing code, create one in T3: Settings > Sharing & access.");
+    log(&format!("Opening the T3 sign-in page. {PICK_ACCESS_NOTE} T3 starts at Read only when you approve without a code."));
+    log("If it asks for a code, make one in T3 under Settings > Sharing & access.");
     log(&format!("If no browser opened, visit: {authorize}"));
     open_browser(&authorize);
     on_browser();

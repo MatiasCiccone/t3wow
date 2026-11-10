@@ -308,6 +308,10 @@ pub struct ServerAuth {
     /// Epoch milliseconds; none means the token doesn't expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token_expires_at: Option<f64>,
+    /// The scopes T3 granted the token (space-separated, as its token response says); none
+    /// for a sign-in saved before the companion kept them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     /// The OAuth client registered with this server, reused by the next sign-in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
@@ -485,12 +489,23 @@ impl Config {
 
     /// Saves a new sign-in for the server `key`. Refuses (and saves nothing) when the token
     /// can't be encrypted for this Windows user, rather than writing it in plain text.
-    pub fn set_sign_in(&mut self, key: &str, token: &str, expires_at: Option<f64>) -> Result<(), String> {
+    pub fn set_sign_in(&mut self, key: &str, token: &str, expires_at: Option<f64>, scope: &str) -> Result<(), String> {
         let stored = protect(token).ok_or("Signed in, but Windows couldn't encrypt the sign-in for this user, so it wasn't saved. Try again.")?;
         let server = self.servers.entry(key.to_string()).or_default();
         server.token = Some(stored);
         server.token_expires_at = expires_at;
+        server.scope = Some(scope.trim()).filter(|s| !s.is_empty()).map(str::to_string);
         Ok(())
+    }
+
+    /// Whether the sign-in for the server `key` can only read: T3 granted it scopes and
+    /// `orchestration:operate` isn't one of them (T3 Code's Read only level), so T3 refuses
+    /// every message, answer, Stop and Settle from the game. False when there's no usable
+    /// sign-in, or its scopes aren't known (saved by an older companion, or `T3WOW_TOKEN`).
+    pub fn sign_in_read_only(&self, key: &str) -> bool {
+        std::env::var_os("T3WOW_TOKEN").is_none()
+            && self.saved_token(key).is_some()
+            && self.servers.get(key).and_then(|s| s.scope.as_deref()).is_some_and(|scope| !crate::t3::scope_can_operate(scope))
     }
 
     /// Saves a sign-in for the server `key` (none: the one saved for it was checked and still
@@ -498,9 +513,9 @@ impl Config {
     /// the T3 on this PC). The one place the T3 in use changes: `login --origin` and the
     /// tray's T3 server menu both come here, through `t3::connect`, and only once the sign-in
     /// succeeded. Nothing changes when the sign-in can't be saved.
-    pub fn apply_sign_in(&mut self, key: &str, sign_in: Option<(&str, Option<f64>)>, switch_to: Option<Option<String>>) -> Result<(), String> {
-        if let Some((token, expires_at)) = sign_in {
-            self.set_sign_in(key, token, expires_at)?;
+    pub fn apply_sign_in(&mut self, key: &str, sign_in: Option<(&str, Option<f64>, &str)>, switch_to: Option<Option<String>>) -> Result<(), String> {
+        if let Some((token, expires_at, scope)) = sign_in {
+            self.set_sign_in(key, token, expires_at, scope)?;
         }
         if let Some(origin) = switch_to {
             let origin = origin.map(|o| canonical_origin(&o));
@@ -517,6 +532,7 @@ impl Config {
         if let Some(server) = self.servers.get_mut(&self.server_key()) {
             server.token = None;
             server.token_expires_at = None;
+            server.scope = None;
         }
     }
 
@@ -634,6 +650,9 @@ mod dpapi {
 mod tests {
     use super::*;
 
+    /// What T3 grants an Auto sign-in (Supervised and Auto-accept edits too).
+    const OPERATE: &str = "orchestration:read orchestration:operate";
+
     fn temp_file(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("t3wow-config-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -643,7 +662,7 @@ mod tests {
 
     fn signed_in(key: &str, token: &str, expires_at: Option<f64>) -> Config {
         let mut config = Config::default();
-        config.set_sign_in(key, token, expires_at).unwrap();
+        config.set_sign_in(key, token, expires_at, OPERATE).unwrap();
         config
     }
 
@@ -689,19 +708,19 @@ mod tests {
     #[test]
     fn a_sign_in_switches_the_t3_in_use_only_when_it_is_saved() {
         let mut config = Config::default();
-        config.apply_sign_in("http://box:3773", Some(("remote", None)), Some(Some("HTTP://Box:3773/".into()))).unwrap();
+        config.apply_sign_in("http://box:3773", Some(("remote", None, OPERATE)), Some(Some("HTTP://Box:3773/".into()))).unwrap();
         assert_eq!(config.origin.as_deref(), Some("http://box:3773"));
         assert_eq!(config.last_remote.as_deref(), Some("http://box:3773"));
         assert_eq!(config.saved_token(&config.server_key()).as_deref(), Some("remote"));
         // Back to this PC with its saved sign-in: the other machine's stays, and is remembered.
-        config.set_sign_in(LOCAL, "local", None).unwrap();
+        config.set_sign_in(LOCAL, "local", None, OPERATE).unwrap();
         config.apply_sign_in(LOCAL, None, Some(None)).unwrap();
         assert_eq!(config.origin, None);
         assert_eq!(config.last_remote.as_deref(), Some("http://box:3773"));
         assert_eq!(config.saved_token(&config.server_key()).as_deref(), Some("local"));
         assert_eq!(config.saved_token("http://box:3773").as_deref(), Some("remote"));
         // A fresh sign-in without a switch stays on the T3 in use.
-        config.apply_sign_in(LOCAL, Some(("local-2", None)), None).unwrap();
+        config.apply_sign_in(LOCAL, Some(("local-2", None, OPERATE)), None).unwrap();
         assert_eq!(config.origin, None);
         assert_eq!(config.saved_token(LOCAL).as_deref(), Some("local-2"));
     }
@@ -723,7 +742,7 @@ mod tests {
         config.origin = Some("HTTP://B:2/".into());
         assert_eq!(config.server_key(), "http://b:2");
         assert_eq!(config.saved_token(&config.server_key()), None);
-        config.set_sign_in("http://b:2", "token-b", None).unwrap();
+        config.set_sign_in("http://b:2", "token-b", None, OPERATE).unwrap();
         config.origin = None;
         assert_eq!(config.server_key(), LOCAL);
         assert_eq!(config.saved_token(LOCAL), None);
@@ -765,10 +784,47 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_sign_in_is_known_from_the_scopes_t3_granted() {
+        let file = temp_file("scope");
+        // T3 Code 0.18.0's Read only level grants only orchestration:read.
+        Config::update_at(&file, |c| c.set_sign_in(LOCAL, "t", None, "orchestration:read").unwrap());
+        let (config, _) = Config::read(&file).unwrap();
+        assert!(config.sign_in_read_only(LOCAL), "the scopes are saved with the sign-in");
+        // Auto, and Full access with its extra scopes, can operate.
+        for scope in [OPERATE, "orchestration:read orchestration:operate settings:write source-control:write"] {
+            let mut config = Config::default();
+            config.set_sign_in(LOCAL, "t", None, scope).unwrap();
+            assert!(!config.sign_in_read_only(LOCAL), "{scope}");
+        }
+        // Unknown scopes (an empty token response, a sign-in from an older companion) aren't
+        // called read only; nor is a sign-in that's gone.
+        let mut config = Config::default();
+        config.set_sign_in(LOCAL, "t", None, " ").unwrap();
+        assert!(!config.sign_in_read_only(LOCAL));
+        let (config, _) = Config::read(&{
+            let file = temp_file("scope-old");
+            fs::write(&file, r#"{"servers":{"local":{"token":"t"}}}"#).unwrap();
+            file
+        })
+        .unwrap();
+        assert!(!config.sign_in_read_only(LOCAL));
+        let mut config = Config::default();
+        config.set_sign_in(LOCAL, "t", None, "orchestration:read").unwrap();
+        config.sign_out();
+        assert!(!config.sign_in_read_only(LOCAL), "signing out forgets it");
+        config.set_sign_in(LOCAL, "t", Some(now_ms() as f64 - 1.0), "orchestration:read").unwrap();
+        assert!(!config.sign_in_read_only(LOCAL), "an expired sign-in says so instead");
+        // A new sign-in with more access replaces the read-only one.
+        config.set_sign_in(LOCAL, "t2", None, "orchestration:read").unwrap();
+        config.apply_sign_in(LOCAL, Some(("t3", None, OPERATE)), None).unwrap();
+        assert!(!config.sign_in_read_only(LOCAL));
+    }
+
+    #[test]
     fn client_ids_are_kept_per_server_through_sign_out() {
         let mut config = Config { origin: Some("http://a:1".into()), ..Config::default() };
         config.set_client_id("http://a:1", Some("client-a".into()));
-        config.set_sign_in("http://a:1", "t", None).unwrap();
+        config.set_sign_in("http://a:1", "t", None, OPERATE).unwrap();
         config.sign_out();
         assert_eq!(config.client_id("http://a:1").as_deref(), Some("client-a"));
         assert_eq!(config.client_id(LOCAL), None);

@@ -321,7 +321,7 @@ impl App {
                 app.notify(Notice::new(
                     Level::Info,
                     "Approve the sign-in in your browser",
-                    "T3's sign-in page is open in your browser. If it asks for a pairing code, make one in T3 under Settings → Sharing & access.",
+                    browser_open_text(),
                 ));
             };
             let result = t3::connect(switch_to, reuse_saved, &|m| log::line(m), &opened, &cancelled);
@@ -330,18 +330,7 @@ impl App {
             }
             match result {
                 Ok(connected) => {
-                    let name = t3_named(&connected.label);
-                    let (title, mut text) = match (connected.switched, &connected.scope) {
-                        (true, None) => ("Switched T3", format!("T3 WoW now uses {name}, with the sign-in saved for it.")),
-                        (true, Some(_)) => ("Switched T3", format!("Signed in: T3 WoW now uses {name}.")),
-                        (false, _) => ("Signed in to T3", format!("T3 WoW is signed in to {name}.")),
-                    };
-                    let mut level = Level::Info;
-                    if unencrypted_over_network(&connected.origin) {
-                        text.push_str(" The connection is plain HTTP, so the sign-in token crosses your network unencrypted.");
-                        level = Level::Warning;
-                    }
-                    app.notify(Notice::new(level, title, text));
+                    app.notify(signed_in_notice(&connected));
                     app.send(Control::SignedIn);
                 }
                 Err(_) if cancelled() => log::line("Started the sign-in over."),
@@ -356,6 +345,39 @@ impl App {
         });
     }
 }
+
+/// What the tray says while T3's sign-in page waits in the browser.
+fn browser_open_text() -> String {
+    format!("T3's sign-in page is open in your browser. {} Asked for a code? Make one in T3 under Settings → Sharing & access.", t3::PICK_ACCESS_NOTE)
+}
+
+/// What the tray says once `t3::connect` succeeded: a warning when the sign-in can only read
+/// (or the token crosses the network in plain HTTP). Windows shows 255 characters of it.
+fn signed_in_notice(connected: &t3::Connected) -> Notice {
+    let name = t3_named(&connected.label);
+    let (title, mut text) = match (connected.switched, &connected.scope) {
+        (true, None) => ("Switched T3", format!("T3 WoW now uses {name}, with the sign-in saved for it.")),
+        (true, Some(_)) => ("Switched T3", format!("Signed in: T3 WoW now uses {name}.")),
+        (false, _) => ("Signed in to T3", format!("T3 WoW is signed in to {name}.")),
+    };
+    let mut level = Level::Info;
+    let title = if connected.read_only {
+        level = Level::Warning;
+        // The warning first: the plain-HTTP note after it may not fit.
+        text = format!("{} {text}", t3::READ_ONLY_NOTE.replace("Sign in again", "Choose Sign in to T3…"));
+        if connected.switched { "Switched T3, but the sign-in is read only" } else { "Signed in to T3, but read only" }
+    } else {
+        title
+    };
+    if unencrypted_over_network(&connected.origin) {
+        text.push_str(" The connection is plain HTTP, so the sign-in token crosses your network unencrypted.");
+        level = Level::Warning;
+    }
+    Notice::new(level, title, text)
+}
+
+/// The tray menu's T3 line while the sign-in in use can only read.
+const READ_ONLY_LINE: &str = "T3: connected, but read only: choose Sign in to T3, pick Auto or Full access";
 
 /// The automatic update checks, as the tray's Update checks set them: one when the companion
 /// starts, then one whenever the interval has passed since the last check (a check from the
@@ -696,7 +718,9 @@ pub fn run(app: Arc<App>) {
             checked_origin = Instant::now();
             recheck = false;
             // A hand edit of config.json (or `run`, which has no tray) counts too.
-            bridge.set_trust(Config::load().trust());
+            let config = Config::load();
+            bridge.set_trust(config.trust());
+            bridge.set_sign_in_read_only(config.sign_in_read_only(&config.server_key()));
             let found = t3::target();
             let token = found.as_ref().and_then(|t| t.token.clone()).unwrap_or_default();
             if let Some(found) = found.filter(|t| t.origin != origin || t.key != key) {
@@ -728,6 +752,8 @@ pub fn run(app: Arc<App>) {
             "T3: sign-in expired: choose Sign in to T3".to_string()
         } else if let (false, Some(problem)) = (s.t3_ok, &s.t3_problem) {
             format!("T3: {}", problem.chars().take(70).collect::<String>())
+        } else if s.t3_ok && s.sign_in_read_only {
+            READ_ONLY_LINE.to_string()
         } else if s.t3_ok {
             format!("T3: connected ({} machine{})", s.machines, if s.machines == 1 { "" } else { "s" })
         } else {
@@ -761,7 +787,7 @@ pub fn run(app: Arc<App>) {
             _ => format!("WoW: {wow_line}"),
         };
         let restart_needed = restart.is_some() && s.wow_running;
-        let attention = signed_out || s.auth_needed || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some() || restart_needed;
+        let attention = signed_out || s.auth_needed || s.sign_in_read_only || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some() || restart_needed;
         app.set(t3_line, wow_line, attention, !signed_out && !s.auth_needed);
         // Mid-poll, each tick reads T3 for one request or TICK_BUDGET_MS, whichever is
         // longer, and the capture and the controls above get their turn in between: no nap.
@@ -774,6 +800,45 @@ pub fn run(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows shows this much of a notification's text (`szInfo`, less its 0).
+    fn fits_a_toast(text: &str) -> bool {
+        text.encode_utf16().count() <= 255
+    }
+
+    fn connected(origin: &str, scope: Option<&str>, read_only: bool, switched: bool) -> t3::Connected {
+        t3::Connected { origin: origin.into(), label: server_label(Some(origin).filter(|o| !o.contains("127.0.0.1"))), scope: scope.map(str::to_string), read_only, switched }
+    }
+
+    #[test]
+    fn a_read_only_sign_in_warns_and_says_to_pick_auto_or_full_access() {
+        let notice = signed_in_notice(&connected("http://127.0.0.1:3773", Some("orchestration:read"), true, false));
+        assert!(matches!(notice.level, Level::Warning));
+        assert_eq!(notice.title, "Signed in to T3, but read only");
+        assert!(notice.text.starts_with("The sign-in is Read only"), "{}", notice.text);
+        assert!(notice.text.contains("Choose Sign in to T3… and pick Auto or Full access"), "{}", notice.text);
+        assert!(notice.text.contains("T3 WoW is signed in to T3 on this PC."), "{}", notice.text);
+        assert!(fits_a_toast(&notice.text), "{} units: {}", notice.text.encode_utf16().count(), notice.text);
+
+        // Switched to another machine's T3, with a long name: still whole, warning first.
+        let notice = signed_in_notice(&connected("https://gaming-pc.tailnet-1234.ts.net:3773", Some("orchestration:read"), true, true));
+        assert!(matches!(notice.level, Level::Warning));
+        assert_eq!(notice.title, "Switched T3, but the sign-in is read only");
+        assert!(fits_a_toast(&notice.text), "{} units: {}", notice.text.encode_utf16().count(), notice.text);
+
+        // A saved sign-in that can only read says so too, on a switch back to it.
+        let notice = signed_in_notice(&connected("https://box.lan", None, true, true));
+        assert!(notice.text.contains("Read only"), "{}", notice.text);
+
+        // Auto (or Full access) is the plain notice it always was.
+        let notice = signed_in_notice(&connected("http://127.0.0.1:3773", Some("orchestration:read orchestration:operate"), false, false));
+        assert!(matches!(notice.level, Level::Info));
+        assert_eq!((notice.title.as_str(), notice.text.as_str()), ("Signed in to T3", "T3 WoW is signed in to T3 on this PC."));
+
+        // The page's own notice says which level to pick, whole.
+        assert!(browser_open_text().contains("Pick Auto"));
+        assert!(fits_a_toast(&browser_open_text()), "{}", browser_open_text());
+    }
 
     #[test]
     fn notices_queue_for_the_tray_and_the_oldest_make_room() {

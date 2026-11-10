@@ -171,6 +171,9 @@ fn command(args: Args) -> Result<(), String> {
             let connected = t3::connect(origin, false, &|m| println!("{m}"), &|| {}, &|| false)
                 .map_err(|e| if e.starts_with("T3 Code isn't running") { "T3 Code is not running here. Start the T3 Code desktop app, or pass --origin.".into() } else { e })?;
             println!("Signed in to {} ({}).", connected.origin, connected.scope.unwrap_or_default());
+            if connected.read_only {
+                println!("Warning: {}", t3::READ_ONLY_NOTE.replace("Sign in again", "Run t3wow.exe login again"));
+            }
         }
         "status" => {
             let dir = wow_dir(&args, &config)?;
@@ -181,12 +184,17 @@ fn command(args: Args) -> Result<(), String> {
             }
             #[cfg(windows)]
             println!("WoW client: {}", if capture::find_wow(&dir).is_some() { "running" } else { "not running" });
-            let t3::Target { origin, token, .. } = target(&origin).ok_or("T3: not running on this PC")?;
+            let t3::Target { origin, token, key } = target(&origin).ok_or("T3: not running on this PC")?;
             let token = token.ok_or(format!("T3 ({origin}): not signed in: run t3wow.exe login"))?;
             let client = t3::McpClient::new(&origin, &token);
             use t3::T3;
             let links = client.call("t3_environment_links", serde_json::json!({})).map_err(|e| format!("T3 ({origin}): {e}"))?;
-            println!("T3: {origin}, signed in");
+            if Config::load().sign_in_read_only(&key) {
+                println!("T3: {origin}, signed in, read only");
+                println!("  {}", t3::READ_ONLY_NOTE.replace("Sign in again", "Run t3wow.exe login again"));
+            } else {
+                println!("T3: {origin}, signed in");
+            }
             let machines = 1 + links["links"].as_array().map(Vec::len).unwrap_or(0);
             println!("  {machines} machine(s) reachable through T3");
         }
