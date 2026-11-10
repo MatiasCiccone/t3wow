@@ -27,11 +27,17 @@ const luaValue = (v) =>
       : `{${Object.entries(v).map(([k, x]) => `[ ${longString(k)} ]=${luaValue(x)}`).join(",")}}`;
 
 const REPLAY = `
--- Whether any shown text holds \`text\`, in any case (the agent picks the case it answers in).
-local function shows(text)
+-- Whether one of the agent's messages in the conversation holds \`text\`, in any case (the
+-- agent picks the case it answers in). A conversation line has a bubble, shown only for
+-- your own messages; your words, the title and buttons are left out, so a reply the window
+-- doesn't show can't be found in the prompt that asked for it.
+local function agentSays(text)
   text = text:lower()
   for _, fs in ipairs(fontStrings) do
-    if not fs.hidden and type(fs.text) == "string" and fs.text:lower():find(text, 1, true) then return true end
+    local bubble = rawget(fs, "bubble")
+    if bubble and not bubble.shown and not fs.hidden and type(fs.text) == "string" and fs.text:lower():find(text, 1, true) then
+      return true
+    end
   end
   return false
 end
@@ -66,12 +72,12 @@ for i, name in ipairs(FILES) do
     UI.Select(row)
     UI.OnInbox(data)
     for _, text in ipairs(check.texts) do
-      if not shows(text) then
+      if not agentSays(text) then
         local shown = {}
         for _, fs in ipairs(fontStrings) do
           if not fs.hidden and type(fs.text) == "string" and fs.text ~= "" then shown[#shown + 1] = fs.text:sub(1, 80) end
         end
-        error(check.label .. " (" .. name .. "): the window doesn't show " .. text .. "; it shows:\\n  " .. table.concat(shown, "\\n  "))
+        error(check.label .. " (" .. name .. "): no message from the agent says " .. text .. "; the window shows:\\n  " .. table.concat(shown, "\\n  "))
       end
     end
     for _, text in ipairs(check.buttons) do
