@@ -43,6 +43,12 @@ struct FakeT3 {
     runs: Mutex<Value>,
 }
 
+/// A read of the open thread's activity for its pictures and cards, not a working thread's
+/// pending check (which reads only its latest few items).
+fn is_scan(args: &Value) -> bool {
+    args["view"] == "activity" && args["limit"] != CARD_LOOKBACK
+}
+
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
 fn cut_text(item: &mut Value, max: usize, offset: usize) {
     let text: Vec<char> = str_of(&item["text"]).chars().collect();
@@ -925,6 +931,96 @@ fn an_approval_shows_as_approve_in_t3_and_the_game_can_open_t3_on_it() {
     rig.advance(2_000);
     rig.bridge.tick();
     assert_eq!(rig.opened(), vec!["t3code://threads/local/mcp%3At1".to_string()]);
+}
+
+/// A working thread's latest activity while its agent waits on a secret card, in the shapes
+/// T3 0.18.0 returns (see the probe in the commit log): T3's list says "running" and its
+/// pending count is 0; only the card's item says it waits.
+fn secret_card_activity(card_status: &str) -> Vec<Value> {
+    vec![
+        json!({ "position": 0, "visibility": "local", "type": "user_message", "status": "completed", "title": null, "text": "Deploy it", "updatedAt": "2026-11-06T10:00:00Z" }),
+        json!({ "position": 1, "visibility": "local", "type": "command_execution", "status": "completed", "title": "Workspace ready", "text": "$ Preparing workspace", "updatedAt": "2026-11-06T10:00:01Z" }),
+        json!({ "position": 2, "visibility": "local", "type": "reasoning", "status": "completed", "title": null, "text": "Needs a token", "updatedAt": "2026-11-06T10:00:02Z" }),
+        json!({ "position": 3, "visibility": "local", "type": "dynamic_tool", "status": "running", "title": null,
+                "text": "{
+  \"toolName\": \"mcp__t3-code__request_secret\",
+  \"input\": { \"label\": \"GitHub token\" } }", "updatedAt": "2026-11-06T10:01:00Z" }),
+        json!({ "position": 4, "visibility": "local", "itemId": "turn-item:secret-request:mcp%3At1:13357e6f", "type": "secret_request", "status": card_status,
+                "title": "GitHub token", "text": format!("Asked the user for GitHub token: {}.", if card_status == "waiting" { "pending" } else { "saved" }), "updatedAt": "2026-11-06T10:01:00Z" }),
+    ]
+}
+
+#[test]
+fn a_secret_request_shows_as_answer_in_t3_and_the_game_can_open_t3_on_it() {
+    let mut rig = Rig::new(8_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+
+    // The agent asks for a secret: T3 says "running" with nothing pending and nothing in its
+    // pending list; only the card's item, last in the activity, says it waits.
+    *rig.t3.questions.lock().unwrap() = false;
+    rig.t3.threads.lock().unwrap()[0]["threadId"] = json!("mcp:t1");
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(5);
+    rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(0);
+    rig.t3.activity.lock().unwrap().insert("mcp:t1".into(), secret_card_activity("waiting"));
+    rig.t3.set("running", "2026-11-06T10:01:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "open", "id": "mcp:t1" }] }));
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("e=\"local\",id=\"mcp:t1\",t=\"Fix tests\",s=\"card\"}"), "an alert: {inbox}");
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["threads"][0]["s"], "card", "Needs you, not Working");
+    assert_eq!(snapshot["view"]["s"], "card");
+    assert_eq!(snapshot["view"]["card"], json!({ "k": "secret", "l": "GitHub token" }));
+    assert!(snapshot["view"]["ask"].is_null() && snapshot["view"]["approval"].is_null(), "{}", snapshot["view"]);
+
+    // The check is the read it always made, now with the latest few items' titles: no
+    // other request, and nothing that could answer the card.
+    let read = rig.t3.calls_to("t3_thread_read").into_iter().rfind(|a| a["view"] == "activity" && a["limit"] == 4).expect("the pending read");
+    assert_eq!((read["afterPosition"].clone(), read["maxCharsPerItem"].clone()), (json!(0), json!(1)));
+    assert!(rig.t3.calls_to("t3_pending_request").iter().all(|a| a["action"] == "list"), "the game answered something");
+
+    // While the card waits the thread holds still: no read for it until its count is old.
+    let reads = || rig.t3.calls_to("t3_thread_read").iter().filter(|a| a["view"] == "activity" && a["limit"] == 4).count();
+    let before = reads();
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(reads(), before, "read again with nothing changed");
+    assert_eq!(rig.bridge.snapshot()["threads"][0]["s"], "card");
+
+    // Open in T3, as for an approval.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "t3", "e": "local", "id": "mcp:t1" }] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(rig.opened(), vec!["t3code://threads/local/mcp%3At1".to_string()]);
+
+    // Answered in T3: the card ends, the thread changes, and it is back to Working.
+    rig.t3.activity.lock().unwrap().insert("mcp:t1".into(), secret_card_activity("completed"));
+    rig.t3.set("running", "2026-11-06T10:02:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["threads"][0]["s"], "running");
+    assert_eq!(snapshot["view"]["s"], "running");
+    assert!(snapshot["view"]["card"].is_null(), "{}", snapshot["view"]);
+}
+
+#[test]
+fn only_a_card_still_waiting_here_needs_you() {
+    let item = |kind: &str, status: &str, visibility: &str| json!({ "type": kind, "status": status, "visibility": visibility, "title": "Mac mini" });
+    assert_eq!(waiting_card(&item("link_request", "waiting", "local")), Some(Card { kind: "link", label: "Mac mini".into() }));
+    assert_eq!(waiting_card(&item("secret_request", "waiting", "local")).map(|c| c.kind), Some("secret"));
+    // Answered, declined or timed out.
+    for status in ["completed", "cancelled", "failed"] {
+        assert_eq!(waiting_card(&item("secret_request", status, "local")), None, "{status}");
+    }
+    // Inherited from the thread it was forked from: only answerable there.
+    assert_eq!(waiting_card(&item("secret_request", "waiting", "inherited")), None);
+    assert_eq!(waiting_card(&item("dynamic_tool", "running", "local")), None);
+    // The latest items: from the end of a long thread, from the start of a short one.
+    assert_eq!(pending_read_args("t", 50)["afterPosition"], json!(45));
+    assert!(pending_read_args("t", 4)["afterPosition"].is_null());
 }
 
 #[test]
@@ -2373,7 +2469,7 @@ fn a_page_an_agent_showed_reaches_the_game_as_a_picture_where_t3_shows_it() {
     assert_eq!(painter.calls().len(), 1);
     let reads: Vec<Value> = rig.t3.calls_to("t3_thread_read").into_iter().skip(reads_before).collect();
     assert!(reads.iter().all(|a| !a["itemId"].is_string()), "{reads:?}");
-    let scan = reads.iter().find(|a| a["view"] == "activity").unwrap();
+    let scan = reads.iter().find(|a| is_scan(a)).unwrap();
     assert_eq!(scan["afterPosition"], 2);
     assert_eq!(view_items(&rig)[1]["im"]["f"], 1);
 }
@@ -2386,7 +2482,7 @@ fn without_an_addon_that_shows_pictures_nothing_more_is_read_or_drawn() {
     rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["chart it", "Here it is."]));
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
     rig.bridge.tick();
-    assert!(rig.t3.calls_to("t3_thread_read").iter().all(|a| a["view"] != "activity"));
+    assert!(!rig.t3.calls_to("t3_thread_read").iter().any(is_scan));
     assert!(painter.calls().is_empty());
     assert_eq!(view_items(&rig).len(), 2);
 }
@@ -2666,7 +2762,7 @@ fn a_compaction_shows_as_a_line_where_t3_shows_it_once_it_is_done() {
 fn without_an_addon_that_draws_cards_links_still_read_as_words_and_no_activity_is_read() {
     let mut rig = delegate_rig(42_000_000, false, "completed", "VERDICT: APPROVE");
     rig.bridge.tick();
-    assert!(rig.t3.calls_to("t3_thread_read").iter().all(|a| a["view"] != "activity"));
+    assert!(!rig.t3.calls_to("t3_thread_read").iter().any(is_scan));
     let items = view_items(&rig);
     assert_eq!(items.len(), 2);
     assert_eq!(items[1]["x"], "Sol is reviewing in a delegated task. Back in “Fix tests” after.");
@@ -3411,6 +3507,59 @@ fn clear_starts_a_fresh_session_on_the_signed_in_t3() {
     println!("marked: {}", items.iter().chain(read["recentRuns"].as_array().unwrap()).any(|i| i.get("freshContext").is_some()));
     let reply = items.iter().rev().find(|i| i["type"] == "assistant_message").expect("no reply");
     assert!(!str_of(&reply["text"]).to_lowercase().contains("kumquat"), "the fresh session saw the earlier message: {reply}");
+}
+
+#[test]
+#[ignore = "starts one scratch thread on the T3 the companion is signed in to whose agent opens a secret card, stops it unanswered, then archives it"]
+fn a_secret_card_on_the_signed_in_t3_shows_as_answer_in_t3_until_it_ends() {
+    let target = crate::t3::target().expect("no T3 to talk to");
+    let client = Arc::new(crate::t3::McpClient::new(&target.origin, target.token.as_deref().expect("not signed in")));
+    let key = format!("probe-{}", crate::config::now_ms());
+    let mut rig = Rig::new(51_000_000);
+    rig.bridge.set_client(client.clone());
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    let settle = |rig: &mut Rig, what: &str, until: &dyn Fn(&Value) -> bool| -> Value {
+        for _ in 0..90 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            rig.advance(21_000);
+            for _ in 0..40 {
+                rig.bridge.tick();
+                let snapshot = rig.bridge.snapshot();
+                if until(&snapshot) {
+                    return snapshot;
+                }
+            }
+        }
+        panic!("never {what}: {}", rig.bridge.snapshot());
+    };
+    let label = "T3 WoW probe value (test, don't fill)";
+    let message = format!(
+        "This is a test of how T3 WoW shows a pending secret request. Call the request_secret tool once, right away, with label \"{label}\", reason \"Testing T3 WoW; this card will be cancelled, don't fill it\" and timeoutMs 900000. Do nothing else; when it returns, reply with one word."
+    );
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "new", "m": message, "rm": "full-access" }] }));
+    let started = settle(&mut rig, "started", &|s| s["out"].is_array());
+    let id = started["out"][0]["id"].as_str().unwrap_or_else(|| panic!("{}", started["out"])).to_string();
+    println!("probe thread: {id}");
+    let row = |s: &Value| s["threads"].as_array().and_then(|ts| ts.iter().find(|t| t["id"] == id.as_str()).cloned()).unwrap_or(Value::Null);
+
+    let waiting = settle(&mut rig, "waiting on the card", &|s| row(s)["s"] == "card" && s["view"]["card"].is_object());
+    println!("row: {}", row(&waiting));
+    println!("view: s={} card={} approval={} ask={}", waiting["view"]["s"], waiting["view"]["card"], waiting["view"]["approval"], waiting["view"]["ask"]);
+    let event = waiting["events"].as_array().and_then(|es| es.iter().rfind(|e| e["id"] == id.as_str()).cloned());
+    println!("notification: {event:?}");
+    let head = client.call("t3_thread_read", json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 })).unwrap();
+    println!("T3 says: status={} pendingRequestCount={}", head["thread"]["status"], head["thread"]["pendingRequestCount"]);
+
+    // Stopped from the game, unanswered: T3 cancels the card and the status clears.
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "stop", "id": id }] }));
+    let ended = settle(&mut rig, "cleared", &|s| !needs_you(str_of(&row(s)["s"])) && !working(str_of(&row(s)["s"])) && s["view"]["card"].is_null());
+    println!("after stop: row s={} view s={} card={}", row(&ended)["s"], ended["view"]["s"], ended["view"]["card"]);
+    client.call("t3_thread_organize", json!({ "action": "archive", "threadId": id })).unwrap();
+
+    assert_eq!(waiting["view"]["card"], json!({ "k": "secret", "l": label }));
+    assert_eq!(waiting["view"]["s"], "card");
+    assert!(waiting["view"]["ask"].is_null() && waiting["view"]["approval"].is_null());
+    assert_eq!(event.map(|e| e["s"].clone()), Some(json!("card")), "no notification");
 }
 
 #[test]
