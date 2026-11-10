@@ -1,0 +1,211 @@
+{
+  "t3": "0.1.8, less html_render path and t3_thread_send freshContext (not handled yet)",
+  "tools": {
+    "list_thread_pull_requests": {
+      "inputs": {
+        "environmentId": [],
+        "threadId": []
+      },
+      "required": []
+    },
+    "orchestrator_capabilities": {
+      "inputs": {
+        "environmentId": [],
+        "search": []
+      },
+      "required": []
+    },
+    "t3_attachment_discard": {
+      "inputs": {
+        "attachmentId": []
+      },
+      "required": [
+        "attachmentId"
+      ]
+    },
+    "t3_attachment_prepare_upload": {
+      "inputs": {
+        "upload": []
+      },
+      "required": [
+        "upload"
+      ]
+    },
+    "t3_environment_links": {
+      "inputs": {},
+      "required": []
+    },
+    "t3_environment_read": {
+      "inputs": {
+        "environmentId": []
+      },
+      "required": []
+    },
+    "t3_pending_request": {
+      "inputs": {
+        "action": [
+          "list",
+          "read",
+          "respond"
+        ],
+        "environmentId": [],
+        "threadId": [],
+        "requestId": [],
+        "answers": []
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "t3_project_list": {
+      "inputs": {
+        "environmentId": [],
+        "cursor": [],
+        "limit": []
+      },
+      "required": []
+    },
+    "t3_thread_configure": {
+      "inputs": {
+        "environmentId": [],
+        "threadId": [],
+        "modelSelection": []
+      },
+      "required": []
+    },
+    "t3_thread_interrupt": {
+      "inputs": {
+        "environmentId": [],
+        "threadId": [],
+        "runId": [],
+        "reason": [],
+        "stop": [],
+        "clientRequestId": []
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "t3_thread_launch": {
+      "inputs": {
+        "environmentId": [],
+        "projectId": [],
+        "scratch": [],
+        "title": [],
+        "modelSelection": [],
+        "runtimeMode": [
+          "approval-required",
+          "auto",
+          "auto-accept-edits",
+          "full-access"
+        ],
+        "interactionMode": [
+          "default",
+          "plan"
+        ],
+        "workspaceStrategy": [],
+        "message": [],
+        "attachments": [],
+        "clientRequestId": [],
+        "delegatedFrom": []
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "t3_thread_list": {
+      "inputs": {
+        "environmentId": [],
+        "projectId": [],
+        "allProjects": [],
+        "statuses": [],
+        "titleContains": [],
+        "settled": [],
+        "snoozed": [],
+        "includeSubagents": [],
+        "cursor": [],
+        "limit": []
+      },
+      "required": []
+    },
+    "t3_thread_organize": {
+      "inputs": {
+        "environmentId": [],
+        "threadId": [],
+        "action": [
+          "archive",
+          "mark_unread",
+          "pin",
+          "settle",
+          "snooze",
+          "unarchive",
+          "unpin",
+          "unsettle",
+          "unsnooze"
+        ],
+        "snoozedUntil": []
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "t3_thread_read": {
+      "inputs": {
+        "environmentId": [],
+        "threadId": [],
+        "itemId": [],
+        "textOffset": [],
+        "view": [
+          "activity",
+          "messages"
+        ],
+        "afterPosition": [],
+        "limit": [],
+        "runLimit": [],
+        "maxCharsPerItem": []
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "t3_thread_send": {
+      "inputs": {
+        "environmentId": [],
+        "threadId": [],
+        "message": [],
+        "mode": [
+          "auto",
+          "queue",
+          "restart",
+          "steer"
+        ],
+        "clientRequestId": []
+      },
+      "required": [
+        "message",
+        "threadId"
+      ]
+    },
+    "t3_thread_send_attachments": {
+      "inputs": {
+        "threadId": [],
+        "message": [],
+        "attachments": []
+      },
+      "required": [
+        "attachments"
+      ]
+    },
+    "html_render": {
+      "inputs": {
+        "html": [],
+        "title": [],
+        "height": []
+      },
+      "required": [
+        "height",
+        "title"
+      ]
+    }
+  }
+}

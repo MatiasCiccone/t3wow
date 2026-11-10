@@ -2,7 +2,9 @@
 //! stood in for. Commands go in as the frames the addon draws; what comes back is checked
 //! in T3 itself and in the updates written for the game.
 //!
-//! Three checks in one run:
+//! Four checks in one run:
+//! - T3's tools take the inputs the companion was made for (`tests/fixtures/t3-tools.json`;
+//!   see docs/t3-update.md);
 //! - every call the bridge makes is answered in the shape `FakeT3` answers it, so the unit
 //!   tests above keep testing against the real T3 (`fake_and_live_differ`);
 //! - every command the game can send works end to end against the real T3;
@@ -567,6 +569,137 @@ fn live_an_answer_from_the_game_reaches_the_agent() {
         let s = live.command(json!({ "t": "send", "id": id, "m": ask }));
         live.expect_no_failure(s);
     }
+}
+
+/// The T3 tools the companion calls, and those whose calls it reads from a thread's timeline.
+const WATCHED_TOOLS: &[&str] = &[
+    "list_thread_pull_requests",
+    "orchestrator_capabilities",
+    "t3_attachment_discard",
+    "t3_attachment_prepare_upload",
+    "t3_environment_links",
+    "t3_environment_read",
+    "t3_pending_request",
+    "t3_project_list",
+    "t3_thread_configure",
+    "t3_thread_interrupt",
+    "t3_thread_launch",
+    "t3_thread_list",
+    "t3_thread_organize",
+    "t3_thread_read",
+    "t3_thread_send",
+    "t3_thread_send_attachments",
+    // Read from the timeline: its `html` becomes a picture (`draw_page`).
+    "html_render",
+];
+const TOOLS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/t3-tools.json");
+
+/// A tool's inputs as the fixture keeps them: each top-level input with its allowed values
+/// (empty when any value goes), and which are required.
+fn tool_inputs(tool: &Value) -> Value {
+    let schema = &tool["inputSchema"];
+    let mut inputs = serde_json::Map::new();
+    for (name, input) in schema["properties"].as_object().into_iter().flatten() {
+        let mut values: Vec<Value> = input["enum"].as_array().cloned().unwrap_or_default();
+        values.sort_by_key(Value::to_string);
+        inputs.insert(name.clone(), json!(values));
+    }
+    let mut required: Vec<&str> = schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    required.sort();
+    json!({ "inputs": inputs, "required": required })
+}
+
+/// What changed between the inputs the companion was made for and T3's.
+fn tool_changes(name: &str, was: &Value, now: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let (before, after) = (was["inputs"].as_object().cloned().unwrap_or_default(), now["inputs"].as_object().cloned().unwrap_or_default());
+    for (input, values) in &after {
+        match before.get(input) {
+            None => out.push(format!("{name}: new input `{input}`")),
+            Some(old) if old != values => out.push(format!("{name}: `{input}` takes {values} (was {old})")),
+            _ => {}
+        }
+    }
+    for input in before.keys().filter(|k| !after.contains_key(*k)) {
+        out.push(format!("{name}: input `{input}` is gone"));
+    }
+    if was["required"] != now["required"] {
+        out.push(format!("{name}: requires {} (was {})", now["required"], was["required"]));
+    }
+    out
+}
+
+/// T3's tools still take what the companion sends, and the ones it reads still look as it
+/// expects. A change fails with what changed: read T3's release notes on it, fix the companion
+/// where it needs to, then record T3's tools with `T3WOW_LIVE_UPDATE_TOOLS=1`.
+#[test]
+#[ignore = "live: reads the tools of the T3 the companion is signed in to (npm run test:live)"]
+fn live_t3s_tools_take_what_the_companion_was_made_for() {
+    let target = crate::t3::target().expect("no T3 to talk to: start T3 Code");
+    let client = McpClient::new(&target.origin, &target.token.expect("the companion isn't signed in to T3: run t3wow.exe login first"));
+    let tools = client.list_tools().expect("T3's tool list");
+    let version = client.call("t3_environment_read", json!({})).ok().and_then(|e| e["serverVersion"].as_str().map(str::to_string)).unwrap_or_default();
+    let mut now = serde_json::Map::new();
+    for name in WATCHED_TOOLS {
+        if let Some(tool) = tools.iter().find(|t| t["name"] == *name) {
+            now.insert(name.to_string(), tool_inputs(tool));
+        }
+    }
+    let fixture: Value = std::fs::read_to_string(TOOLS_FIXTURE).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    if std::env::var_os("T3WOW_LIVE_UPDATE_TOOLS").is_some() {
+        let missing: Vec<&&str> = WATCHED_TOOLS.iter().filter(|n| !now.contains_key(**n)).collect();
+        assert!(missing.is_empty(), "T3 {version} doesn't offer {missing:?}: nothing recorded");
+        let recorded = json!({ "t3": version, "tools": now });
+        std::fs::write(TOOLS_FIXTURE, serde_json::to_string_pretty(&recorded).unwrap() + "\n").unwrap();
+        eprintln!("  recorded the tools of T3 {version} in {TOOLS_FIXTURE}");
+        return;
+    }
+    let mut changes = Vec::new();
+    for name in WATCHED_TOOLS {
+        match (fixture["tools"].get(*name), now.get(*name)) {
+            (Some(was), Some(is)) => changes.extend(tool_changes(name, was, is)),
+            (Some(_), None) => changes.push(format!("{name}: T3 doesn't offer it any more")),
+            (None, _) => changes.push(format!("{name}: not recorded yet")),
+        }
+    }
+    assert!(
+        changes.is_empty(),
+        "T3 {version}'s tools changed since T3 {} (what the companion was made for):\n  {}\n\
+         Read T3's release notes on each, fix the companion where it needs to, then record them: T3WOW_LIVE_UPDATE_TOOLS=1 npm run test:live",
+        fixture["t3"].as_str().unwrap_or("?"),
+        changes.join("\n  ")
+    );
+}
+
+/// Every tool the companion's code calls is watched, so a new call can't go unchecked.
+#[test]
+fn every_tool_the_companion_calls_is_watched() {
+    let sources = [include_str!("../../bridge.rs"), include_str!("../../app.rs"), include_str!("../../main.rs"), include_str!("../../t3.rs")];
+    let called = regex::Regex::new(r#"\.call\(\s*"([a-z0-9_]+)""#).unwrap();
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    for source in sources {
+        // The client's own tests call made-up and probe tools.
+        let code = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        names.extend(called.captures_iter(code).map(|c| c.get(1).unwrap().as_str()));
+    }
+    let unwatched: Vec<&&str> = names.iter().filter(|n| !WATCHED_TOOLS.contains(n)).collect();
+    assert!(unwatched.is_empty(), "add these to WATCHED_TOOLS in live.rs: {unwatched:?}");
+    assert!(names.len() >= 10, "found only {names:?}: has the call syntax changed?");
+}
+
+#[test]
+fn a_tool_change_names_new_gone_and_changed_inputs() {
+    let was = json!({ "inputs": { "html": [], "title": [], "action": ["a"] }, "required": ["html"] });
+    let now = json!({ "inputs": { "html": [], "path": [], "action": ["a", "b"] }, "required": [] });
+    assert_eq!(
+        tool_changes("html_render", &was, &now),
+        vec![
+            "html_render: new input `path`".to_string(),
+            "html_render: `action` takes [\"a\",\"b\"] (was [\"a\"])".to_string(),
+            "html_render: input `title` is gone".to_string(),
+            "html_render: requires [] (was [\"html\"])".to_string(),
+        ]
+    );
 }
 
 #[test]
