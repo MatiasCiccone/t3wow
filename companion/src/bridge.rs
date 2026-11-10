@@ -3977,7 +3977,7 @@ impl Bridge {
         if let Some(after) = first.checked_sub(1) {
             args["afterPosition"] = json!(after);
         }
-        let (body, failed) = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(env))) {
+        let (mut body, failed) = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(env))) {
             Ok(result) => (detail_segments(result["items"].as_array().map(Vec::as_slice).unwrap_or_default()), false),
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
             Err(T3Error::Other(error)) => {
@@ -3985,6 +3985,13 @@ impl Bridge {
                 (vec![json!(format!("Couldn't read this from T3: {}", plain(&error, 160)))], true)
             }
         };
+        // Its prose names models as the conversation does (code comes as { c = code }).
+        let providers = self.catalogs.get(env).map_or(&[][..], |c| c.providers.as_slice());
+        for segment in &mut body {
+            if let Value::String(text) = segment {
+                *text = name_model_refs(text, |instance, model| model_ref_name(providers, instance, model, false));
+            }
+        }
         self.details.retain(|d| !(d.env == env && d.id == id && d.last == last));
         self.details.push(Detail { env: env.to_string(), id: id.to_string(), last, body, failed });
         let excess = self.details.len().saturating_sub(DETAILS_KEPT);
