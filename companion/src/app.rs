@@ -534,6 +534,29 @@ fn put_back(app: &App, slots: &Slots, asked: bool) -> Option<RestartNote> {
     Some(RestartNote { line: "restart WoW to load the new addon files (not /reload)".into(), notice })
 }
 
+/// The game was patched since the addon's files were written: their interface version
+/// follows it, and the setting too, or the game marks the addon out of date.
+#[cfg(target_os = "macos")]
+fn follow_game_version(slots: &Slots, interface: &str) -> Option<RestartNote> {
+    if Config::load().interface.as_deref() != Some(interface) {
+        Config::update(|c| c.interface = Some(interface.to_string()));
+    }
+    match slots.set_interface() {
+        Ok(0) => None,
+        Ok(changed) => {
+            log::line(&format!("Set the addon to this game's interface version, {interface} ({changed} addon files)."));
+            Some(RestartNote {
+                line: "restart WoW to load the updated addon files (not /reload)".into(),
+                notice: Some(Notice::new(Level::Warning, "Restart WoW to load the addon", format!("The addon now matches this game's version. {RESTART_WOW}"))),
+            })
+        }
+        Err(error) => {
+            log::line(&format!("Couldn't set the interface version to {interface}: {error}"));
+            None
+        }
+    }
+}
+
 /// How often the companion looks for addon files gone while it runs, and how long it waits
 /// after failing to put them back.
 const PUT_BACK_EVERY: Duration = Duration::from_secs(10);
@@ -569,6 +592,9 @@ pub fn run(app: Arc<App>) {
     // Here and not in the loop below: it blocks until the prompt is answered.
     #[cfg(target_os = "macos")]
     crate::keychain::read_at_startup();
+    // Early, so it is up before the game is.
+    #[cfg(target_os = "macos")]
+    crate::capture::request_screen_access();
 
     // 1. The WoW folder.
     let wow_dir = loop {
@@ -591,10 +617,19 @@ pub fn run(app: Arc<App>) {
     };
     *app.wow_dir.lock().unwrap() = Some(wow_dir.clone());
     let interface = Config::load().interface();
+    // What this client is (its app says, even before its first launch) over what was saved.
+    #[cfg(target_os = "macos")]
+    let client_interface = crate::wow::interface_version(&wow_dir).map(|found| found.interface);
+    #[cfg(target_os = "macos")]
+    let interface = client_interface.clone().unwrap_or(interface);
 
     // 2. The addon files: put back what's missing, install or update the addon.
     let slots = Slots::for_wow(&wow_dir, &interface);
     let mut restart: Option<RestartNote> = put_back(&app, &slots, false);
+    #[cfg(target_os = "macos")]
+    if let Some(note) = client_interface.and_then(|found| follow_game_version(&slots, &found)) {
+        restart.get_or_insert(note);
+    }
     // 0.5.0's Match WoW's interface version… could save a number no WoW has (1607186, from a
     // misread Wow.exe), and the game then marked every T3 WoW addon Incompatible. Config
     // already reads that as the shipped number; put it back in the files and the settings.
@@ -669,11 +704,11 @@ pub fn run(app: Arc<App>) {
         None => log::line("No Microsoft Edge (or Chrome) to draw pictures with: pages and images show as text in the game"),
     }
     let (capture_tx, capture_rx) = channel::<CaptureMessage>();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     crate::capture::spawn(wow_dir.clone(), capture_tx);
     #[cfg(windows)]
     crate::keys::spawn();
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     drop(capture_tx);
 
     let mut origin = origin;

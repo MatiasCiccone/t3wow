@@ -7,16 +7,14 @@
 // Release builds have no console window; commands attach to the one they were run from.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-// Off Windows the capture, key watcher, update menu and tray aren't built yet, which leaves
-// what only they use unused.
+// Off Windows the key watcher, clipboard paste, update menu and tray aren't built yet, which
+// leaves what only they use unused.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod app;
 mod bridge;
-#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod capture;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod clip;
-#[cfg_attr(not(windows), allow(dead_code))]
 mod codec;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod config;
@@ -36,7 +34,6 @@ mod t3;
 #[cfg(windows)]
 mod tray;
 mod updater;
-#[cfg_attr(not(windows), allow(dead_code))]
 mod wow;
 
 use config::Config;
@@ -184,12 +181,17 @@ const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
   t3wow.exe uninstall  remove the addon
   t3wow.exe update     install the newest release, if there is one";
 
+#[cfg(not(target_os = "macos"))]
+const NO_WOW: &str = "Could not find WoW: Forever. Pass --wow \"C:\\...\\World of Warcraft\\_forever_\".";
+#[cfg(target_os = "macos")]
+const NO_WOW: &str = "Could not find WoW: Forever. Pass --wow \"/Applications/World of Warcraft/_forever_\".";
+
 fn wow_dir(args: &Args, config: &Config) -> Result<PathBuf, String> {
     let dir = match &args.wow {
         Some(given) => wow::normalize(given),
         None => config.wow_dir.as_ref().map(PathBuf::from).filter(|d| wow::looks_like_client(d)).or_else(wow::find_wow_dir),
     };
-    let dir = dir.ok_or("Could not find WoW: Forever. Pass --wow \"C:\\...\\World of Warcraft\\_forever_\".")?;
+    let dir = dir.ok_or(NO_WOW)?;
     if config.wow_dir.as_deref() != Some(&dir.to_string_lossy()) {
         Config::update(|c| c.wow_dir = Some(dir.to_string_lossy().into_owned()));
     }
@@ -240,6 +242,10 @@ fn command(args: Args) -> Result<(), String> {
     match command {
         "install" => {
             let dir = wow_dir(&args, &config)?;
+            // Its own --interface wins; otherwise what the client's app says it is, since
+            // on a fresh Mac install no Config.wtf has saved it yet.
+            #[cfg(target_os = "macos")]
+            let interface = if args.interface.is_some() { interface } else { wow::interface_version(&dir).map_or(interface, |found| found.interface) };
             let slots = Slots::for_wow(&dir, &interface);
             slots.install().map_err(|e| e.to_string())?;
             Config::update(|c| c.interface = Some(interface.clone()));
@@ -272,7 +278,7 @@ fn command(args: Args) -> Result<(), String> {
                 Some(version) if slots.installed() => println!("WoW: {} (addon installed, {version}; companion ships {})", dir.display(), slots::shipped_version()),
                 _ => println!("WoW: {} (addon NOT installed: run {BIN} install)", dir.display()),
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             println!("WoW client: {}", if capture::find_wow(&dir).is_some() { "running" } else { "not running" });
             let t3::Target { origin, token, key } = target(&origin).ok_or("T3: not running on this PC")?;
             // The sign-in is saved but out of reach: "not signed in" would be wrong.
