@@ -348,8 +348,8 @@ impl Live {
     }
 
     /// Saves every update written so far for the replay, and marks this point to check there:
-    /// the latest update, once it shows thread `id` open with each of `texts` (in any case).
-    /// Texts must not be in the thread's title or your messages, or the replay finds them there.
+    /// the latest update, once it shows thread `id` open with each of `texts` (in any case),
+    /// which the replay then looks for in the agent's messages.
     fn checkpoint(&mut self, label: &str, id: &str, texts: &[&str], buttons: &[&str]) {
         let shows = |live: &Live| {
             let inboxes = live.inboxes.lock().unwrap();
@@ -474,17 +474,17 @@ fn live_a_thread_from_the_game_round_trips() {
     live.checkpoint("the reply about a pasted image", &id, &["reen"], &[]);
 
     // The model row: another effort, sent with the thread's other options.
-    if live.model.2.len() > 1 {
-        let s = live.command(live.with_model(json!({ "t": "model", "id": id }), 1));
-        live.expect_no_failure(s);
-        let config = live.t3.client.call("t3_thread_configure", json!({ "threadId": id })).unwrap();
-        let effort = &live.model.2[1];
-        assert!(
-            config["modelSelection"]["options"].as_array().into_iter().flatten().any(|o| o["value"] == effort.as_str()),
-            "the effort didn't change to {effort}: {config}"
-        );
-        assert_eq!(config["modelSelection"]["model"], live.model.1.as_str());
-    }
+    assert!(live.model.2.len() > 1, "{} offers no second effort to change to: pick a model that does with T3WOW_LIVE_MODEL", live.model.1);
+    let s = live.command(live.with_model(json!({ "t": "model", "id": id }), 1));
+    live.expect_no_failure(s);
+    let config = live.t3.client.call("t3_thread_configure", json!({ "threadId": id })).unwrap();
+    let effort = live.model.2[1].clone();
+    assert!(
+        config["modelSelection"]["options"].as_array().into_iter().flatten().any(|o| o["value"] == effort.as_str()),
+        "the effort didn't change to {effort}: {config}"
+    );
+    assert_eq!(config["modelSelection"]["model"], live.model.1.as_str());
+    live.wait("the new effort in the game's model row", STATE_TIMEOUT, |live| live.snapshot()["view"]["cfg"]["ef"] == effort.as_str());
 
     let s = live.command(json!({ "t": "snooze", "id": id, "mn": 30 }));
     live.expect_no_failure(s);
