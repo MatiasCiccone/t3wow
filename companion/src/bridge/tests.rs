@@ -3624,6 +3624,30 @@ fn opening_a_row_reads_all_of_it_in_one_request_for_the_update_that_answers_the_
 }
 
 #[test]
+fn an_opened_row_names_models_as_the_conversation_does() {
+    let mut rig = Rig::new(54_500_000);
+    *rig.t3.capabilities.lock().unwrap() = capabilities();
+    let activity = vec![
+        said(0, "user_message", "go"),
+        said(1, "reasoning", "Hand it to model:claudeAgent/claude-opus, not model:claudeAgent/gone"),
+        said(2, "assistant_message", "done"),
+    ];
+    let messages: Vec<Value> = activity.iter().filter(|i| str_of(&i["type"]).ends_with("_message")).cloned().collect();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    rig.t3.set("completed", "2026-11-06T10:00:40Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 2, "l": 1, "wk": 1, "q": [{ "s": 3, "t": "detail", "id": "t1", "p": 1, "l": 1 }] }));
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["view"]["det"][0]["b"], json!(["Hand it to Claude Opus, not model:claudeAgent/gone"]));
+    assert!(!snapshot.to_string().contains('\u{5}'), "a mark left in");
+}
+
+#[test]
 fn a_question_row_shows_what_was_asked_and_what_you_answered() {
     let questions = json!([{ "question": "Merge it now?", "options": [{ "label": "Yes" }, { "label": "No" }] }]);
     let call = json!({ "toolName": "AskUserQuestion", "input": {}, "output": { "questions": questions, "answers": { "Merge it now?": "not yet" } } });
