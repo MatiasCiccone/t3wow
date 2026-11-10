@@ -185,6 +185,74 @@ fn page_title(text: &str) -> String {
     title.captures(text).and_then(|c| serde_json::from_str::<String>(&c[1]).ok()).unwrap_or_default()
 }
 
+/// The largest page file read (T3 reads at most 25 MiB), and the largest snapshot of one
+/// (T3 puts the page's local images in it).
+const PAGE_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const PAGE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The HTML an html_render call (its item's text, as JSON) showed. A page passed inline is
+/// in the call. One passed as a file (`path`) is drawn from the snapshot T3 saved when it
+/// showed it, which is what T3 shows even after the file changes or goes; failing that, from
+/// the file. Both are on the machine the thread runs on: `attachments` is T3's folder of
+/// them when that's this PC, else None.
+fn page_html(text: &str, attachments: Option<&std::path::Path>) -> Result<String, String> {
+    let call: Value = serde_json::from_str(text).map_err(|_| "the page's item couldn't be read".to_string())?;
+    let input = &call["input"];
+    if let Some(html) = input["html"].as_str().filter(|h| !h.trim().is_empty()) {
+        return Ok(html.to_string());
+    }
+    let Some(file) = input["path"].as_str().filter(|p| !p.trim().is_empty()) else { return Err("the page has no HTML".into()) };
+    let attachments = attachments.ok_or("the page is a file on another machine")?;
+    // The result's text when its structured form is missing (some providers drop it).
+    let content: Value = call["output"]["content"].as_str().and_then(|c| serde_json::from_str(c).ok()).unwrap_or(Value::Null);
+    let saved = [&call["output"]["structuredContent"], &content]
+        .into_iter()
+        .filter_map(|out| out["htmlRender"]["attachmentId"].as_str())
+        .find(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .and_then(|id| read_limited(&attachments.join(format!("{id}.html")), PAGE_SNAPSHOT_BYTES).ok());
+    if let Some(snapshot) = saved {
+        return Ok(without_t3_bootstrap(&snapshot));
+    }
+    // As T3 reads it: a full path on this PC (not the network), to an .html file.
+    let network = file.starts_with("\\\\") || file.starts_with("//");
+    let file = std::path::Path::new(file);
+    if network || !file.is_absolute() {
+        return Err("its file isn't on this PC".into());
+    }
+    let html_named = |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+    // The real file, so a link named .html can't reach another one.
+    let real = std::fs::canonicalize(file).map_err(|_| "its file is gone".to_string())?;
+    if !html_named(&real) {
+        return Err("its file isn't an .html file".into());
+    }
+    read_limited(&real, PAGE_FILE_BYTES)
+}
+
+/// A text file of at most `limit` bytes.
+fn read_limited(path: &std::path::Path, limit: u64) -> Result<String, String> {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file()).ok_or("its file is gone")?;
+    if meta.len() > limit {
+        return Err("its file is too large".into());
+    }
+    std::fs::read_to_string(path).map_err(|_| "its file couldn't be read".to_string())
+}
+
+/// A page snapshot as the agent wrote it: without the theme and script T3 put at its top
+/// (a light theme too, which the browser drawing it would pick), so it's drawn on T3's dark
+/// theme like a page passed inline.
+fn without_t3_bootstrap(html: &str) -> String {
+    const THEME: &str = "<style id=\"t3-theme\">";
+    let Some(start) = html.find(THEME) else { return html.to_string() };
+    let Some(theme_len) = html[start..].find("</style>").map(|n| n + "</style>".len()) else { return html.to_string() };
+    let mut end = start + theme_len;
+    if html[end..].starts_with("<script>") {
+        if let Some(n) = html[end..].find("</script>") {
+            end += n + "</script>".len();
+        }
+    }
+    format!("{}{}", &html[..start], &html[end..])
+}
+
 /// The images a message embeds from files on this PC (`![alt](C:\path)` or a file:// URL),
 /// with their alt text.
 fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
@@ -3692,7 +3760,7 @@ impl Bridge {
                     Some(_) => Err("the page is too large".to_string()),
                     None => {
                         let text = std::mem::take(&mut job.text);
-                        self.draw_page(&text)
+                        self.draw_page(&text, &env)
                     }
                 }
             }
@@ -3711,13 +3779,14 @@ impl Bridge {
         Ok(())
     }
 
-    /// Draws a page from its html_render item's text (the tool call, as JSON).
-    fn draw_page(&self, text: &str) -> Result<Bitmap, String> {
-        let call: Value = serde_json::from_str(text).map_err(|_| "the page's item couldn't be read".to_string())?;
-        let input = &call["input"];
-        let html = input["html"].as_str().filter(|h| !h.trim().is_empty()).ok_or("the page has no HTML")?;
-        let height = page_height(input["height"].as_u64().unwrap_or(400));
-        self.painter.as_ref().ok_or("no browser to draw with")?.page(html, height)
+    /// Draws a page from its html_render item's text (the tool call, as JSON), in a thread
+    /// on machine `env`.
+    fn draw_page(&self, text: &str, env: &str) -> Result<Bitmap, String> {
+        // T3 keeps a page's snapshot next to its settings, on the machine the thread runs on.
+        let attachments = self.t3_settings.as_ref().filter(|_| self.env_arg(env).is_empty()).and_then(|f| f.parent()).map(|d| d.join("attachments"));
+        let html = page_html(text, attachments.as_deref())?;
+        let height = serde_json::from_str::<Value>(text).ok().and_then(|call| call["input"]["height"].as_u64()).unwrap_or(400);
+        self.painter.as_ref().ok_or("no browser to draw with")?.page(&html, page_height(height))
     }
 
     /// Puts a drawn picture in an image slot the game process hasn't been told about: an

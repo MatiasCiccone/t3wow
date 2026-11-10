@@ -2379,9 +2379,64 @@ fn an_image_a_message_embeds_from_a_file_follows_that_message() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An html_render call that passed a file, as T3 0.18's activity shows it: its result names
+/// the snapshot T3 saved.
+fn path_call(title: &str, path: &std::path::Path, attachment: &str) -> String {
+    let render = json!({ "htmlRender": { "attachmentId": attachment, "title": title, "height": 120 }, "message": "Shown to the reader above your reply." });
+    serde_json::to_string_pretty(&json!({
+        "toolName": "mcp__t3-code__html_render",
+        "input": { "title": title, "height": 120, "path": path.display().to_string() },
+        "output": { "content": render.to_string(), "structuredContent": render },
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_page_passed_as_a_file_is_drawn_from_the_snapshot_t3_saved() {
+    let dir = std::env::temp_dir().join(format!("t3wow-page-file-{}", std::process::id()));
+    let attachments = dir.join("userdata").join("attachments");
+    std::fs::create_dir_all(&attachments).unwrap();
+    let file = dir.join("chart.html");
+    std::fs::write(&file, "<p>edited since</p>").unwrap();
+    let snapshot = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style id=\"t3-theme\">:root{color-scheme:dark}@media (prefers-color-scheme: light){:root{color-scheme:light}}</style><script>(function(){parent.postMessage(1,\"*\")})();</script><title>Chart</title></head><body><p>as shown</p></body></html>";
+    std::fs::write(attachments.join("t1-abc-html.html"), snapshot).unwrap();
+
+    let (mut rig, painter) = picture_rig(36_000_000, "<p>x</p>");
+    rig.t3.item_texts.lock().unwrap().insert("item-page".into(), path_call("Sales", &file, "t1-abc-html"));
+    rig.bridge.set_t3_settings(Some(dir.join("userdata").join("settings.json")));
+    rig.bridge.tick();
+    let drawn = "page 120 <!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><title>Chart</title></head><body><p>as shown</p></body></html>";
+    assert_eq!(painter.calls(), vec![drawn.to_string()], "the snapshot, without T3's theme and script");
+    assert_eq!(view_items(&rig)[1]["im"]["f"], 1);
+
+    // Without the snapshot, the file as it is now; with neither, a line says why.
+    let text = path_call("Sales", &file, "t1-gone-html");
+    assert_eq!(page_html(&text, Some(&attachments)).as_deref(), Ok("<p>edited since</p>"));
+    let gone = path_call("Sales", &dir.join("deleted.html"), "t1-gone-html");
+    assert_eq!(page_html(&gone, Some(&attachments)), Err("its file is gone".to_string()));
+    let txt = dir.join("notes.txt");
+    std::fs::write(&txt, "<p>").unwrap();
+    assert_eq!(page_html(&path_call("Sales", &txt, ""), Some(&attachments)), Err("its file isn't an .html file".to_string()));
+    let escape = path_call("Sales", &file, "..\\..\\chart");
+    assert_eq!(page_html(&escape, Some(&attachments)).as_deref(), Ok("<p>edited since</p>"), "an odd id isn't a path");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_page_passed_as_a_file_on_another_machine_says_why_it_isnt_shown() {
+    let (mut rig, painter) = picture_rig(37_000_000, "<p>x</p>");
+    // No T3 settings: the T3 in use isn't the one on this PC.
+    rig.t3.item_texts.lock().unwrap().insert("item-page".into(), path_call("Sales", std::path::Path::new("/box/chart.html"), "t1-abc-html"));
+    rig.bridge.tick();
+    assert!(painter.calls().is_empty());
+    assert_eq!(view_items(&rig)[1]["x"], "|cff808080[Page: Sales] (couldn't show it in the game: the page is a file on another machine)|r");
+}
+
 #[test]
 fn pages_and_embedded_files_are_found_in_t3s_text() {
     assert!(is_page_item(&page_call("x", 100, "<p>")));
+    assert!(is_page_item(&path_call("x", std::path::Path::new("/a.html"), "id")));
+    assert_eq!(page_title(&path_call("Q4", std::path::Path::new("/a.html"), "id")), "Q4");
     assert!(is_page_item(r#"{"toolName":"t3-code.html_render","input":{"#));
     assert!(!is_page_item(r#"{"toolName":"mcp__t3-code__html_preview","input":{"#));
     assert!(!is_page_item("I used html_render"));
