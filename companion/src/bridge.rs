@@ -704,7 +704,6 @@ fn new_login_stamp() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 pub enum CaptureMessage {
     /// The WoW client process changed: Some(key) when one runs, None when none does.
     Wow(Option<String>),

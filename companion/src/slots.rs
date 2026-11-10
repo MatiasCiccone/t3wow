@@ -138,14 +138,24 @@ fn tiny_tga() -> Vec<u8> {
 
 /// A Windows text font, or None. Only copied on this PC, never shipped. Symbol fonts
 /// (Marlett and the like) don't load in the game, so these are plain text fonts.
+#[cfg(not(target_os = "macos"))]
 fn windows_font(names: &[&str]) -> Option<Vec<u8>> {
     let dir = PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into())).join("Fonts");
     names.iter().find_map(|name| fs::read(dir.join(name)).ok())
 }
 
 /// Every signal is a copy of this font (Lucida Console is about 110 KB), so small wins.
+#[cfg(not(target_os = "macos"))]
 fn small_font() -> Option<Vec<u8>> {
     windows_font(&["lucon.ttf", "verdana.ttf", "arial.ttf"])
+}
+
+/// A font the addon ships. macOS keeps most text fonts in .ttc collections, and the game's
+/// own folder has only .slug files, neither of which the game can load through a signal: so
+/// signals copy a real single-face TrueType that the game already loads for the addon's text.
+#[cfg(target_os = "macos")]
+fn addon_font(name: &str) -> Option<Vec<u8>> {
+    ADDON_FILES.iter().find(|(file, _)| *file == name).map(|(_, bytes)| bytes.to_vec())
 }
 
 pub struct Repair {
@@ -167,8 +177,15 @@ pub struct Slots {
 }
 
 impl Slots {
+    #[cfg(not(target_os = "macos"))]
     pub fn new(addons_dir: impl Into<PathBuf>, interface: &str) -> Slots {
         Slots::with_fonts(addons_dir, interface, small_font(), windows_font(&["arial.ttf", "segoeui.ttf"]))
+    }
+
+    /// JetBrains Mono is the smallest font the addon ships (135 KB): a signal is a copy of it.
+    #[cfg(target_os = "macos")]
+    pub fn new(addons_dir: impl Into<PathBuf>, interface: &str) -> Slots {
+        Slots::with_fonts(addons_dir, interface, addon_font("Media/JetBrainsMono-Regular.ttf"), addon_font("Media/Inter-Regular.ttf"))
     }
 
     /// With the given fonts instead of this PC's (tests use fixture bytes, so they run anywhere).
@@ -819,6 +836,28 @@ mod tests {
         assert!(slots.installed());
         assert_eq!(fs::read(dir.join("T3WoW/sig/0007.ttf")).unwrap(), FIXTURE_FONT, "signals are another matter");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_fresh_mac_client_gets_the_addon_folder_and_signals_that_can_load() {
+        let wow = temp_dir("fresh-mac");
+        let slots = Slots::for_wow(&wow, "16001");
+        assert!(!wow.join("Interface").exists(), "a fresh install has none");
+        slots.install().unwrap();
+        assert!(wow.join("Interface/AddOns/T3WoW/T3WoW.toc").exists());
+        let valid = fs::read(wow.join("Interface/AddOns/T3WoW/ctl/probe/valid.ttf")).unwrap();
+        // A plain single-face TrueType: an sfnt, not a collection and not OpenType/CFF.
+        assert_eq!(&valid[..4], &[0, 1, 0, 0]);
+        assert_eq!(valid, addon_font("Media/JetBrainsMono-Regular.ttf").unwrap());
+        assert!(!fs::read(wow.join("Interface/AddOns/T3WoW/ctl/probe/valid2.ttf")).unwrap().is_empty());
+
+        let mut slots = slots;
+        let sig = wow.join("Interface/AddOns/T3WoW/sig/0007.ttf");
+        assert_eq!(fs::read(&sig).unwrap(), b"", "blank until raised");
+        slots.raise_signal(7).unwrap();
+        assert_eq!(fs::read(&sig).unwrap(), valid);
+        let _ = fs::remove_dir_all(&wow);
     }
 
     #[test]
