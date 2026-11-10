@@ -2884,6 +2884,78 @@ return "ok"
 `);
 });
 
+test("/clear is T3's where it can start a fresh session: it arms the thread's next message", () => {
+  run(PICKER_HELPERS + `
+-- The provider's own /clear, as T3's cache lists it.
+table.insert(PICKS[1].c, { n = "clear", d = "Clear conversation history", c = true })
+function notes() local out = {} for _, f in ipairs(pickerRows()) do out[#out + 1] = f.note:GetText() end return table.concat(out, "|") end
+-- A T3 without fresh sessions lists the provider's, and /clear goes out as text, as before.
+openThread(1)
+write("/cl")
+assert(listed() == "/clear" and notes() == "Clear conversation history", notes())
+press("OnEscapePressed")
+typeText("/clear")
+press("OnEnterPressed")
+assert(sent().m == "/clear" and sent().fc == nil and not T3WoWFreshNotice.shown, "old T3")
+
+ENVS[1].fc = true
+openThread(1)
+write("/cl")
+assert(listed() == "/clear" and notes():find("fresh session"), "T3's in place of the provider's: " .. notes())
+write("see /cl")
+assert(not T3WoWPicker.shown, "only at the start, as T3 offers it")
+write("/cl")
+press("OnEnterPressed")
+assert(typed() == "" and #queue() == 0, "picking it arms; nothing is sent")
+assert(T3WoWFreshNotice.shown, "no notice")
+-- Armed for that thread: another one (on a machine without it) shows nothing, and coming back still does.
+UI.Select({ e = 2, id = "t2" })
+assert(not T3WoWFreshNotice.shown, "notice on another thread")
+write("/cl")
+assert(not T3WoWPicker.shown, "offered where T3 can't")
+openThread(1)
+assert(T3WoWFreshNotice.shown, "lost on the way back")
+typeText("start over")
+press("OnEnterPressed")
+local s = sent().s
+assert(sent().t == "send" and sent().m == "start over" and sent().fc == true, "not sent fresh")
+assert(not T3WoWFreshNotice.shown, "still armed after the message went")
+-- T3 refused it: the text comes back, armed again.
+inboxWith(ENVS, { sel = true, threads = THREADS, picks = PICKS, out = { { s = s, ok = false, x = "T3 refused the message" } } })
+assert(typed() == "start over" and T3WoWFreshNotice.shown, "not re-armed")
+-- Its × keeps the current session.
+T3WoWFreshNotice.keep.scripts.OnClick(T3WoWFreshNotice.keep)
+assert(not T3WoWFreshNotice.shown)
+press("OnEnterPressed")
+assert(sent().m == "start over" and sent().fc == nil, "sent fresh after ×")
+-- /clear sent on its own arms it too.
+local before = #queue()
+typeText("/clear")
+press("OnEnterPressed")
+assert(#queue() == before and typed() == "" and T3WoWFreshNotice.shown, "/clear went out as text")
+-- While the agent asks a question, /clear still arms; it's no answer.
+T3WoWFreshNotice.keep.scripts.OnClick(T3WoWFreshNotice.keep)
+local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } } } }
+inboxWith(ENVS, { sel = true, threads = THREADS, picks = PICKS, view = { e = 1, id = "t1", t = "Here", s = "waiting", items = {}, ask = ask } })
+typeText("/clear")
+press("OnEnterPressed")
+assert(#queue() == 0 and typed() == "" and T3WoWFreshNotice.shown, "/clear went out as an answer")
+inboxWith(ENVS, { sel = true, threads = THREADS, picks = PICKS, view = { e = 1, id = "t1", t = "Here", s = "completed", items = {} } })
+-- T3 sends pasted images with no fresh session: the message waits, armed, with its images.
+typeText("look at this")
+inboxWith(ENVS, { sel = true, pi = true, threads = THREADS, picks = PICKS, att = { { d = "local:t1", i = 1, w = 10, h = 10 } } })
+press("OnEnterPressed")
+assert(#queue() == 0 and typed() == "look at this" and T3WoWFreshNotice.shown, "sent fresh with images")
+assert(showing("can't start with pasted images"), "no word why")
+-- New Thread starts fresh anyway: no /clear there.
+click("New Thread")
+assert(not T3WoWFreshNotice.shown, "notice in New Thread")
+write("/cl")
+assert(not T3WoWPicker.shown, "offered in New Thread")
+return "ok"
+`);
+});
+
 test("without the companion's list only machines are offered, and refilling the box opens nothing", () => {
   run(PICKER_HELPERS + `
 inboxWith(ENVS, { threads = THREADS })

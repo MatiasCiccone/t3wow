@@ -360,6 +360,24 @@ fn compact_picks(cache: &Value) -> Vec<Value> {
     picks
 }
 
+/// The first T3 whose sends take `freshContext` (T3 Code 0.18.0 reports its server as 0.1.8).
+/// MCP doesn't list a server's capabilities, so its version stands in for that one.
+const FRESH_CONTEXT_SINCE: [u64; 3] = [0, 1, 8];
+
+/// Whether a T3 that reports this server version starts fresh sessions. A version that
+/// doesn't read as numbers (none, from a T3 too old to say) doesn't.
+fn takes_fresh_context(version: &str) -> bool {
+    let core = version.trim().trim_start_matches('v').split(['-', '+']).next().unwrap_or("");
+    let parts: Option<Vec<u64>> = core.split('.').map(|part| part.parse().ok()).collect();
+    match parts {
+        Some(mut parts) if !parts.is_empty() => {
+            parts.resize(3, 0);
+            parts[..3] >= FRESH_CONTEXT_SINCE[..]
+        }
+        _ => false,
+    }
+}
+
 /// What the game calls the models it knows. T3 labels only some of them (GPT-6.1 Terra has a
 /// label, gpt-6.1-sol doesn't), which reads unevenly side by side.
 const MODEL_NAMES: [(&str, &str); 10] = [
@@ -662,6 +680,9 @@ pub struct Bridge {
     /// Per machine: whether its new threads start in a new worktree by default (T3's
     /// "New thread mode" preference), for projects that don't set their own.
     new_worktrees: BTreeMap<String, bool>,
+    /// The machines whose T3 can start a fresh provider session in a thread (`freshContext`
+    /// on a send, T3's /clear), by the version each one reports.
+    fresh_context: HashSet<String>,
     /// What each machine offers for the model and effort selectors.
     catalogs: BTreeMap<String, Catalog>,
     /// T3's folder of provider caches, while the T3 in use is the one on this PC: MCP doesn't
@@ -1667,6 +1688,7 @@ impl Bridge {
             threads: BTreeMap::new(),
             projects: BTreeMap::new(),
             new_worktrees: BTreeMap::new(),
+            fresh_context: HashSet::new(),
             catalogs: BTreeMap::new(),
             provider_caches: None,
             t3_settings: None,
@@ -1827,6 +1849,7 @@ impl Bridge {
         self.projects.clear();
         self.run_starts.clear();
         self.new_worktrees.clear();
+        self.fresh_context.clear();
         self.catalogs.clear();
         self.settled_totals.clear();
         self.list_more.clear();
@@ -2089,6 +2112,14 @@ impl Bridge {
                     }
                 }
                 "send" if !id.is_empty() && (!message.is_empty() || with_images) => {
+                    // T3's /clear: this message starts a fresh provider session in the thread.
+                    let fresh = command["fc"] == true;
+                    if fresh && !self.fresh_context_on(&env) {
+                        return Err(T3Error::Other("this T3 can't start a fresh session: update it to use /clear".into()));
+                    }
+                    if fresh && with_images {
+                        return Err(T3Error::Other("T3 can't start a fresh session with pasted images: send them after it starts".into()));
+                    }
                     if with_images {
                         // T3's send with attachments has no mode or retry key: it starts an
                         // idle thread, and steers or queues on a busy one, as a send does.
@@ -2103,10 +2134,13 @@ impl Bridge {
                         }
                         self.remember_sent(&draft, &env, &id, &message);
                     } else {
-                        let args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
+                        let mut args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
+                        if fresh {
+                            args["freshContext"] = json!(true);
+                        }
                         self.client.call("t3_thread_send", with_args(args, &env_arg))?;
                     }
-                    self.note("Sent.");
+                    self.note(if fresh { "Sent in a fresh session." } else { "Sent." });
                     let depth = self.view.as_ref().filter(|v| v.id == id).map(|v| v.depth).unwrap_or(1);
                     self.view = Some(View { env: env.clone(), id: id.clone(), depth });
                     self.view_changed();
@@ -2993,7 +3027,8 @@ impl Bridge {
         let name = match self.client.call("t3_environment_read", json!({})) {
             Ok(read) => {
                 let local = self.local_env_id.clone().unwrap_or_default();
-                self.new_worktrees.insert(local, read["preferences"]["defaultThreadEnvMode"] == "worktree");
+                self.new_worktrees.insert(local.clone(), read["preferences"]["defaultThreadEnvMode"] == "worktree");
+                self.note_fresh_context(&local, &read);
                 read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string)
             }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
@@ -3031,6 +3066,7 @@ impl Bridge {
         self.threads.retain(|env, _| linked(env));
         self.projects.retain(|env, _| linked(env));
         self.new_worktrees.retain(|env, _| linked(env));
+        self.fresh_context.retain(|env| linked(env));
         self.catalogs.retain(|env, _| linked(env));
         self.settled_totals.retain(|env, _| linked(env));
         self.list_more.retain(|env, _| linked(env));
@@ -3048,6 +3084,22 @@ impl Bridge {
             self.view_key = None;
             self.pending_ask = None;
         }
+    }
+
+    /// Notes from a machine's `t3_environment_read` whether its T3 starts fresh sessions.
+    fn note_fresh_context(&mut self, env: &str, read: &Value) {
+        if takes_fresh_context(str_of(&read["serverVersion"])) {
+            self.fresh_context.insert(env.to_string());
+        } else {
+            self.fresh_context.remove(env);
+        }
+    }
+
+    /// Whether a send to this machine can start a fresh session: the T3 it goes through (this
+    /// server, which passes a linked machine's on) has to take `freshContext` too.
+    fn fresh_context_on(&self, env: &str) -> bool {
+        let local = self.local_env_id.as_deref().unwrap_or_default();
+        self.fresh_context.contains(local) && self.fresh_context.contains(env)
     }
 
     fn refresh_projects(&mut self, env: &str) {
@@ -3070,6 +3122,7 @@ impl Bridge {
             match self.client.call("t3_environment_read", Value::Object(env_arg)) {
                 Ok(read) => {
                     self.new_worktrees.insert(env.to_string(), read["preferences"]["defaultThreadEnvMode"] == "worktree");
+                    self.note_fresh_context(env, &read);
                 }
                 Err(error) => self.log(&format!("preferences ({env}): {error}")),
             }
@@ -4177,6 +4230,10 @@ impl Bridge {
                 // The permissions a new thread on it gets when none is picked.
                 if let Some(mode) = self.catalogs.get(&e.id).and_then(|c| c.mode.as_ref()) {
                     entry["dm"] = json!(mode);
+                }
+                // Its threads can start a fresh session (T3's /clear).
+                if self.fresh_context_on(&e.id) {
+                    entry["fc"] = json!(true);
                 }
                 entry
             })

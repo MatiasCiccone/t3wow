@@ -30,6 +30,8 @@ struct FakeT3 {
     projects: Mutex<HashMap<String, Value>>,
     /// Each machine's "New thread mode" preference (left out when not set).
     thread_modes: Mutex<HashMap<String, &'static str>>,
+    /// The server version each machine reports (left out when not set).
+    versions: Mutex<HashMap<String, &'static str>>,
     /// Whether the threads' agents watch their pull requests.
     watching: Mutex<bool>,
     /// Images uploaded: the address, its content type and how many bytes.
@@ -71,6 +73,7 @@ impl FakeT3 {
             activity: Mutex::new(HashMap::new()),
             projects: Mutex::new(HashMap::new()),
             thread_modes: Mutex::new(HashMap::new()),
+            versions: Mutex::new(HashMap::new()),
             item_texts: Mutex::new(HashMap::new()),
             watching: Mutex::new(false),
             uploads: Mutex::new(Vec::new()),
@@ -124,9 +127,13 @@ impl T3 for FakeT3 {
                 let links = if env_id == "local" { self.links.lock().unwrap().clone() } else { json!([]) };
                 json!({ "environmentId": env_id, "links": links })
             }
-            "t3_environment_read" if !self.thread_modes.lock().unwrap().is_empty() => {
+            "t3_environment_read" if !self.thread_modes.lock().unwrap().is_empty() || !self.versions.lock().unwrap().is_empty() => {
                 let env = args["environmentId"].as_str().unwrap_or("local");
-                json!({ "label": env, "preferences": { "defaultThreadEnvMode": self.thread_modes.lock().unwrap().get(env) } })
+                json!({
+                    "label": env,
+                    "serverVersion": self.versions.lock().unwrap().get(env),
+                    "preferences": { "defaultThreadEnvMode": self.thread_modes.lock().unwrap().get(env) },
+                })
             }
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
@@ -1733,6 +1740,50 @@ fn new_thread_starts_in_a_new_worktree_or_the_checkout_and_defaults_as_t3_does()
     assert!(launches[2]["workspaceStrategy"].is_null() && launches[2]["scratch"] == true, "{}", launches[2]);
 }
 
+#[test]
+fn fresh_sessions_need_t3_code_0_18_on_every_server_a_send_goes_through() {
+    for (version, takes) in [
+        ("0.1.8", true), ("0.1.9", true), ("0.2.0", true), ("1.0", true), ("v0.1.8", true), ("0.1.8-nightly.3", true),
+        ("0.1.7", false), ("0.0.99", false), ("", false), ("dev", false), ("0.1.x", false),
+    ] {
+        assert_eq!(takes_fresh_context(version), takes, "{version:?}");
+    }
+}
+
+#[test]
+fn a_send_from_the_games_clear_starts_a_fresh_session_where_t3_can() {
+    let mut rig = Rig::new(27_500_000);
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.8"), ("mac".to_string(), "0.1.7")]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    // The game offers /clear for this server's threads, not for a machine on an older T3.
+    let envs = rig.bridge.snapshot()["envs"].clone();
+    assert_eq!(envs[0]["fc"], true, "{envs}");
+    assert!(envs[1]["fc"].is_null(), "{envs}");
+
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "send", "id": "t1", "m": "start over", "fc": true },
+        { "s": 3, "t": "send", "id": "t1", "m": "and go on" },
+        { "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "start over there", "fc": true },
+    ] }));
+    rig.bridge.tick();
+    let sends = rig.t3.calls_to("t3_thread_send");
+    assert_eq!(sends.len(), 2, "the Mac's fresh send reached T3: {sends:?}");
+    assert_eq!((&sends[0]["message"], &sends[0]["freshContext"], &sends[0]["mode"]), (&json!("start over"), &json!(true), &json!("auto")));
+    assert!(sends[1]["freshContext"].is_null(), "only the armed message starts fresh: {}", sends[1]);
+    let out = rig.bridge.snapshot()["out"].clone();
+    assert_eq!(out, json!([{ "s": 4, "ok": false, "x": "this T3 can't start a fresh session: update it to use /clear" }]));
+
+    // This server going back to an older T3 takes it away from every machine it reaches.
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.7"), ("mac".to_string(), "0.1.8")]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let envs = rig.bridge.snapshot()["envs"].clone();
+    assert!(envs[0]["fc"].is_null() && envs[1]["fc"].is_null(), "{envs}");
+}
+
 /// Every command kind the window sends, one frame's worth (the answer names the question
 /// the fake T3 asks, so it reaches T3 when allowed).
 fn every_kind(rig: &mut Rig, u: &str) -> Vec<(u64, &'static str)> {
@@ -3229,6 +3280,65 @@ fn the_trays_read_only_refuses_a_model_change_and_no_new_threads_refuses_only_st
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_configure").iter().filter(|a| a["modelSelection"].is_object()).count(), 1);
     assert!(rig.t3.calls_to("t3_thread_launch").is_empty());
+}
+
+#[test]
+#[ignore = "starts one small thread on the T3 the companion is signed in to, sends it a message in a fresh session, then archives it"]
+fn clear_starts_a_fresh_session_on_the_signed_in_t3() {
+    let target = crate::t3::target().expect("no T3 to talk to");
+    let client = Arc::new(crate::t3::McpClient::new(&target.origin, target.token.as_deref().expect("not signed in")));
+    let key = format!("probe-{}", crate::config::now_ms());
+    let mut rig = Rig::new(49_500_000);
+    rig.bridge.set_client(client.clone());
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    let settle = |rig: &mut Rig, until: &dyn Fn(&Value) -> bool| -> Value {
+        for _ in 0..60 {
+            rig.advance(61_000);
+            for _ in 0..40 {
+                rig.bridge.tick();
+                let snapshot = rig.bridge.snapshot();
+                if until(&snapshot) {
+                    return snapshot;
+                }
+            }
+        }
+        panic!("never settled: {}", rig.bridge.snapshot());
+    };
+    // This T3 says it can: the game offers /clear for its threads.
+    settle(&mut rig, &|s| s["envs"][0]["fc"] == true);
+
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "m": "Reply with just OK, and keep this word for later in this conversation: kumquat.", "pv": "claudeAgent", "md": "claude-haiku-5-5", "ef": "low", "rm": "approval-required" },
+    ] }));
+    let snapshot = settle(&mut rig, &|s| s["out"].is_array());
+    let id = snapshot["out"][0]["id"].as_str().unwrap_or_else(|| panic!("{}", snapshot["out"])).to_string();
+    let finished = |least: u64| -> Value {
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let head = client.call("t3_thread_read", json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 })).unwrap();
+            if head["thread"]["runCount"].as_u64().unwrap_or(0) >= least && !working(str_of(&head["thread"]["status"])) {
+                return head;
+            }
+        }
+        panic!("the run never ended");
+    };
+    // The word stays out of the title (60 chars), and so out of the scratch folder's name.
+    finished(1);
+    rig.frame(json!({ "k": key, "u": "ui1", "n": 0, "l": 3, "q": [
+        { "s": 3, "t": "send", "id": id, "m": "What word did I ask you to remember? If you don't know, reply with just NONE.", "fc": true },
+    ] }));
+    rig.bridge.tick();
+    finished(2);
+    let read = client.call("t3_thread_read", json!({ "threadId": id, "view": "activity", "limit": 20, "maxCharsPerItem": 400 })).unwrap();
+    client.call("t3_thread_organize", json!({ "action": "archive", "threadId": id })).unwrap();
+    let items = read["items"].as_array().unwrap();
+    for item in items {
+        println!("{} {}: {}", item["position"], item["type"], str_of(&item["text"]));
+    }
+    // Whether T3's read marks the fresh message, for the game's New session line.
+    println!("marked: {}", items.iter().chain(read["recentRuns"].as_array().unwrap()).any(|i| i.get("freshContext").is_some()));
+    let reply = items.iter().rev().find(|i| i["type"] == "assistant_message").expect("no reply");
+    assert!(!str_of(&reply["text"]).to_lowercase().contains("kumquat"), "the fresh session saw the earlier message: {reply}");
 }
 
 #[test]
