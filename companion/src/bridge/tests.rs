@@ -3892,3 +3892,36 @@ fn a_thread_only_getting_newer_spends_no_update_until_there_is_something_to_show
     rig.bridge.tick();
     assert!(rig.publishes() > settled, "a status change didn't reach the game");
 }
+
+#[test]
+fn a_read_only_sign_in_shows_on_the_game_s_top_line_until_one_can_change_threads() {
+    let mut rig = Rig::new(30_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["auth"].is_null());
+    assert!(!rig.bridge.status().sign_in_read_only);
+    let latest = |rig: &Rig| {
+        let written = rig.written.lock().unwrap();
+        written.slots.iter().max_by_key(|(n, _)| **n).map(|(_, lua)| lua.clone()).unwrap_or_default()
+    };
+
+    // T3 granted Read only: the game says so where it says a sign-in was refused, right away.
+    rig.bridge.set_sign_in_read_only(true);
+    rig.advance(2000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["auth"], READ_ONLY_LINE);
+    assert!(rig.bridge.status().sign_in_read_only, "the tray's line says it too");
+    assert!(latest(&rig).contains("Read-only T3 sign-in"), "{}", latest(&rig));
+
+    // A refused sign-in is the bigger problem, and says what to do about it.
+    rig.bridge.auth_error = Some("T3 refused the sign-in (401). Sign in again from the tray menu.".into());
+    assert_eq!(rig.bridge.snapshot()["auth"], "T3 refused the sign-in (401). Sign in again from the tray menu.");
+    rig.bridge.auth_error = None;
+
+    // Signed in again with Auto: the line goes.
+    rig.bridge.set_sign_in_read_only(false);
+    rig.advance(2000);
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["auth"].is_null());
+    assert!(!latest(&rig).contains("Read-only T3 sign-in"), "{}", latest(&rig));
+}

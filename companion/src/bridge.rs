@@ -656,12 +656,17 @@ struct ViewCache {
     earlier: bool,
 }
 
+/// The game's top line while the sign-in in use can only read.
+const READ_ONLY_LINE: &str = "Read-only T3 sign-in: sign in again from the tray menu, pick Auto or Full access";
+
 /// What the tray shows.
 #[derive(Clone, Debug, Default)]
 pub struct BridgeStatus {
     pub t3_ok: bool,
     pub t3_problem: Option<String>,
     pub auth_needed: bool,
+    /// The sign-in in use can only read (`Bridge::set_sign_in_read_only`).
+    pub sign_in_read_only: bool,
     pub wow_running: bool,
     pub in_game: bool,
     pub signals: bool,
@@ -763,6 +768,8 @@ pub struct Bridge {
     list_errors: HashMap<String, String>,
     slow_at: i64,
     auth_error: Option<String>,
+    /// T3 granted the sign-in in use only Read only access: the game's top line says so.
+    sign_in_read_only: bool,
     poll_error: Option<String>,
     polled_ok: bool,
     /// The question shown in the game for the open thread, with the ids T3 needs back.
@@ -1741,6 +1748,7 @@ impl Bridge {
             list_errors: HashMap::new(),
             slow_at: 0,
             auth_error: None,
+            sign_in_read_only: false,
             poll_error: None,
             polled_ok: false,
             pending_ask: None,
@@ -1790,6 +1798,15 @@ impl Bridge {
         if trust != self.trust {
             self.log(&format!("Commands from the game: {}", trust.label()));
             self.trust = trust;
+        }
+    }
+
+    /// Whether the sign-in in use can only read (`Config::read_only`). The game shows it on
+    /// its top line, where it shows a refused sign-in, since T3 would refuse every change.
+    pub fn set_sign_in_read_only(&mut self, read_only: bool) {
+        if read_only != self.sign_in_read_only {
+            self.log(if read_only { "The T3 sign-in is Read only: T3 refuses every change from the game" } else { "The T3 sign-in can change threads" });
+            self.sign_in_read_only = read_only;
         }
     }
 
@@ -1928,6 +1945,7 @@ impl Bridge {
             t3_ok: self.polled_ok && self.auth_error.is_none() && self.poll_error.is_none(),
             t3_problem: self.auth_error.clone().or_else(|| self.poll_error.clone()),
             auth_needed: self.auth_error.is_some(),
+            sign_in_read_only: self.sign_in_read_only,
             wow_running: self.link.wow_key.as_deref().is_some_and(|k| !k.is_empty()),
             in_game: self.link.ui_session.is_some(),
             signals: self.link.polling == Some(false) && self.signals_out.is_none(),
@@ -4329,7 +4347,8 @@ impl Bridge {
         if !self.outcomes.is_empty() {
             out.insert("out".into(), json!(self.outcomes.iter().map(|(_, o)| o).collect::<Vec<_>>()));
         }
-        out.insert("auth".into(), json!(self.auth_error));
+        // A refused sign-in, else one that can only read: the game's top line says either.
+        out.insert("auth".into(), json!(self.auth_error.as_deref().or(self.sign_in_read_only.then_some(READ_ONLY_LINE))));
         // This companion pastes images (the game offers Ctrl+V for them), and the ones pasted
         // so far, by the message they go with (left out when there are none).
         out.insert("pi".into(), json!(true));
