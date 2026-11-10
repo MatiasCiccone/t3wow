@@ -622,7 +622,9 @@ pub fn run(app: Arc<App>) {
         Box::new(log::line),
         Box::new(now_ms),
     );
-    bridge.set_trust(Config::load().trust());
+    let config = Config::load();
+    bridge.set_trust(config.trust());
+    bridge.set_sign_in_read_only(config.sign_in_read_only(&key));
     bridge.set_provider_caches(local_provider_caches());
     bridge.set_t3_settings(local_t3_settings());
     // Another T3 than the game's updates came from last time (`login --origin` while the
