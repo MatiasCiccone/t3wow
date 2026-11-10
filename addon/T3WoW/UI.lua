@@ -2833,6 +2833,57 @@ do
         return chip
     end
 
+    -- T3's /clear: the open thread's next message starts a fresh provider session (the agent
+    -- won't see the thread's earlier messages). Armed per thread, as T3 keeps it, with a
+    -- notice above the box until that message goes; its × keeps the current session.
+    -- Offered where the thread's T3 can do it (fc on its machine, from the companion).
+    Paste.fresh = {}
+    local FRESH_HEIGHT = 42
+    local freshRow = CreateFrame("Frame", "T3WoWFreshNotice", right)
+    freshRow:SetHeight(FRESH_HEIGHT)
+    freshRow:Hide()
+    Skin.Box(freshRow, { shape = "panel", fill = "card", ring = "border" })
+    freshRow.title = freshRow:CreateFontString(nil, "OVERLAY")
+    freshRow.title:SetFontObject(Skin.fonts.strong)
+    freshRow.title:SetPoint("TOPLEFT", 10, -7)
+    freshRow.title:SetPoint("RIGHT", -30, 0)
+    freshRow.title:SetJustifyH("LEFT")
+    freshRow.title:SetText("Your next message starts a fresh session")
+    freshRow.note = freshRow:CreateFontString(nil, "OVERLAY")
+    freshRow.note:SetFontObject(Skin.fonts.muted)
+    freshRow.note:SetPoint("TOPLEFT", freshRow.title, "BOTTOMLEFT", 0, -3)
+    freshRow.note:SetPoint("RIGHT", -30, 0)
+    freshRow.note:SetJustifyH("LEFT")
+    freshRow.note:SetText("The agent won't see earlier messages in this thread.")
+    freshRow.keep = Skin.CloseButton(freshRow, function() Paste.Arm(false) end)
+    freshRow.keep:SetPoint("TOPRIGHT", -4, -4)
+    freshRow.keep:SetScript("OnEnter", function(self)
+        Skin.Tooltip:SetOwner(self, "ANCHOR_TOP")
+        Skin.Tooltip:AddLine("Keep the current session")
+        Skin.Tooltip:Show()
+    end)
+    freshRow.keep:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
+
+    -- Whether the open thread's T3 starts fresh sessions.
+    function Paste.CanFresh()
+        if not selected or selected.new then return false end
+        local e = envById(selected.env)
+        return e ~= nil and e.fc == true
+    end
+
+    -- Whether the open thread's next message starts fresh.
+    function Paste.Fresh()
+        local key = Paste.DraftKey()
+        return key ~= nil and Paste.fresh[key] == true and Paste.CanFresh()
+    end
+
+    function Paste.Arm(on)
+        local key = Paste.DraftKey()
+        if not key or (on and not Paste.CanFresh()) then return end
+        Paste.fresh[key] = on or nil
+        UI.Refresh()
+    end
+
     -- The images pasted for the message being written, in a row above the box; the
     -- conversation (or New Thread's choices) ends above them while there are any.
     function Paste.Render()
@@ -2861,7 +2912,13 @@ do
         end
         for i = #list + 1, #pasteChips do pasteChips[i]:Hide() end
         pasteRow:SetShown(#list > 0)
-        local bottom = SIZE.composer + (#list > 0 and (PASTE_HEIGHT + 6) or 0)
+        local fresh = Paste.Fresh()
+        local under = #list > 0 and pasteRow or inputBg
+        freshRow:ClearAllPoints()
+        freshRow:SetPoint("BOTTOMLEFT", under, "TOPLEFT", 0, 6)
+        freshRow:SetPoint("BOTTOMRIGHT", under, "TOPRIGHT", 0, 6)
+        freshRow:SetShown(fresh)
+        local bottom = SIZE.composer + (#list > 0 and (PASTE_HEIGHT + 6) or 0) + (fresh and (FRESH_HEIGHT + 6) or 0)
         messageScroll:SetPoint("BOTTOMRIGHT", -26, bottom)
         newPanel:SetPoint("BOTTOMRIGHT", -26, bottom)
     end
@@ -3342,6 +3399,13 @@ end
 
 local function sendCurrent()
     local text = input:GetText():gsub("^%s+", ""):gsub("%s+$", "")
+    -- /clear on its own is T3's: it arms a fresh session for the next message, sending
+    -- nothing (never an answer to a question).
+    if text == "/clear" and Paste.CanFresh() then
+        input:SetText("")
+        Paste.Arm(true)
+        return
+    end
     -- While the agent waits on a question, Send (and Enter) answers it.
     if pendingAsk() then
         if sendAnswer(text) and text ~= "" then input:SetText("") end
@@ -3351,6 +3415,11 @@ local function sendCurrent()
     -- Pasted images can go on their own.
     local images = #Paste.For(Paste.DraftKey())
     if (text == "" and images == 0) or not selected then return end
+    local fresh = Paste.Fresh()
+    if fresh and images > 0 then
+        UI.Notice("A fresh session can't start with pasted images: send words first, or × the notice to keep this session.")
+        return
+    end
     local blocked = blockedReason(selected.new and "new" or "send")
     if blocked then
         UI.Notice(blocked)
@@ -3372,13 +3441,15 @@ local function sendCurrent()
     local command = selected.new
         and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = UI.Picker.Expand(text),
             pv = selected.pv, md = selected.m, ef = selected.ef, rm = selected.rm }
-        or { t = "send", e = selected.env, id = selected.id, m = UI.Picker.Expand(text) }
+        or { t = "send", e = selected.env, id = selected.id, m = UI.Picker.Expand(text), fc = fresh or nil }
     if not ns.Link.Fits(command) then
         UI.Notice("That message is too long to send from the game: shorten it.")
         return
     end
     local s = ns.Link.Send(command)
-    if s then awaiting[s] = { kind = command.t, text = text, at = GetTime() } end
+    if s then awaiting[s] = { kind = command.t, text = text, at = GetTime(), fresh = fresh and Paste.DraftKey() or nil } end
+    -- Spent on this message; it comes back armed if T3 refuses it.
+    if fresh then Paste.fresh[Paste.DraftKey()] = nil end
     if selected.new then
         UI.Notice("Starting a new thread…")
     elseif text ~= "" then
@@ -3472,12 +3543,20 @@ do
             return found
         end
         local index, provider = envIndexById(selected.env), Selectors.Provider()
+        -- T3's /clear stands in for the provider's, which would clear a session T3 still
+        -- treats as live. Only at the start, as a command; not in New Thread, which starts
+        -- fresh anyway.
+        local machine = envById(selected.env)
+        local fresh = machine ~= nil and machine.fc == true
+        if Paste.CanFresh() and mark == "/" and leading then
+            found[#found + 1] = { key = "clear", text = "/clear", note = "Start a fresh session; earlier messages stay visible", fresh = true }
+        end
         for _, p in ipairs(inbox and type(inbox.picks) == "table" and inbox.picks or {}) do
             if type(p) == "table" and p.e == index and (not provider or p.pv == provider) then
                 for _, c in ipairs(type(p.c) == "table" and p.c or {}) do
-                    if not seen[c.n] and (mark == "/" or c.s) then
+                    if not seen[c.n] and (mark == "/" or c.s) and not (fresh and c.n == "clear" and not c.s) then
                         seen[c.n] = true
-                        local slash = mark == "/" and c.c and (leading or not c.s)
+                        local slash = mark == "/" and c.c and (leading or not c.s) and not (fresh and c.n == "clear")
                         found[#found + 1] = { key = c.n, text = (slash and "/" or "$") .. c.n, note = c.d }
                     end
                 end
@@ -3551,6 +3630,13 @@ do
         if not item then return false end
         local text = input:GetText()
         Picker.Close()
+        -- /clear is done once picked: it arms the next message, and leaves no text.
+        if item.fresh then
+            input:SetText(text:sub(1, #text - tokenBytes))
+            Paste.Arm(true)
+            input:SetFocus()
+            return true
+        end
         -- Insert leaves the cursor after it; a SetText might not.
         input:SetText("")
         input:Insert(text:sub(1, #text - tokenBytes) .. item.text .. " ")
@@ -4373,6 +4459,7 @@ local function takeOutcomes(data)
                 end
             else
                 if sent.text and input:GetText() == "" then input:SetText(sent.text) end
+                if sent.fresh then Paste.fresh[sent.fresh] = true end
                 if echo and echo.s == o.s then echo = nil end
                 if sent.kind == "answer" then askState.sent = nil end
                 if sent.kind == "model" then Selectors.Refused(o.s) end
@@ -4429,6 +4516,7 @@ function UI.ForgetLogin()
     UI.History.list, UI.History.at, UI.History.pending = {}, 0, nil
     copyBox:Hide()
     awaiting = {}
+    Paste.fresh = {}
     askState.k, askState.picks, askState.sent, askState.sentAt = nil, {}, nil, nil
     Selectors.Forget()
     announced = false
