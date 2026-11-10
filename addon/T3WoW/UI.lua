@@ -676,12 +676,14 @@ end
 
 -- Settle and Snooze on a row, as in T3's sidebar. Snooze asks for how long; T3 takes a time,
 -- which the companion works out, since the game's clock may not be the PC's. On a snoozed
--- thread the clock wakes it. A settled thread has only Unsettle, and one that needs you
--- only Settle.
+-- thread the clock wakes it. A settled thread has only Unsettle. As in T3 0.18.0, a thread
+-- waiting on a question can be snoozed (the question stays open; a newer one wakes it), but
+-- one waiting on an approval, or on a turn still starting, has only Settle.
 do
     local Actions = {}
     UI.RowActions = Actions
     local SNOOZE_FOR = { { "1 hour", 60 }, { "4 hours", 240 }, { "1 day", 1440 }, { "1 week", 10080 } }
+    Actions.UNSNOOZABLE = { approval = true, preparing = true, queued = true, starting = true }
 
     local function command(kind, t, minutes)
         local blocked = blockedReason(kind)
@@ -768,7 +770,7 @@ do
         local drawn = UI.GlyphKnown(r.snoozeAction.glyph)
         r.snoozeAction.glyph:SetShown(drawn)
         r.snoozeAction.short:SetShown(not drawn)
-        local snoozable = t.sn or not (t.set or UI.Waits.NeedsYou(t.s))
+        local snoozable = t.sn or not (t.set or Actions.UNSNOOZABLE[t.s])
         r.snoozeAction:SetShown(snoozable and true or false)
         r.settleAction.label:SetText(t.set and "Unsettle" or "Settle")
         local width = math.ceil(r.settleAction.label:GetStringWidth() or 0) + 19

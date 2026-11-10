@@ -2677,11 +2677,22 @@ row.IsMouseOver = function() return false end
 row.scripts.OnLeave(row)
 assert(not row.actions.shown and not row.age.hidden, "stayed after the pointer left")
 
--- Needing you: Settle only, and the status stands where the age was until hovered.
+-- Waiting on an approval or on a turn still starting: Settle only, as T3 refuses the snooze.
+for _, status in ipairs({ "approval", "preparing", "queued", "starting" }) do
+  thread.set, thread.s = false, status
+  inboxWith(ENVS, { threads = { thread } })
+  row = hoverRow("t1")
+  assert(not row.snoozeAction.shown and row.settleAction.shown and row.settleAction.tip == "Settle thread", status .. " offers Snooze")
+end
+
+-- Waiting on a question: Snooze too, as in T3 0.18.0. The status stands where the age was until hovered.
 thread.set, thread.s = false, "waiting"
 inboxWith(ENVS, { threads = { thread } })
 row = hoverRow("t1")
-assert(not row.snoozeAction.shown and row.settleAction.shown and row.settleAction.tip == "Settle thread", "a thread that needs you offers Snooze")
+assert(row.snoozeAction.shown and row.snoozeAction.tip == "Snooze thread" and row.settleAction.tip == "Settle thread", "a question offers no Snooze")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+T3WoWDropdownList.rows[1].scripts.OnClick(T3WoWDropdownList.rows[1], "LeftButton")
+assert(sent().t == "snooze" and sent().id == "t1" and sent().mn == 60, "bad snooze of a question")
 assert(row.status.box.shown == false and row.age.hidden, "the actions didn't replace the status")
 row.IsMouseOver = function() return false end
 row.scripts.OnLeave(row)
@@ -2701,6 +2712,41 @@ thread.set = false
 inboxWith(ENVS, { threads = { thread } })
 row = hoverRow("t1")
 assert(not row.snoozeAction.glyph.shown and not row.snoozeAction.short.hidden, "no fallback")
+return "ok"
+`);
+});
+
+test("a thread snoozed with its question open sits under Snoozed saying Input, as in T3's sidebar", () => {
+  run(`
+local function header(label)
+  for _, f in ipairs(frames) do
+    if type(f.text) == "table" and type(f.text.text) == "string" and f.text.text:find(label, 1, true) then return f end
+  end
+end
+local function groupOf(id)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "thread") and f.thread.id == id and f.shown then return f end
+  end
+end
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, sn = true, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+assert(tostring(header("Snoozed").count.text) == "1", tostring(header("Snoozed").count.text))
+assert(not groupOf("t1"), "listed under Open while Snoozed is folded")
+header("Snoozed").scripts.OnClick(header("Snoozed"))
+local row = groupOf("t1")
+assert(row and row.status.label == "Input" and row.status.hexColor == "a5b4fc", row and row.status.label)
+row = hoverRow("t1")
+assert(row.snoozeAction.shown and row.snoozeAction.tip == "Wake thread", "no Wake on a snoozed question")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+assert(sent().t == "unsnooze" and sent().id == "t1", "bad wake")
+
+-- A newer question, or the wake time, brings it back to Open, still saying Input.
+thread.sn = nil
+inboxWith(ENVS, { threads = { thread } })
+header("Snoozed").scripts.OnClick(header("Snoozed"))
+row = groupOf("t1")
+assert(row and row.status.label == "Input", row and row.status.label)
+assert(tostring(header("Snoozed").count.text) == "0", "still counted under Snoozed")
 return "ok"
 `);
 });
