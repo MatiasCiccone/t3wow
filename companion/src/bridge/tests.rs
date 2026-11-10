@@ -3118,6 +3118,40 @@ fn what_a_machine_offers_goes_when_it_is_unlinked_or_the_t3_changes() {
 }
 
 #[test]
+fn a_model_named_in_a_message_reads_as_its_name_when_the_machine_has_it() {
+    let mut rig = Rig::new(43_500_000);
+    *rig.t3.capabilities.lock().unwrap() = capabilities();
+    let said = "Asking model:claudeAgent/claude-opus, not model:claudeAgent/gone or model:nobody/x.\n\n\
+                | Who | Why |\n|---|---|\n| model:codex/gpt-luna | `model:codex/gpt-luna` |";
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["delegate to model:codex/gpt-luna", said]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items[0]["x"], "delegate to gpt-luna");
+    assert_eq!(items[0]["cx"], "delegate to model:codex/gpt-luna", "copying keeps T3's text");
+    let x = str_of(&items[1]["x"]);
+    assert!(x.starts_with("Asking Claude Opus, not model:claudeAgent/gone or model:nobody/x."), "{x}");
+    assert!(str_of(&items[1]["cx"]).starts_with("Asking model:claudeAgent/claude-opus, not"), "{}", items[1]["cx"]);
+    // A table's cells are named too; code keeps the reference.
+    let table = items[1]["g"].as_array().unwrap().iter().find(|s| s["t"].is_array()).unwrap();
+    assert_eq!(table["t"][1], json!(["gpt-luna", "model:codex/gpt-luna"]));
+    assert!(!rig.bridge.snapshot().to_string().contains('\u{5}'), "a mark left in");
+}
+
+#[test]
+fn a_provider_says_its_driver_when_that_isnt_its_id() {
+    let capabilities = json!({ "providers": [
+        { "providerInstanceId": "claudeAgent", "driverKind": "claudeAgent", "displayName": "Claude", "constraints": [], "models": [{ "id": "a" }] },
+        { "providerInstanceId": "work", "driverKind": "claudeAgent", "displayName": "Work", "constraints": [], "models": [{ "id": "a" }] },
+    ] });
+    let providers = compact_providers(&capabilities);
+    assert!(providers[0]["dk"].is_null(), "the same as its id");
+    assert_eq!(providers[1]["dk"], "claudeAgent");
+}
+
+#[test]
 fn the_open_thread_says_what_it_runs_on_even_if_t3_wont_say_its_effort() {
     let mut rig = rig_with_catalog(43_000_000);
     {
