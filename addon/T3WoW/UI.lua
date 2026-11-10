@@ -2628,7 +2628,8 @@ function renderView()
                 placeMessage(fs, item.x, item.r == "u", item.g)
             end
             -- Copying takes the message's text, not its segments: the code with its markdown.
-            fs.hit.copyText = item.x
+            -- cx is that text with each model T3 names written as T3 has it (model:...).
+            fs.hit.copyText = item.cx or item.x
             -- A picture enlarges instead.
             fs.hit.picture = picture and item.im or false
             -- A row opens instead.
@@ -3008,6 +3009,8 @@ do
         end
         return cfg
     end
+
+    Selectors.ProvidersOn = providersOn
 
     -- The provider the message being written goes to, when that's known.
     function Selectors.Provider()
@@ -3465,7 +3468,7 @@ UI.SendCurrent = sendCurrent
 
 -- ---------------------------------------------------------------- the / $ and @ picker
 -- As in T3's composer: / at the start of a word lists the provider's commands and skills,
--- $ lists its skills, and @ lists your other machines. What you pick goes into the
+-- $ lists its skills, and @ lists your other machines and the machine's models. What you pick goes into the
 -- box as text, the way T3's own composer writes it, and T3 finds it there. MCP doesn't say what
 -- a provider offers, so inbox.picks comes from T3's cache on this PC ({ e = machine, pv =
 -- provider, c = { { n = name, d = description, c = runs as /name, s = runs as $name } } });
@@ -3571,7 +3574,8 @@ do
     local function parse(text)
         local token = text:match("(%S*)$")
         local mark, query = token:sub(1, 1), token:sub(2)
-        if not query:find("^[%w:_%.%-]*$") then return nil end
+        -- A / splits the words of a model query (@claude/opus), as in T3.
+        if not query:find(mark == "@" and "^[%w:/_%.%-]*$" or "^[%w:_%.%-]*$") then return nil end
         if mark == "$" or mark == "@" or mark == "/" then return mark, query, token, text:find("^%s*%S*$") ~= nil end
     end
 
@@ -3593,6 +3597,118 @@ do
         return found
     end
 
+    -- T3's score for one word against one field (searchRanking's scoreQueryMatch with the
+    -- model picker's bases, position ignored): lower is better, nil for no match.
+    local function fieldScore(field, word, base)
+        if field == "" then return nil end
+        if field == word then return base end
+        if field:sub(1, #word) == word then return base + 2 end
+        for _, marker in ipairs({ " ", "-", "_", "/" }) do
+            if field:find(marker .. word, 1, true) then return base + 4 end
+        end
+        if field:find(word, 1, true) then return base + 6 end
+        if #word < 3 then return nil end
+        -- In order, with gaps: three for each letter skipped between, one for the span.
+        local at, first, previous, gaps = 1, nil, nil, 0
+        for i = 1, #field do
+            if field:sub(i, i) == word:sub(at, at) then
+                first = first or i
+                if previous then gaps = gaps + i - previous - 1 end
+                previous, at = i, at + 1
+                if at > #word then return base + 100 + gaps * 3 + (i - first + 1 - #word) end
+            end
+        end
+    end
+
+    -- Whether word starts a word of text: at its start, or after something not a letter or digit.
+    local function startsWord(text, word)
+        local from = 1
+        while true do
+            local at = text:find(word, from, true)
+            if not at then return false end
+            local before = at > 1 and text:byte(at - 1)
+            if not before or (before < 128 and not string.char(before):find("%w")) then return true end
+            from = at + 1
+        end
+    end
+
+    -- A reference T3 would read back: an instance id as T3 makes them, a model id without
+    -- spaces, quotes, commas or the game's escape character.
+    local function referable(pv, id)
+        return type(pv) == "string" and pv:find("^%a[%w_%-]*$") ~= nil
+            and type(id) == "string" and id ~= "" and not id:find("[%s,\"'|]")
+    end
+
+    -- The models of a machine's providers (inbox.models) an @ query asks for, best first, at
+    -- most MAX_ROWS: { pv, id, name, provider }. Pure, for the tests.
+    function Picker.Models(providers, query)
+        local trim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+        local spaced = trim(query:gsub("[:/]+", " "))
+        local unhyphenated = trim(spaced:gsub("%-+", " "))
+        if #unhyphenated:gsub("%s+", "") < 2 then return {} end
+        local candidates = {}
+        for _, p in ipairs(providers or {}) do
+            for _, model in ipairs(type(p) == "table" and type(p.m) == "table" and p.m or {}) do
+                if referable(p.id, model.id) then
+                    local name = tostring(model.t or model.id):gsub("||", "|")
+                    candidates[#candidates + 1] = {
+                        pv = p.id, id = model.id, name = tostring(model.t or model.id), provider = tostring(p.t or p.id),
+                        fields = { name:lower(), tostring(p.dk or p.id):lower(), tostring(p.t or p.id):gsub("||", "|"):lower() },
+                    }
+                end
+            end
+        end
+        for _, words in ipairs(unhyphenated == spaced and { spaced } or { spaced, unhyphenated }) do
+            local list = {}
+            for w in words:lower():gmatch("%S+") do list[#list + 1] = w end
+            local ranked = {}
+            for order, c in ipairs(candidates) do
+                local haystack = table.concat(c.fields, " ")
+                local fields = { c.fields[1], c.fields[2], c.fields[3], haystack }
+                local literal = true
+                for _, w in ipairs(list) do literal = literal and startsWord(haystack, w) end
+                if literal then
+                    local score = 0
+                    if table.concat(list, " ") == c.fields[1]:gsub("%s+", " ") then
+                        score = -1000
+                    else
+                        for _, w in ipairs(list) do
+                            local best
+                            for index, field in ipairs(fields) do
+                                local s = fieldScore(field, w, (index - 1) * 10)
+                                if s and (not best or s < best) then best = s end
+                            end
+                            score = score + best
+                        end
+                    end
+                    c.score, c.order = score, order
+                    ranked[#ranked + 1] = c
+                end
+            end
+            if #ranked > 0 then
+                table.sort(ranked, function(a, b)
+                    if a.score ~= b.score then return a.score < b.score end
+                    return a.order < b.order
+                end)
+                for index = #ranked, MAX_ROWS + 1, -1 do ranked[index] = nil end
+                return ranked
+            end
+        end
+        return {}
+    end
+
+    -- The thread's machine's models for an @ query, best first, as T3 0.18 ranks them
+    -- (composer-model-mentions): every word typed starts a word of the model's or provider's
+    -- name, and two letters at least. A pick writes model:<instance>/<model>, which names a
+    -- model for the agent and switches nothing.
+    local function models(query)
+        local list = Picker.Models(Selectors.ProvidersOn(selected.env), query)
+        for _, m in ipairs(list) do
+            m.text, m.insert, m.note = m.name, "model:" .. m.pv .. "/" .. m.id, m.provider
+        end
+        return list
+    end
+
     -- Says whether it was open.
     function Picker.Close()
         local was = list:IsShown()
@@ -3608,6 +3724,13 @@ do
         if not userInput or not selected or pendingAsk() or away then return Picker.Close() end
         local mark, query, token, leading = parse(text)
         local found = mark and matching(candidates(mark, leading), query) or {}
+        if mark == "@" then
+            -- Machines first, then models, as in T3.
+            for _, m in ipairs(models(query)) do
+                if #found >= MAX_ROWS then break end
+                found[#found + 1] = m
+            end
+        end
         if #found == 0 then return Picker.Close() end
         shown, active, tokenBytes, owner = found, 1, #token, Paste.DraftKey()
         for index = 1, #shown do row(index) end
@@ -3641,7 +3764,7 @@ do
         end
         -- Insert leaves the cursor after it; a SetText might not.
         input:SetText("")
-        input:Insert(text:sub(1, #text - tokenBytes) .. item.text .. " ")
+        input:Insert(text:sub(1, #text - tokenBytes) .. (item.insert or item.text) .. " ")
         input:SetFocus()
         return true
     end

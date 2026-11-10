@@ -3002,6 +3002,123 @@ return "ok"
 `);
 });
 
+// What each machine offers, as inbox.models carries it, for @'s models.
+const MODEL_MENTIONS = `
+MODELS = {
+  { e = 1, id = "claudeAgent", t = "Claude", m = {
+    { id = "claude-opus-5-5", t = "Claude Opus 5.5" }, { id = "claude-haiku-5-5", t = "Claude Haiku 5.5" }, { id = "mach-1", t = "Mach 1" },
+  } },
+  { e = 1, id = "work", dk = "codex", t = "Work", m = { { id = "gpt-6.1-sol", t = "GPT-6.1 Sol" } } },
+  { e = 2, id = "codex", t = "Codex", m = { { id = "gpt-6-luna", t = "GPT-6 Luna" } } },
+}
+function openWithModels(index)
+  local t = THREADS[index]
+  inboxWith(ENVS, { sel = true, threads = THREADS, models = MODELS })
+  UI.Select({ e = t.e, id = t.id })
+  inboxWith(ENVS, { sel = true, threads = THREADS, models = MODELS, view = { e = t.e, id = t.id, t = t.t, s = "completed", items = {} } })
+end
+function notes()
+  local out = {}
+  for _, f in ipairs(pickerRows()) do out[#out + 1] = f.note:GetText() end
+  return table.concat(out, ",")
+end
+`;
+
+test("@ offers the thread's machine's models as T3 does, after the machines, and writes T3's reference", () => {
+  run(PICKER_HELPERS + MODEL_MENTIONS + `
+openWithModels(1)
+-- One letter lists machines only; two start a word of the model's or provider's name.
+write("@c")
+assert(listed() == "@Mac", "a model for one letter: " .. listed())
+write("@cl")
+assert(listed() == "Claude Opus 5.5 Claude Haiku 5.5 Mach 1" and notes() == "Claude,Claude,Claude", listed() .. " / " .. notes())
+write("@op")
+assert(listed() == "Claude Opus 5.5", listed())
+-- The middle of a word doesn't count: not "agent" in claudeAgent, nor "pus" in Opus.
+write("@agent")
+assert(not T3WoWPicker.shown, "matched inside a word: " .. listed())
+write("@pus")
+assert(not T3WoWPicker.shown, "matched inside a word: " .. listed())
+-- Only this machine's: the Mac's GPT-6 Luna isn't here. The driver's name counts.
+write("@luna")
+assert(not T3WoWPicker.shown, "another machine's model: " .. listed())
+write("@codex")
+assert(listed() == "GPT-6.1 Sol" and notes() == "Work", listed())
+-- : / and - split words, as in T3; whole words first.
+write("@claude:haiku")
+assert(listed() == "Claude Haiku 5.5", listed())
+write("@claude-haiku")
+assert(listed() == "Claude Haiku 5.5", listed())
+write("@claude/op")
+assert(listed() == "Claude Opus 5.5", listed())
+-- A machine that matches comes first.
+write("@ma")
+assert(listed() == "@Mac Mach 1" and notes() == "Machine,Claude", listed())
+
+-- Picking writes the reference T3 reads; it names the model and switches nothing.
+write("ask @op")
+press("OnEnterPressed")
+assert(typed() == "ask model:claudeAgent/claude-opus-5-5 ", typed())
+assert(not T3WoWPicker.shown and #queue() == 0, "picking isn't sending")
+typeText("ask model:claudeAgent/claude-opus-5-5 to review")
+press("OnEnterPressed")
+local s = sent()
+assert(s.t == "send" and s.m == "ask model:claudeAgent/claude-opus-5-5 to review" and s.pv == nil and s.md == nil, s.m)
+
+-- A thread on the Mac offers the Mac's models, though not the other machines.
+openWithModels(2)
+write("@lu")
+assert(listed() == "GPT-6 Luna" and notes() == "Codex", listed())
+press("OnTabPressed")
+assert(typed() == "model:codex/gpt-6-luna ", typed())
+return "ok"
+`);
+});
+
+test("@'s models rank as T3's: an exact name first, then a name's word ahead of a provider's", () => {
+  run(PICKER_HELPERS + `
+local providers = {
+  { id = "labs", t = "Luna Labs", m = { { id = "star", t = "Star" } } },
+  { id = "codex", t = "Codex", m = { { id = "gpt-6-luna", t = "GPT-6 Luna" }, { id = "luna", t = "Luna" } } },
+  { id = "bad id", t = "Bad", m = { { id = "luna-x", t = "Luna X" } } },
+  { id = "codex2", t = "Codex", m = { { id = "has space", t = "Luna Space" } } },
+}
+local function names(query)
+  local out = {}
+  for _, m in ipairs(UI.Picker.Models(providers, query)) do out[#out + 1] = m.name end
+  return table.concat(out, ",")
+end
+assert(names("luna") == "Luna,GPT-6 Luna,Star", names("luna"))
+assert(names("lu") == "Luna,GPT-6 Luna,Star", names("lu"))
+assert(names("labs") == "Star", names("labs"))
+assert(names("l") == "", "one letter")
+assert(names("gpt-6") == "GPT-6 Luna", names("gpt-6"))
+-- At most eight.
+local many = { id = "p", t = "P", m = {} }
+for i = 1, 12 do many.m[i] = { id = "m" .. i, t = "Model " .. i } end
+assert(#UI.Picker.Models({ many }, "model") == 8, "more than eight")
+return "ok"
+`);
+});
+
+test("a model a message names reads as its name, and copying keeps T3's reference", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local ENVS = { { id = "local", name = "PC", ok = true } }
+local items = { { r = "u", x = "ask Claude Opus 5.5 to review", cx = "ask model:claudeAgent/claude-opus-5-5 to review" }, { r = "a", x = "Plain" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local hit, plain
+for _, f in ipairs(frames) do
+  if f.kind == "Button" and f.shown and rawget(f, "copyText") == items[1].cx then hit = f end
+  if f.kind == "Button" and f.shown and rawget(f, "copyText") == "Plain" then plain = f end
+end
+assert(hit and plain, "copying doesn't take T3's text")
+assert(shownString("^ask Claude Opus 5%.5 to review$"), "the message doesn't show the model's name")
+return "ok"
+`);
+});
+
 test("without the companion's list only machines are offered, and refilling the box opens nothing", () => {
   run(PICKER_HELPERS + `
 inboxWith(ENVS, { threads = THREADS })

@@ -144,6 +144,7 @@ fn inline(line: &str, code: &str) -> String {
     });
     let l = p.bold.replace_all(&l, "$1");
     let l = p.under.replace_all(&l, "$1");
+    let l = mark_models(&l);
     let l = p.span.replace_all(&l, |c: &regex::Captures| match c[1].parse::<usize>().ok().and_then(|n| spans.get(n)) {
         Some(span) => code.replace("$1", span),
         None => c[0].to_string(),
@@ -174,7 +175,7 @@ fn color_runs(text: &str, color: &str) -> String {
 /// literal pipes are doubled before any color codes are added.
 pub fn wow_text(markdown: &str, max_length: usize) -> String {
     let p = patterns();
-    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace(LINK_MARK, "");
+    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([LINK_MARK, MODEL_MARK], "");
     if text.chars().count() > max_length {
         text = text.chars().take(max_length).collect::<String>() + "\n…";
     }
@@ -218,6 +219,92 @@ pub fn name_thread_links(text: &str, name: impl Fn(&str, &str) -> String) -> Str
         } else {
             let (env, thread) = part.split_once('/').unwrap_or(("", part));
             out.push_str(&name(env, thread));
+        }
+    }
+    out
+}
+
+/// Marks around a `model:<instance>/<model>` reference in prose and table cells, as T3 0.18
+/// writes one to name a model for the agent: the bridge puts the model's name in its place
+/// when the machine has that provider and model (`name_model_refs`), else the reference as
+/// written. T3's text can't hold them: they are taken out of it first.
+pub const MODEL_MARK: char = '\u{5}';
+
+/// The text with each `model:<instance>/<model>` reference marked (see MODEL_MARK), found as
+/// T3's composer-model-mentions finds them: at the start or after a space, comma, bracket or
+/// quote; an instance id as T3 makes them; a model running to a space, comma or quote,
+/// without the sentence punctuation or unbalanced closing bracket that ends it.
+fn mark_models(text: &str) -> String {
+    const PREFIX: &str = "model:";
+    if !text.contains(PREFIX) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let (mut rest, mut from) = (0, 0);
+    while let Some(found) = text[from..].find(PREFIX) {
+        let start = from + found;
+        from = start + PREFIX.len();
+        let starts = text[..start].chars().next_back().is_none_or(|c| c.is_whitespace() || ",([\"'".contains(c));
+        let after = &text[from..];
+        let instance = after
+            .char_indices()
+            .take_while(|&(i, c)| if i == 0 { c.is_ascii_alphabetic() } else { c.is_ascii_alphanumeric() || c == '_' || c == '-' })
+            .count();
+        if !starts || instance == 0 || !after[instance..].starts_with('/') {
+            continue;
+        }
+        let slug_from = instance + 1;
+        let slug_len: usize = after[slug_from..]
+            .chars()
+            .take_while(|&c| !c.is_whitespace() && !c.is_control() && !",\"'".contains(c))
+            .map(char::len_utf8)
+            .sum();
+        let slug = trim_model_slug(&after[slug_from..slug_from + slug_len]);
+        if slug.is_empty() {
+            continue;
+        }
+        let end = from + slug_from + slug.len();
+        out.push_str(&text[rest..start]);
+        out.push(MODEL_MARK);
+        out.push_str(&text[start..end]);
+        out.push(MODEL_MARK);
+        (rest, from) = (end, end);
+    }
+    out.push_str(&text[rest..]);
+    out
+}
+
+/// A model slug without what ends the sentence around it: `.;:!?`, or a `)` or `]` it
+/// doesn't open itself (`foo(bar)` keeps its own).
+fn trim_model_slug(slug: &str) -> &str {
+    let mut trimmed = slug;
+    while let Some(last) = trimmed.chars().next_back() {
+        let opening = match last {
+            ')' => Some('('),
+            ']' => Some('['),
+            _ => None,
+        };
+        let unbalanced = opening.is_some_and(|o| trimmed.matches(o).count() < trimmed.matches(last).count());
+        if !".;:!?".contains(last) && !unbalanced {
+            break;
+        }
+        trimmed = &trimmed[..trimmed.len() - last.len_utf8()];
+    }
+    trimmed
+}
+
+/// Text with each marked model reference (see MODEL_MARK) put as `name` says for its
+/// instance and model, or as written when `name` gives None.
+pub fn name_model_refs(text: &str, name: impl Fn(&str, &str) -> Option<String>) -> String {
+    if !text.contains(MODEL_MARK) {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for (n, part) in text.split(MODEL_MARK).enumerate() {
+        let reference = part.strip_prefix("model:").and_then(|r| r.split_once('/'));
+        match reference.filter(|_| n % 2 == 1).and_then(|(instance, model)| name(instance, model)) {
+            Some(named) => out.push_str(&named),
+            None => out.push_str(part),
         }
     }
     out
@@ -293,7 +380,7 @@ fn table_at(lines: &[&str], at: usize) -> Option<(Value, usize)> {
 /// code and no table: its `wow_text` draws it the same.
 pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
     let p = patterns();
-    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE, LINK_MARK], "");
+    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE, LINK_MARK, MODEL_MARK], "");
     if text.chars().count() > max_length {
         text = text.chars().take(max_length).collect::<String>() + "\n…";
     }
@@ -391,6 +478,30 @@ mod tests {
         assert_eq!(segments, vec![json!(format!("in {marked} and {CODE_OPEN}code{CODE_CLOSE}"))]);
         let named = name_thread_links(&format!("in {marked}, then"), |env, thread| format!("[{env}|{thread}]"));
         assert_eq!(named, "in [e1|thread:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1], then");
+    }
+
+    #[test]
+    fn model_references_are_marked_as_t3_finds_them_and_code_keeps_them() {
+        let m = |s: &str| format!("{MODEL_MARK}{s}{MODEL_MARK}");
+        let opus = m("model:claudeAgent/claude-opus-5-5");
+        assert_eq!(wow_text("ask model:claudeAgent/claude-opus-5-5 to review", 6000), format!("ask {opus} to review"));
+        // Sentence punctuation and a bracket the slug doesn't open end it; its own stay.
+        assert_eq!(wow_text("use model:claudeAgent/claude-opus-5-5.", 6000), format!("use {opus}."));
+        assert_eq!(wow_text("(model:claudeAgent/claude-opus-5-5)", 6000), format!("({opus})"));
+        assert_eq!(wow_text("model:x/GPT-6.1-Sol[1m], then", 6000), format!("{}, then", m("model:x/GPT-6.1-Sol[1m]")));
+        assert_eq!(wow_text("\"model:opencode/anthropic/opus\"", 6000), format!("\"{}\"", m("model:opencode/anthropic/opus")));
+        // Only after a space, comma, bracket or quote; an instance starts with a letter.
+        assert_eq!(wow_text("mymodel:a/b and model:1a/b and model:a/", 6000), "mymodel:a/b and model:1a/b and model:a/");
+        // Code keeps it as written.
+        assert_eq!(wow_text("`model:a/b`", 6000), format!("{CODE}model:a/b|r"));
+        assert_eq!(wow_segments("run `x` on model:a/b", 6000), vec![json!(format!("run {CODE_OPEN}x{CODE_CLOSE} on {}", m("model:a/b")))]);
+        // T3's text can't hold the mark.
+        assert_eq!(wow_text("a \u{5}b", 6000), "a b");
+
+        let named = name_model_refs(&format!("ask {opus} or {}.", m("model:claudeAgent/gone")), |instance, model| {
+            (instance == "claudeAgent" && model == "claude-opus-5-5").then(|| "Claude Opus 5.5".to_string())
+        });
+        assert_eq!(named, "ask Claude Opus 5.5 or model:claudeAgent/gone.", "one the machine lacks stays as written");
     }
 
     #[test]

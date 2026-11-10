@@ -5,7 +5,7 @@
 use crate::clip::{self, Clipped};
 use crate::codec::decode_cells;
 use crate::config::Trust;
-use crate::lua::{name_thread_links, plain, to_lua, wow_segments, wow_text};
+use crate::lua::{name_model_refs, name_thread_links, plain, to_lua, wow_segments, wow_text, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::t3::{T3Error, T3};
@@ -319,6 +319,12 @@ fn compact_providers(capabilities: &Value) -> Vec<Value> {
         let id = str_of(&provider["providerInstanceId"]);
         let name = provider["displayName"].as_str().unwrap_or(id);
         let mut entry = json!({ "id": id, "t": plain(name, 40), "m": models });
+        // The game's @ finds models by their driver's name too, as T3 does; said only when
+        // it isn't the instance's id.
+        let driver = str_of(&provider["driverKind"]);
+        if !driver.is_empty() && driver != id {
+            entry["dk"] = json!(driver);
+        }
         // Left out when the provider takes every mode.
         if provider["runtimeModes"].is_array() {
             entry["rm"] = provider["runtimeModes"].clone();
@@ -397,6 +403,18 @@ const MODEL_NAMES: [(&str, &str); 10] = [
 /// that's new to this version still shows.
 fn model_text<'a>(id: &'a str, label: Option<&'a str>) -> &'a str {
     MODEL_NAMES.iter().find(|(known, _)| *known == id).map(|(_, name)| *name).or(label).unwrap_or(id)
+}
+
+/// The name a `model:<instance>/<model>` reference reads as, when the machine has that
+/// provider and model (`compact_providers`): game markup, or plain text for a table cell.
+/// None leaves the reference as written, as T3 does with one it can't resolve.
+fn model_ref_name(providers: &[Value], instance: &str, model: &str, cell: bool) -> Option<String> {
+    // In game markup the reference has its pipes doubled; the machine's ids don't.
+    let model = if cell { model.to_string() } else { model.replace("||", "|") };
+    let provider = providers.iter().find(|p| p["id"] == instance)?;
+    let entry = provider["m"].as_array()?.iter().find(|m| m["id"] == model.as_str())?;
+    let name = str_of(&entry["t"]);
+    (!name.is_empty()).then(|| if cell { name.replace("||", "|") } else { name.to_string() })
 }
 
 /// What the open thread runs on, for the game: T3's read of its settings, else what the
@@ -3996,16 +4014,34 @@ impl Bridge {
                 None => "a thread".to_string(),
             }
         };
-        fn walk(value: &mut Value, name: &dyn Fn(&str, &str) -> String) {
+        let providers = self.catalogs.get(&read.view.env).map_or(&[][..], |c| c.providers.as_slice());
+        let model = |cell: bool| move |instance: &str, model: &str| model_ref_name(providers, instance, model, cell);
+        let (prose, cells) = (model(false), model(true));
+        // A table's rows ({ t = rows }) are plain text, the rest game markup.
+        fn walk(value: &mut Value, name: &dyn Fn(&str, &str) -> String, model: &dyn Fn(&str, &str) -> Option<String>, cells: &dyn Fn(&str, &str) -> Option<String>) {
             match value {
-                Value::String(text) => *text = name_thread_links(text, name),
-                Value::Array(list) => list.iter_mut().for_each(|v| walk(v, name)),
-                Value::Object(map) => map.values_mut().for_each(|v| walk(v, name)),
+                Value::String(text) => *text = name_model_refs(&name_thread_links(text, name), model),
+                Value::Array(list) => list.iter_mut().for_each(|v| walk(v, name, model, cells)),
+                Value::Object(map) => {
+                    for (key, v) in map.iter_mut() {
+                        let table = key == "t" && v.is_array();
+                        walk(v, name, if table { cells } else { model }, cells);
+                    }
+                }
                 _ => {}
             }
         }
         for item in items {
-            walk(item, &name);
+            // Copying keeps each model T3 names as T3 has it (model:...), which the view
+            // shows by name.
+            let marked = item["x"].as_str().filter(|x| x.contains(MODEL_MARK)).map(str::to_string);
+            walk(item, &name, &prose, &cells);
+            if let Some(text) = marked {
+                let copy = name_thread_links(&name_model_refs(&text, |_, _| None), name);
+                if item["x"] != copy.as_str() {
+                    item["cx"] = json!(copy);
+                }
+            }
         }
     }
 
@@ -4085,7 +4121,8 @@ impl Bridge {
             questions.push(PendingQuestion { key, labels: options.iter().map(|o| str_of(&o["label"]).to_string()).collect(), multi });
             shown.push(json!({
                 "h": plain(str_of(&q["header"]), 40),
-                "q": wow_text(text, 1000),
+                // Not in the view, which names models: a model reference stays as written.
+                "q": name_model_refs(&wow_text(text, 1000), |_, _| None),
                 "m": multi,
                 "o": options.iter().map(|o| json!({ "l": plain(str_of(&o["label"]), 60), "d": plain(str_of(&o["description"]), 160) })).collect::<Vec<_>>(),
             }));
