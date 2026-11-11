@@ -3150,6 +3150,27 @@ return "ok"
 `);
 });
 
+test("a message that names a model stops showing '(sending)' once T3 has it, though the view shows the model's name", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local ENVS = { { id = "local", name = "PC", ok = true } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Hi" } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+typeText("Which model is model:claudeAgent/claude-opus-5-5 ? Say it")
+click("Send")
+local s = sent().s
+assert(shownString("%(sending%)"), "no echo")
+assert(showing("Sending…"), "no Sending… while it goes")
+local items = { view.items[1], { r = "u", x = "Which model is Claude Opus 5.5 ? Say it", cx = "Which model is model:claudeAgent/claude-opus-5-5 ? Say it" } }
+inboxWith(ENVS, { ack = s, threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "running", items = items } })
+assert(shownString("^Which model is Claude Opus 5%.5 %? Say it$"), "the message isn't in")
+assert(not shownString("%(sending%)"), "echo still there")
+assert(not showing("Sending…"), "Sending… still there")
+return "ok"
+`);
+});
+
 test("without the companion's list only machines are offered, and refilling the box opens nothing", () => {
   run(PICKER_HELPERS + `
 inboxWith(ENVS, { threads = THREADS })

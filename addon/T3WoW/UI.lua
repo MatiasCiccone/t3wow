@@ -2662,13 +2662,15 @@ function renderView()
     if echo and echo.id == selected.id then
         -- Your message is in once any recent message of yours matches it: the agent may
         -- already have answered, so it needn't be the last one. Compare letters and digits
-        -- only, since the thread view reformats text (markdown, escaped pipes).
+        -- only, since the thread view reformats text (markdown, escaped pipes). A message that
+        -- names a model shows its name; its copy text (cx) has the model:... you typed.
         local function key(text)
             return (text or ""):gsub("||", ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("[^%w]", ""):lower():sub(1, 40)
         end
         local wanted, arrived = key(echo.text), false
         for i = count, math.max(1, count - 7), -1 do
-            if items[i].r == "u" and key(items[i].x) == wanted then arrived = true break end
+            local item = items[i]
+            if item.r == "u" and (key(item.x) == wanted or (item.cx and key(item.cx) == wanted)) then arrived = true break end
         end
         if arrived then
             echo = nil
