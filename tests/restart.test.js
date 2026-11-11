@@ -5,12 +5,14 @@ import { test } from "node:test";
 import { runGame } from "./game.js";
 
 // The game loaded the addon as `loaded` (nil: the client doesn't say). `inbox(av)` hands the
-// window an update from the companion, with `av` left out when nil.
+// window an update from the companion, with `av` left out when nil. The companion is the
+// addon's own version, so it isn't out of date (companion.test.js).
 const run = (script, loaded = "0.5.0") =>
   runGame(
     `
 function inbox(av)
-  UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), av = av })
+  UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), av = av,
+    cv = "${loaded ?? "0.5.0"}" })
 end
 function restartLines()
   local n = 0

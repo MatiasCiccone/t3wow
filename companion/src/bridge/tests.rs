@@ -2212,6 +2212,16 @@ fn the_game_learns_which_addon_version_is_on_disk() {
     assert!(rig.slot(2).contains("av=\"0.7.0\""), "{}", rig.slot(2));
 }
 
+#[test]
+fn the_game_learns_the_companion_version() {
+    // In every update, so the game can tell the companion is older than the addon.
+    let mut rig = Rig::new(30_000_000);
+    assert_eq!(rig.bridge.snapshot()["cv"], crate::updater::current_version());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    assert!(rig.slot(1).contains(&format!("cv=\"{}\"", crate::updater::current_version())), "{}", rig.slot(1));
+}
+
 /// `n` settled threads, newest first.
 fn settled_threads(n: usize) -> Vec<Value> {
     (0..n)

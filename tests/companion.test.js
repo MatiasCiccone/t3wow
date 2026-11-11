@@ -1,0 +1,137 @@
+// The window and chat say to update the companion when it is older than the addon: the
+// two are released together under one version, so CurseForge can update the addon and
+// leave the companion behind. The companion names its version in each update (inbox.cv);
+// one from before it did leaves it out.
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { runGame } from "./game.js";
+
+// The game loaded the addon as `loaded` (nil: the client doesn't say). `inbox(cv, u)` hands
+// the window an update from the companion (`cv` left out when nil), written for this UI
+// session unless `u` says otherwise.
+const run = (script, loaded = "0.9.2") =>
+  runGame(
+    `
+function inbox(cv, u)
+  UI.OnInbox({ k = "c1", u = u or Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = cv })
+end
+function companionLines()
+  local n = 0
+  for _, line in ipairs(printed) do if line:find("update it from its tray menu", 1, true) then n = n + 1 end end
+  return n
+end
+Link.Init()
+UI.Toggle()
+${script}`,
+    {
+      ui: true,
+      before: loaded
+        ? `C_AddOns.GetAddOnMetadata = function(name, field) if name == "T3WoW" and field == "Version" then return "${loaded}" end end`
+        : "",
+    },
+  );
+
+test("an older companion shows on the pill and once in chat", () => {
+  assert.equal(
+    run(`
+inbox("0.9.1")
+assert(showing("^|cffff8000T3 WoW companion 0%.9%.1 is older than this addon %(0%.9%.2%): update it from its tray menu|r$"), "the pill doesn't say it")
+assert(companionLines() == 1, "chat lines: " .. companionLines())
+assert(printed[#printed]:find("Check for updates", 1, true), printed[#printed])
+inbox("0.9.1")
+inbox("0.9.1")
+assert(showing("is older than this addon"), "the note went away")
+assert(companionLines() == 1, "chat lines: " .. companionLines())
+-- Updated (it restarts on the new version): the pill is back to Connected.
+inbox("0.9.2")
+assert(showing("^|cff40c040Connected|r$"), "not connected after the update")
+return "ok"
+`),
+    "ok",
+  );
+});
+
+test("a companion from before it named its version is older too", () => {
+  assert.equal(
+    run(`
+inbox(nil)
+assert(showing("^|cffff8000The T3 WoW companion is older than this addon %(0%.9%.2%): update it from its tray menu|r$"), "the pill doesn't say it")
+assert(companionLines() == 1, "chat lines: " .. companionLines())
+return "ok"
+`),
+    "ok",
+  );
+});
+
+test("a companion from before it named the UI session (0.4.1) is older too", () => {
+  assert.equal(
+    run(`
+UI.OnInbox({ k = "c1", ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time() })
+assert(showing("^|cffff8000The T3 WoW companion is older than this addon"), "the pill doesn't say it")
+assert(companionLines() == 1, "chat lines: " .. companionLines())
+return "ok"
+`),
+    "ok",
+  );
+});
+
+test("the same or a newer companion, or one with a build label, shows nothing", () => {
+  for (const cv of ["0.9.2", "0.9.2.0", "0.9.3", "0.10.0", "1.0", "0.9.2-dev", "0.9.2+abc1234"]) {
+    assert.equal(
+      run(`
+inbox("${cv}")
+assert(showing("^|cff40c040Connected|r$"), "not connected with ${cv}")
+assert(companionLines() == 0, "chat lines: " .. companionLines())
+return "ok"
+`),
+      "ok",
+      cv,
+    );
+  }
+});
+
+test("versions compare as numbers, part by part, and a build label doesn't hide an older one", () => {
+  assert.equal(run(`inbox("0.9.10") return tostring(showing("is older than this addon"))`, "0.10.0"), "true");
+  assert.equal(run(`inbox("0.9.1-dev") return tostring(showing("is older than this addon"))`), "true");
+});
+
+test("an update left from an earlier UI session doesn't count, nor an odd version", () => {
+  assert.equal(
+    run(`
+inbox(nil, "an earlier session")
+inbox("next")
+assert(not showing("is older than this addon"), "a note")
+assert(companionLines() == 0, "chat lines: " .. companionLines())
+return "ok"
+`),
+    "ok",
+  );
+});
+
+test("without its own version the addon says nothing", () => {
+  assert.equal(
+    run(
+      `
+inbox("0.0.1")
+inbox(nil)
+assert(not showing("is older than this addon"), "a note")
+assert(companionLines() == 0, "chat lines: " .. companionLines())
+return "ok"
+`,
+      null,
+    ),
+    "ok",
+  );
+});
+
+test("a newer addon on disk comes first: restart WoW, then update the companion", () => {
+  assert.equal(
+    run(`
+UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), av = "0.9.3", cv = "0.9.1" })
+assert(showing("restart WoW to load it"), "no restart note")
+assert(not showing("is older than this addon"), "the companion note hides the restart one")
+return "ok"
+`),
+    "ok",
+  );
+});
