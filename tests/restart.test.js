@@ -107,10 +107,53 @@ return "ok"
   assert.equal(
     run(`
 inbox("next")
-inbox("0.6.0-beta")
+inbox("v0.6.0")
 assert(not showing("restart WoW"), "a restart note")
 return "ok"
 `),
+    "ok",
+  );
+});
+
+test("a test build counts as the release it was built from, and another build of it needs a restart", () => {
+  // Loaded a test build: the companion now has another build, or the release, on disk.
+  for (const av of ["0.9.1-dev+0123abc", "0.9.1", "0.9.2-dev+0123abc"]) {
+    assert.equal(
+      run(
+        `
+inbox("${av}")
+assert(showing("T3 WoW ${av.replace(/[.+-]/g, "%$&")} is installed: restart WoW"), "no note for ${av}")
+return "ok"
+`,
+        "0.9.1-dev+57ee2ec",
+      ),
+      "ok",
+    );
+  }
+  // The same build, or an older release: nothing to load.
+  for (const av of ["0.9.1-dev+57ee2ec", "0.9.0", "0.9.0-dev+0123abc"]) {
+    assert.equal(
+      run(
+        `
+inbox("${av}")
+assert(not showing("restart WoW"), "a restart note for ${av}")
+return "ok"
+`,
+        "0.9.1-dev+57ee2ec",
+      ),
+      "ok",
+    );
+  }
+  // Loaded the release; the companion put a test build of it on disk.
+  assert.equal(
+    run(
+      `
+inbox("0.9.1-dev+57ee2ec")
+assert(showing("restart WoW to load it"), "no note")
+return "ok"
+`,
+      "0.9.1",
+    ),
     "ok",
   );
 });

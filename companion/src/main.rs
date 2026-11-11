@@ -30,6 +30,10 @@ use config::Config;
 use slots::Slots;
 use std::path::PathBuf;
 
+/// This build's version: "0.9.1" from the release workflow, "0.9.1-dev+57ee2ec" from any
+/// other build (see build.rs). Shown wherever the companion or the addon says its version.
+pub const VERSION: &str = env!("T3WOW_VERSION");
+
 pub fn message_box(title: &str, text: &str) {
     #[cfg(windows)]
     unsafe {
@@ -226,7 +230,7 @@ fn main() {
                 message_box("T3 WoW", "T3 WoW is already running. Look for its icon in the system tray (next to the clock).");
                 return;
             }
-            log::line(&format!("T3 WoW companion {} starting", env!("CARGO_PKG_VERSION")));
+            log::line(&format!("T3 WoW companion {} starting", crate::VERSION));
             updater::clean_up();
             let app = app::App::new();
             let worker = app.clone();

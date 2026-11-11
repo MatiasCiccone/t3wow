@@ -60,7 +60,7 @@ fn http() -> ureq::Agent {
         ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_global(Some(Duration::from_secs(120)))
-            .user_agent(format!("t3wow-companion/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("t3wow-companion/{}", crate::VERSION))
             .http_status_as_error(false)
             .build(),
     )
@@ -71,7 +71,20 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate::VERSION
+}
+
+/// What to say when no release is newer than this companion. A test build
+/// ("0.9.1-dev+57ee2ec") isn't a release itself, so it doesn't say it's the newest one.
+pub fn up_to_date_text() -> String {
+    up_to_date_for(current_version())
+}
+
+fn up_to_date_for(current: &str) -> String {
+    match current.split_once(['-', '+']) {
+        Some((release, _)) => format!("You have {current}, a test build: no release is newer than {release}."),
+        None => format!("You have {current}, the newest release."),
+    }
 }
 
 /// The newest release if it is newer than this companion. Ok(None): up to date, or no
@@ -383,6 +396,15 @@ mod tests {
             partial["assets"].as_array_mut().unwrap().retain(|a| a["name"] != missing);
             assert_eq!(newer_release(&partial, "0.3.0", true), Err(format!("release 1.0.0 has no {missing}, so it can't be installed")));
         }
+    }
+
+    #[test]
+    fn a_test_build_compares_as_the_release_it_was_built_from() {
+        assert_eq!(newer_release(&release("v0.9.1"), "0.9.1-dev+57ee2ec", true), Ok(None));
+        assert_eq!(newer_release(&release("v0.9.1"), "0.9.1-dev+57ee2ec.dirty", true), Ok(None));
+        assert_eq!(newer_release(&release("v0.9.2"), "0.9.1-dev+57ee2ec", true).unwrap().unwrap().version, "0.9.2");
+        assert_eq!(up_to_date_for("0.9.1"), "You have 0.9.1, the newest release.");
+        assert_eq!(up_to_date_for("0.9.1-dev+57ee2ec"), "You have 0.9.1-dev+57ee2ec, a test build: no release is newer than 0.9.1.");
     }
 
     #[test]

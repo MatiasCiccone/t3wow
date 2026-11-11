@@ -3910,23 +3910,30 @@ local getMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
 local LOADED_VERSION = getMetadata and getMetadata(addonName, "Version")
 local restartSaid = false -- said in chat this UI session
 
+-- A test build's label ("0.9.1-dev+57ee2ec") doesn't count here: it is 0.9.1.
 local function versionNumbers(v)
-    if type(v) ~= "string" or not v:find("^%d+[%d%.]*$") then return nil end
+    if type(v) ~= "string" then return nil end
+    local core = v:match("^(%d+[%d%.]*)$") or v:match("^(%d+[%d%.]*)[-+]")
+    if not core then return nil end
     local numbers = {}
-    for n in v:gmatch("%d+") do numbers[#numbers + 1] = tonumber(n) end
+    for n in core:gmatch("%d+") do numbers[#numbers + 1] = tonumber(n) end
     return numbers
 end
 
--- What to say when the addon on disk is newer than this one (nil otherwise).
+-- What to say when the addon on disk is newer than this one, or another build of the same
+-- version (the companion put its own build there), nil otherwise.
 local function restartNote()
     local disk, loaded = versionNumbers(inbox and inbox.av), versionNumbers(LOADED_VERSION)
     if not disk or not loaded then return nil end
+    local note = format("T3 WoW %s is installed: restart WoW to load it (/reload isn't enough)", inbox.av)
     for i = 1, math.max(#disk, #loaded) do
         local a, b = disk[i] or 0, loaded[i] or 0
         if a ~= b then
-            return a > b and format("T3 WoW %s is installed: restart WoW to load it (/reload isn't enough)", inbox.av) or nil
+            return a > b and note or nil
         end
     end
+    local labelled = inbox.av:find("[-+]") or LOADED_VERSION:find("[-+]")
+    return labelled and inbox.av ~= LOADED_VERSION and note or nil
 end
 
 local function renderStatus()

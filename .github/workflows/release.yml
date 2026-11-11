@@ -34,6 +34,8 @@ jobs:
       # Authenticode signing (SSL.com eSigner) runs only once its secrets are set; see
       # docs/release-signing.md. 'true' or 'false': secrets can't appear in a step's if.
       AUTHENTICODE: ${{ secrets.ESIGNER_TOTP_SECRET != '' }}
+      # The plain version ("0.9.1"); any other build names its commit (companion/build.rs).
+      T3WOW_RELEASE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,6 +90,9 @@ jobs:
       - name: Stage t3wow.exe
         shell: pwsh
         run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $built = (Get-Item companion/target/release/t3wow.exe).VersionInfo.ProductVersion
+          if ($built -ne $tag) { throw "t3wow.exe says it is ${built}, not ${tag}: was T3WOW_RELEASE set for the build?" }
           New-Item -ItemType Directory -Force release | Out-Null
           Copy-Item companion/target/release/t3wow.exe release/
 
