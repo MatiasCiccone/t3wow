@@ -890,6 +890,8 @@ struct ScanCache {
     cards: Vec<FoundCard>,
     /// Where the thread's context was compacted (T3 draws a line there).
     compactions: Vec<u64>,
+    /// The files each finished turn changed.
+    changes: Vec<FoundChanges>,
     /// What it did between its messages, by position.
     work: Vec<FoundWork>,
     /// The run each item read belongs to and when it was last touched, by position: what
@@ -1386,6 +1388,86 @@ struct FoundPage {
     title: String,
 }
 
+/// The files a turn changed: T3's checkpoint item at the end of a run, which T3 shows as
+/// a card under the turn's last message. Each file is (path, lines added, lines removed).
+#[derive(Clone)]
+struct FoundChanges {
+    position: u64,
+    item_id: String,
+    files: Vec<(String, u64, u64)>,
+    /// The text read stopped short: there are more files than `files`.
+    cut: bool,
+    /// Read as far as it will be (the scan reads only the start of a long list).
+    full: bool,
+}
+
+/// Files a turn's card lists by name; the rest are counted, so a big diff stays a few lines.
+const CHANGED_FILES_SHOWN: usize = 6;
+/// How much of a checkpoint's file list is read (about 400 files).
+const CHANGES_CHARS: usize = 50_000;
+
+/// A checkpoint item's files, from its text: T3's pretty-printed JSON list. Text cut short
+/// keeps the files it holds whole.
+fn changed_files(text: &str, truncated: bool) -> Vec<(String, u64, u64)> {
+    let whole = match (truncated, text.rfind("\n  }")) {
+        (false, _) => text.to_string(),
+        (true, Some(end)) => format!("{}\n]", &text[..end + 4]),
+        (true, None) => return Vec::new(),
+    };
+    let files: Vec<Value> = serde_json::from_str(&whole).unwrap_or_default();
+    files
+        .iter()
+        .filter_map(|file| {
+            let path = file["path"].as_str()?.trim();
+            (!path.is_empty()).then(|| (path.to_string(), file["additions"].as_u64().unwrap_or(0), file["deletions"].as_u64().unwrap_or(0)))
+        })
+        .collect()
+}
+
+/// A count as T3's diff stats write it: 999, 1.2k, 12k, 1.5m.
+fn compact_count(n: u64) -> String {
+    let short = |value: f64, unit: &str| {
+        let text = if value < 10.0 { format!("{value:.1}") } else { format!("{}", value.round()) };
+        format!("{}{unit}", text.strip_suffix(".0").unwrap_or(&text))
+    };
+    match n {
+        0..1000 => n.to_string(),
+        1000..999_500 => short(n as f64 / 1e3, "k"),
+        _ => short(n as f64 / 1e6, "m"),
+    }
+}
+
+impl FoundChanges {
+    /// The card for the game: `cf` for an addon that draws it, and the same as plain lines
+    /// for one that doesn't (and for copying).
+    fn shown(&self) -> Value {
+        let count = self.files.len();
+        let (added, removed) = self.files.iter().fold((0, 0), |(a, d), (_, fa, fd)| (a + fa, d + fd));
+        let plus = if self.cut { "+" } else { "" };
+        let mut head = format!("{count}{plus} changed file{}", if count == 1 && !self.cut { "" } else { "s" });
+        // Counts over part of the list would say less than the turn did.
+        if !self.cut && (added > 0 || removed > 0) {
+            head = format!("{head}  +{} -{}", compact_count(added), compact_count(removed));
+        }
+        let listed = &self.files[..count.min(CHANGED_FILES_SHOWN)];
+        let more = count - listed.len();
+        let mut lines = vec![head];
+        lines.extend(listed.iter().map(|(path, a, d)| format!("{}  +{} -{}", plain(path, 200), compact_count(*a), compact_count(*d))));
+        if more > 0 {
+            lines.push(format!("{more}{plus} more file{}", if more == 1 && !self.cut { "" } else { "s" }));
+        }
+        let files: Vec<Value> = listed.iter().map(|(path, a, d)| json!({ "p": plain(path, 200), "a": a, "d": d })).collect();
+        let mut cf = json!({ "n": count, "f": files, "more": more });
+        if self.cut {
+            cf["cut"] = json!(1);
+        } else {
+            cf["a"] = json!(added);
+            cf["d"] = json!(removed);
+        }
+        json!({ "r": "a", "x": lines.join("\n"), "cf": cf })
+    }
+}
+
 /// A picture the open thread shows: a page an agent showed, or an image a message embeds
 /// from a file on this PC.
 #[derive(Clone)]
@@ -1638,6 +1720,8 @@ enum Step {
     ViewCard(String),
     /// What you answered a question, from its position.
     ViewAnswer(u64),
+    /// The whole list of files a turn changed, from its checkpoint item.
+    ViewChanges(String),
     ViewDraw(usize),
     ViewPictures,
 }
@@ -2675,6 +2759,7 @@ impl Bridge {
             Step::ViewScan => self.read_view_scan(),
             Step::ViewCard(item_id) => self.read_view_card(item_id),
             Step::ViewAnswer(position) => self.read_view_answer(position),
+            Step::ViewChanges(item_id) => self.read_view_changes(item_id),
             Step::ViewDraw(i) => self.draw_picture(i),
             Step::ViewPictures => {
                 self.place_pictures();
@@ -3756,7 +3841,7 @@ impl Bridge {
         let View { env, id, .. } = read.view.clone();
         let mut cache = match self.scan.take().filter(|c| c.env == env && c.id == id && c.from <= first) {
             Some(cache) => cache,
-            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new(), work: Vec::new(), runs: BTreeMap::new() },
+            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new(), changes: Vec::new(), work: Vec::new(), runs: BTreeMap::new() },
         };
         let mut args = json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 200 });
         // Back to what was still under way, whose title and text may have come since.
@@ -3795,6 +3880,15 @@ impl Bridge {
                     Some(known) => *known = card,
                     None if !card.item_id.is_empty() => cache.cards.push(card),
                     None => {}
+                }
+            }
+            // A turn that changed no files has an empty list ("[]"): nothing to show.
+            if item["type"] == "checkpoint" {
+                let item_id = str_of(&item["itemId"]);
+                let text = str_of(&item["text"]).trim();
+                if !item_id.is_empty() && text.starts_with("[\n") && !cache.changes.iter().any(|c| c.item_id == item_id) {
+                    let cut = item["textTruncated"] == true;
+                    cache.changes.push(FoundChanges { position, item_id: item_id.to_string(), files: changed_files(text, cut), cut, full: !cut });
                 }
             }
             let compaction = item["type"] == "compaction";
@@ -3873,6 +3967,12 @@ impl Bridge {
             _ => Vec::new(),
         };
         let answer_reads = if late { 0 } else { answers.len().min(CARD_READS_PER_POLL) };
+        // Changed-file lists longer than the scan read, read whole once.
+        let changes: Vec<String> = match (self.work_ok, self.scan.as_ref()) {
+            (true, Some(scan)) => scan.changes.iter().filter(|c| !c.full && c.position >= first).map(|c| c.item_id.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let change_reads = if late { 0 } else { changes.len().min(CARD_READS_PER_POLL) };
         let mut drawing: Vec<Drawing> = Vec::new();
         let mut later = false;
         for picture in &pictures {
@@ -3894,12 +3994,13 @@ impl Bridge {
         }
         let Some(read) = self.view_read() else { return };
         read.pictures = pictures;
-        read.again |= later || reads < cards.len() || answer_reads < answers.len();
+        read.again |= later || reads < cards.len() || answer_reads < answers.len() || change_reads < changes.len();
         let steps: Vec<Step> = cards
             .into_iter()
             .take(reads)
             .map(Step::ViewCard)
             .chain(answers.into_iter().take(answer_reads).map(Step::ViewAnswer))
+            .chain(changes.into_iter().take(change_reads).map(Step::ViewChanges))
             .chain((0..drawing.len()).map(Step::ViewDraw))
             .chain([Step::ViewPictures])
             .collect();
@@ -3944,6 +4045,24 @@ impl Bridge {
         if let Some(found) = self.scan.as_mut().and_then(|scan| scan.work.iter_mut().find(|w| w.position == position)) {
             found.answer = answer.filter(|a| !a.is_empty());
             found.answered = true;
+        }
+        Ok(())
+    }
+
+    /// The files a turn changed, read whole (up to CHANGES_CHARS) from its checkpoint item,
+    /// once. A list longer than that shows the files it holds, and says there are more.
+    fn read_view_changes(&mut self, item_id: String) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        let args = json!({ "threadId": id, "itemId": item_id, "maxCharsPerItem": CHANGES_CHARS });
+        let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
+        let item = result["items"].as_array().and_then(|items| items.iter().find(|it| it["itemId"] == item_id.as_str()));
+        if let Some(found) = self.scan.as_mut().and_then(|scan| scan.changes.iter_mut().find(|c| c.item_id == item_id)) {
+            if let Some(item) = item {
+                found.cut = item["textTruncated"] == true;
+                found.files = changed_files(str_of(&item["text"]), found.cut);
+            }
+            found.full = true;
         }
         Ok(())
     }
@@ -4080,8 +4199,12 @@ impl Bridge {
             }
         }
         if self.work_ok {
+            let first = self.view_read().and_then(|r| r.positions.first().copied()).unwrap_or(u64::MAX);
+            // Each finished turn's changed files, where T3 shows them: after its last message.
+            for changes in self.scan.iter().flat_map(|s| s.changes.iter()).filter(|c| c.full && c.position >= first && !c.files.is_empty()) {
+                placed.push((changes.position * 2, changes.shown()));
+            }
             let Some(read) = self.view_read() else { return };
-            let first = read.positions.first().copied().unwrap_or(u64::MAX);
             let still_working = read.built.as_ref().is_some_and(|built| working(str_of(&built["s"])));
             let done_before = still_working.then(|| read.positions.last().copied().unwrap_or(0));
             let walls: Vec<u64> = read.positions.iter().copied().chain(placed.iter().map(|(order, _)| order / 2)).collect();

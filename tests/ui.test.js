@@ -1362,6 +1362,45 @@ return "ok"
 `);
 });
 
+test("a turn's changed files draw as a card: the count and lines changed, a line a file, and the rest counted", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local copy = "8 changed files  +1.5k -14\\ncompanion/src/bridge.rs  +1.2k -12\\nREADME.md  +3 -0\\n6 more files"
+local changes = { r = "a", x = copy, cf = { n = 8, a = 1520, d = 14, more = 6, f = {
+  { p = "companion/src/bridge.rs", a = 1234, d = 12 }, { p = "README.md", a = 3, d = 0 } } } }
+local items = { { r = "u", x = "fix it" }, { r = "a", x = "Done." }, changes, { r = "u", x = "thanks" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local head = shownString("^8 changed files  |cff40c040%+1%.5k|r |cffff4040%-14|r$")
+assert(head, "no header with the count and the lines added and removed")
+assert(head.fontObject == ns.Skin.fonts.strong, "the header isn't in the strong font")
+local first = shownString("^bridge%.rs  |cff%x+companion/src|r$")
+local second = shownString("^README%.md$")
+assert(first and second, "a file isn't listed by its name, then its folder")
+assert(shownString("^|cff40c040%+1%.2k|r |cffff4040%-12|r$") and shownString("^|cff40c040%+3|r |cffff4040%-0|r$"), "a file's own counts don't show")
+local more = shownString("^6 more files$")
+assert(more and more.fontObject == ns.Skin.fonts.muted, "the files not listed aren't counted")
+assert(not shownString("companion/src/bridge.rs  "), "the text for older addons shows too")
+assert(below(head, shownString("^Done%.$")), "not below the turn's last message")
+assert(below(first, head) and below(second, first) and below(more, second), "the lines aren't one under another")
+assert(below(shownString("^thanks$"), more), "the next message isn't below the card")
+-- Clicking it copies the list.
+local copyable = false
+for _, f in ipairs(frames) do copyable = copyable or (f.kind == "Button" and f.shown and rawget(f, "copyText") == copy) end
+assert(copyable, "the card can't be clicked to copy its list")
+-- Not all of it read: it says there are more, and gives no totals it can't stand behind.
+changes.cf = { n = 2, cut = 1, more = 1, f = { { p = "a.rs", a = 1, d = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(shownString("^2%+ changed files$") and shownString("^1%+ more files$"), "a list cut short doesn't say so")
+-- Gone: its strings are plain messages again, and its file lines go.
+items = { { r = "u", x = "fix it" }, { r = "a", x = "Done." }, { r = "a", x = "Plain again" }, { r = "u", x = "thanks" } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(not shownString("changed file") and not shownString("^a%.rs$") and not shownString("more file"), "the card stayed")
+assert(shownString("Plain again").fontObject == ns.Skin.fonts.text, "a message after the card is muted")
+return "ok"
+`);
+});
+
 test("the strip tells the companion the game can show pictures only when the image slots were there at startup", () => {
   const frameWith = (before) =>
     runGame(

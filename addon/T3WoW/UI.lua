@@ -1770,6 +1770,107 @@ local function placeCard(fs, d)
     anchorMessage(fs, fs.head, 0, last, 0, inner)
 end
 
+-- The files a finished turn changed, on a card as T3 draws it under the turn's last
+-- message: how many, with the lines added and removed, then a line a file (its name, then
+-- its folder dimmed, its own counts on the right). A big diff lists a few and counts the
+-- rest. cf = { n, a, d (no a or d: not all were read, and cut = 1), f = { { p, a, d } },
+-- more = files not listed }, from the companion; clicking it copies the list (item.x).
+local Changes = { ADDED = "40c040", REMOVED = "ff4040" }
+
+-- A count as T3 writes it: 999, 1.2k, 12k, 1.5m.
+function Changes.Count(n)
+    n = tonumber(n) or 0
+    local function short(value, unit)
+        return (value < 10 and format("%.1f", value) or format("%d", floor(value + 0.5))):gsub("%.0$", "") .. unit
+    end
+    if n < 1000 then return tostring(n) end
+    if n < 999500 then return short(n / 1000, "k") end
+    return short(n / 1000000, "m")
+end
+
+function Changes.Stat(a, d)
+    return format("|cff%s+%s|r |cff%s-%s|r", Changes.ADDED, Changes.Count(a), Changes.REMOVED, Changes.Count(d))
+end
+
+function Changes.Hide(fs)
+    for _, row in ipairs(rawget(fs, "fileRows") or {}) do
+        row.name:Hide()
+        row.stat:Hide()
+    end
+end
+
+local function placeChanges(fs, cf)
+    local pad = SIZE.card
+    local inner = messageWidth() - 8 - 2 * pad
+    if not rawget(fs, "card") then
+        fs.card = Skin.Box(messageChild, { shape = "panel", fill = "card", ring = "border", free = true, sub = -8 })
+        fs.head = messageChild:CreateFontString(nil, "OVERLAY")
+        fs.head:SetFontObject(Skin.fonts.strong)
+        fs.head:SetJustifyH("LEFT")
+        fs.head:SetWordWrap(true)
+        fs.state = messageChild:CreateFontString(nil, "OVERLAY")
+        fs.state:SetFontObject(Skin.fonts.small)
+        fs.state:SetJustifyH("RIGHT")
+        fs.state:SetWordWrap(false)
+    end
+    fs.fileRows = rawget(fs, "fileRows") or {}
+    fs.bubble:Hide()
+    fs.state:Hide()
+    local n, cut = tonumber(cf.n) or 0, cf.cut == 1
+    local plus = cut and "+" or ""
+    local head = format("%d%s changed file%s", n, plus, (n == 1 and not cut) and "" or "s")
+    local a, d = tonumber(cf.a), tonumber(cf.d)
+    if a and d and (a > 0 or d > 0) then head = head .. "  " .. Changes.Stat(a, d) end
+    fs.head:SetWidth(inner)
+    fs.head:SetText(head)
+    flow.gap = flow.gap + pad
+    place(fs.head, 4 + pad, 8)
+    local last = fs.head
+    local dim = Skin.Hex("dim")
+    for i, file in ipairs(type(cf.f) == "table" and cf.f or {}) do
+        local row = fs.fileRows[i]
+        if not row then
+            row = { name = messageChild:CreateFontString(nil, "OVERLAY"), stat = messageChild:CreateFontString(nil, "OVERLAY") }
+            row.name:SetFontObject(Skin.fonts.text)
+            row.name:SetJustifyH("LEFT")
+            row.name:SetWordWrap(false)
+            row.stat:SetFontObject(Skin.fonts.small)
+            row.stat:SetJustifyH("RIGHT")
+            row.stat:SetWordWrap(false)
+            fs.fileRows[i] = row
+        end
+        -- The name first, so a long folder is what gets cut short.
+        local path = tostring(file.p or "")
+        local folder, name = path:match("^(.*)[/\\]([^/\\]+)$")
+        row.name:SetText(folder and format("%s  |cff%s%s|r", name, dim, folder) or path)
+        row.stat:SetText(Changes.Stat(file.a, file.d))
+        local statWidth = math.ceil(row.stat:GetStringWidth() or 0) + 1
+        row.stat:SetWidth(statWidth)
+        row.name:SetWidth(math.max(40, inner - statWidth - 12))
+        place(row.name, 4 + pad, 4)
+        row.stat:ClearAllPoints()
+        row.stat:SetPoint("TOPRIGHT", row.name, "TOPLEFT", inner, 0)
+        row.stat:Show()
+        last = row.name
+    end
+    local more = tonumber(cf.more) or 0
+    if more > 0 then
+        fs:SetFontObject(Skin.fonts.muted)
+        fs:SetWidth(inner)
+        fs:SetText(format("%d%s more file%s", more, plus, (more == 1 and not cut) and "" or "s"))
+        place(fs, 4 + pad, 4)
+        last = fs
+    else
+        fs:Hide()
+    end
+    flow.gap = pad + 18
+    fs.card:ClearAllPoints()
+    fs.card:SetPoint("TOPLEFT", fs.head, "TOPLEFT", -pad, pad)
+    fs.card:SetPoint("BOTTOMRIGHT", last, "BOTTOMLEFT", inner + pad, -pad)
+    fs.card:Show()
+    anchorMessage(fs, fs.head, 0, last, 0, inner)
+end
+
 -- ---------------------------------------------------------------- pictures
 do
     local IMG = "Interface\\AddOns\\T3WoW\\img\\"
@@ -2562,6 +2663,7 @@ function renderView()
             fs.head:Hide()
             fs.state:Hide()
         end
+        Changes.Hide(fs)
         if rawget(fs, "lostBox") then
             fs.lostBox:Hide()
             fs.lostIcon:Hide()
@@ -2646,6 +2748,7 @@ function renderView()
             local rule = item.rule == 1
             local work = type(item.w) == "table" and item.w or false
             local card = type(item.d) == "table"
+            local changes = not card and type(item.cf) == "table" and item.cf
             local lost = not card and item.lost == 1
             local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
             if work then
@@ -2654,6 +2757,8 @@ function renderView()
                 Handoff.Place(item.x)
             elseif card then
                 placeCard(fs, item.d)
+            elseif changes then
+                placeChanges(fs, changes)
             elseif lost then
                 Pictures.Lost(fs, item.r == "u")
             elseif not picture then
