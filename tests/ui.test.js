@@ -2632,6 +2632,46 @@ return "ok"
 `);
 });
 
+test("a message that started a fresh session has T3's New session line over it, its echo too", () => {
+  run(PICKER_HELPERS + `
+ENVS[1].fc = true
+local function update(items) inboxWith(ENVS, { sel = true, threads = THREADS, picks = PICKS, view = { e = 1, id = "t1", t = "Here", s = "completed", items = items } }) end
+openThread(1)
+update({ { r = "u", x = "remember kumquat" }, { r = "a", x = "OK" } })
+assert(not showing("New session"), "a line with no fresh session")
+-- Sent after /clear: the line is over the message while it's sending, and once it's in.
+typeText("/clear")
+press("OnEnterPressed")
+typeText("start over")
+press("OnEnterPressed")
+assert(sent().fc == true, "not sent fresh")
+assert(showing("New session") and showing("start over"), "no line over the echo")
+update({ { r = "u", x = "remember kumquat" }, { r = "a", x = "OK" }, { r = "u", x = "start over", ns = 1 } })
+local line, message, count = nil, nil, 0
+for _, fs in ipairs(fontStrings) do
+  if not fs.hidden and fs.text == "New session" then line = fs; count = count + 1 end
+  if not fs.hidden and fs.text == "start over" then message = fs end
+end
+assert(count == 1, "drawn " .. count .. " times")
+assert(message.point[2] == line, "the message isn't under the line")
+-- With a handoff on the same message, New session comes first, as in T3.
+update({ { r = "a", x = "OK" }, { r = "u", x = "start over", ns = 1, ho = "Claude Haiku > Codex Sol" } })
+local fresh, handoff
+for _, fs in ipairs(fontStrings) do
+  if not fs.hidden and fs.text == "New session" then fresh = fs end
+  if not fs.hidden and type(fs.text) == "string" and fs.text:find("Context handoff") then handoff = fs end
+end
+assert(handoff.point[2] == fresh, "the handoff line isn't under New session")
+update({ { r = "u", x = "start over" } })
+assert(not showing("New session"), "still drawn")
+-- A message sent without /clear has no line while it's sending.
+typeText("go on")
+press("OnEnterPressed")
+assert(sent().fc == nil and showing("go on") and not showing("New session"), "a line over a plain echo")
+return "ok"
+`);
+});
+
 test("a thread's permissions only show, with the way to change them in T3", () => {
   run(SELECTOR_HELPERS + `
 local thread = { { e = 1, id = "t1", t = "A thread", s = "completed", set = false, at = time(), p = "" } }

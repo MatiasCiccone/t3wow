@@ -2454,9 +2454,10 @@ local function renderAsk(view)
     end
 end
 
--- The line T3 draws where a thread moved to another provider or its context was compacted:
--- its text in the middle, a rule each side. A message that moved provider (item.ho) gets it
--- above itself; a compaction (item.rule) is one in the list.
+-- The line T3 draws where a thread moved to another provider, its context was compacted or
+-- a fresh session started: its text in the middle, a rule each side. A message that started
+-- a fresh session (item.ns, from /clear) or moved provider (item.ho) gets it above itself; a
+-- compaction (item.rule) is one in the list.
 local Handoff = { pool = {}, used = 0 }
 
 function Handoff.Release()
@@ -2744,6 +2745,7 @@ function renderView()
         -- Inside a finished turn's "Worked for" row (f names it), while that is closed.
         if type(item.f) ~= "string" or UI.Work.open[item.f] then
             local fs = messageString(i)
+            if item.ns == 1 then Handoff.Place("New session") end
             if item.ho then Handoff.Place("Context handoff · " .. item.ho) end
             local rule = item.rule == 1
             local work = type(item.w) == "table" and item.w or false
@@ -2792,6 +2794,7 @@ function renderView()
         if arrived then
             echo = nil
         else
+            if echo.fresh then Handoff.Place("New session") end
             local fs = messageString(count + 1)
             local pictures = (echo.images or 0) > 0 and format("[%d %s]\n", echo.images, echo.images == 1 and "image" or "images") or ""
             placeMessage(fs, "|cff" .. Skin.Hex("dim") .. "(sending)|r\n" .. pictures .. echo.text:gsub("|", "||"), true)
@@ -3600,7 +3603,7 @@ local function sendCurrent()
     if selected.new then
         UI.Notice("Starting a new thread…")
     elseif text ~= "" then
-        echo = { id = selected.id, text = text, sent = command.m, s = s, images = images }
+        echo = { id = selected.id, text = text, sent = command.m, s = s, images = images, fresh = fresh }
     end
     input:SetText("")
     UI.Refresh()
