@@ -1074,13 +1074,15 @@ fn work_rows(work: &[FoundWork], first: u64, done_before: Option<u64>, walls: &[
     out
 }
 
-/// A length of time as T3 says it: "22s", "2m 47s", "1h 5s".
+/// A length of time as T3 says it: "22s", "12m 0s", "1h", "1h 5s". Seconds show
+/// whenever minutes do.
 fn format_duration(seconds: i64) -> String {
     if seconds < 60 {
         return format!("{seconds}s");
     }
-    let parts = [(seconds / 3600, "h"), (seconds % 3600 / 60, "m"), (seconds % 60, "s")];
-    parts.iter().filter(|(n, _)| *n > 0).map(|(n, unit)| format!("{n}{unit}")).collect::<Vec<_>>().join(" ")
+    let (h, m, s) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    let parts = [(h, "h", h > 0), (m, "m", m > 0), (s, "s", s > 0 || m > 0)];
+    parts.iter().filter(|(_, _, shown)| *shown).map(|(n, unit, _)| format!("{n}{unit}")).collect::<Vec<_>>().join(" ")
 }
 
 /// Folds each finished turn under a "Worked for" row, by T3's rules: all it did goes

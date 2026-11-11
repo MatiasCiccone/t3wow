@@ -1533,6 +1533,12 @@ end
 UI.Work.liveSince = time() - 5
 UI.Work.Tick()
 assert(row.text == "Working for 5s", row.text)
+-- Seconds show whenever minutes do, as in T3 0.19.0; hours alone stay bare.
+for seconds, said in pairs({ [60] = "1m 0s", [720] = "12m 0s", [736] = "12m 16s", [3600] = "1h", [3660] = "1h 1m 0s" }) do
+  UI.Work.liveSince = time() - seconds
+  UI.Work.Tick()
+  assert(row.text == "Working for " .. said, row.text)
+end
 return "ok"
 `);
   assert.equal(out, "ok");

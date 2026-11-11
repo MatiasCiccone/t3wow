@@ -2394,14 +2394,16 @@ do
     local ROW_GAP, GROUP_GAP = 10, 14
     local WORK_ICON = { b = "brain", c = "terminal", t = "hammer", q = "message", r = "eye", e = "pencil", s = "search", w = "globe" }
 
-    -- How long since `since` (a time from the companion, on this PC's clock), as T3 says it.
+    -- How long since `since` (a time from the companion, on this PC's clock), as T3 says
+    -- it: seconds show whenever minutes do ("12m 0s"), hours alone stay bare ("1h").
     local function elapsed(since)
         local seconds = math.max(0, time() - since)
         if seconds < 60 then return seconds .. "s" end
+        local h, m, s = floor(seconds / 3600), floor(seconds % 3600 / 60), seconds % 60
         local parts = {}
-        for _, part in ipairs({ { floor(seconds / 3600), "h" }, { floor(seconds % 3600 / 60), "m" }, { seconds % 60, "s" } }) do
-            if part[1] > 0 then parts[#parts + 1] = part[1] .. part[2] end
-        end
+        if h > 0 then parts[#parts + 1] = h .. "h" end
+        if m > 0 then parts[#parts + 1] = m .. "m" end
+        if s > 0 or m > 0 then parts[#parts + 1] = s .. "s" end
         return table.concat(parts, " ")
     end
 
