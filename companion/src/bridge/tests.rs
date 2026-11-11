@@ -1068,6 +1068,27 @@ fn typed_text_answers_a_question_in_your_own_words() {
 }
 
 #[test]
+fn typed_text_with_a_pick_goes_in_the_answer_as_a_note() {
+    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), multi };
+    let ask = PendingAsk {
+        env: String::new(),
+        thread: "t1".into(),
+        token: "x".into(),
+        request_id: "r".into(),
+        questions: vec![question("Look?", &["Looks right", "Ship it?"], false), question("Sizes", &["S", "M"], true)],
+    };
+    let answers = Bridge::answers_for(&ask, &json!([[1, " too big "], [1, 2, "and soon"]]));
+    assert_eq!(answers["Look?"], json!("Looks right. Note: too big"));
+    assert_eq!(answers["Sizes"], json!(["S", "M", "Note: and soon"]));
+    // A label that ends a sentence gets no second stop; blank text is no note.
+    let answers = Bridge::answers_for(&ask, &json!([[2, "today"], [2, "  "]]));
+    assert_eq!(answers["Look?"], json!("Ship it? Note: today"));
+    assert_eq!(answers["Sizes"], json!(["M"]));
+    // Only text left (a pick past the options): it answers on its own.
+    assert_eq!(Bridge::answers_for(&ask, &json!([[9, "mine"]]))["Look?"], json!("mine"));
+}
+
+#[test]
 fn pointed_at_another_server_the_old_servers_threads_and_open_thread_go() {
     let mut rig = Rig::new(9_000_000);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
