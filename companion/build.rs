@@ -3,7 +3,7 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/t3wow.ico");
+    println!("cargo:rerun-if-changed=assets");
     let version = build_version();
     println!("cargo:rustc-env=T3WOW_VERSION={version}");
     #[cfg(windows)]
@@ -33,9 +33,10 @@ fn main() {
 }
 
 /// The release workflow (T3WOW_RELEASE set) builds the plain version, "0.9.1". Any other
-/// build names its commit, "0.9.1-dev+57ee2ec", with ".dirty" when the companion or addon
-/// has changes not committed yet, so a test build never passes for the release it started
-/// from. Without git, "0.9.1-dev".
+/// build names its commit, "0.9.1-dev+57ee2ec", and when the companion or addon has changes
+/// not committed yet, ".dirty" and a fingerprint of them ("0.9.1-dev+57ee2ec.dirty.3fa9c01"),
+/// so a test build never passes for the release it started from, nor for another test build.
+/// Without git, "0.9.1-dev".
 fn build_version() -> String {
     let base = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     println!("cargo:rerun-if-env-changed=T3WOW_RELEASE");
@@ -43,18 +44,12 @@ fn build_version() -> String {
     if std::env::var_os("T3WOW_RELEASE").is_some_and(|v| !v.is_empty()) {
         return base;
     }
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
+    let git_bytes = |args: &[&str]| Command::new("git").args(args).output().ok().filter(|out| out.status.success()).map(|out| out.stdout);
+    let git = |args: &[&str]| git_bytes(args).map(|out| String::from_utf8_lossy(&out).trim().to_string());
     let Some(commit) = git(&["rev-parse", "--short=7", "HEAD"]) else {
         return format!("{base}-dev");
     };
-    // A new commit or checkout moves HEAD's reflog; an edit touches src or the addon.
+    // A new commit or checkout moves HEAD's reflog; an edit touches src, assets or the addon.
     for path in ["HEAD", "logs/HEAD"] {
         if let Some(file) = git(&["rev-parse", "--git-path", path]) {
             println!("cargo:rerun-if-changed={file}");
@@ -62,6 +57,17 @@ fn build_version() -> String {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../addon");
-    let dirty = git(&["status", "--porcelain", "--", ".", "../addon"]).is_some_and(|changes| !changes.is_empty());
-    format!("{base}-dev+{commit}{}", if dirty { ".dirty" } else { "" })
+    let paths = ["--", ".", "../addon"];
+    if git(&[&["status", "--porcelain"][..], &paths].concat()).is_none_or(|changes| changes.is_empty()) {
+        return format!("{base}-dev+{commit}");
+    }
+    // The uncommitted changes: tracked files' diff, and new files with their contents.
+    let mut changes = git_bytes(&[&["diff", "HEAD", "--binary"][..], &paths].concat()).unwrap_or_default();
+    for file in git(&[&["ls-files", "--others", "--exclude-standard"][..], &paths].concat()).unwrap_or_default().lines() {
+        changes.extend_from_slice(file.as_bytes());
+        changes.extend(std::fs::read(file).unwrap_or_default());
+    }
+    // FNV-1a, 28 bits: seven hex digits, like the commit.
+    let hash = changes.iter().fold(0x811c_9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    format!("{base}-dev+{commit}.dirty.{:07x}", hash >> 4)
 }
