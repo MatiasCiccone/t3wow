@@ -291,25 +291,24 @@ connection:SetFontObject(Skin.fonts.muted)
 connection:SetPoint("LEFT", connectionPill.proxy, "LEFT", 20, 0)
 connection:SetJustifyH("LEFT")
 connection:SetWordWrap(false)
--- While the pill says to Reload UI, a click on it does (shown only then: renderStatus). It
--- sits on the pill's table: the main chunk is near its 200 locals. Dragging it still moves
--- the window.
+-- Hovering the pill shows the link's state in full (UI.StatusLines); while it says to
+-- Reload UI, a click on it does (hit.reloads: renderStatus). It sits on the pill's table:
+-- the main chunk is near its 200 locals. Dragging it still moves the window.
 connectionPill.hit = CreateFrame("Button", nil, frame)
 do
     local hit = connectionPill.hit
     hit:SetAllPoints(connectionPill.proxy)
     hit:RegisterForClicks("LeftButtonUp")
     hit:RegisterForDrag("LeftButton")
-    hit:SetScript("OnClick", function() ReloadUI() end)
+    hit:SetScript("OnClick", function(self) if self.reloads then ReloadUI() end end)
     hit:SetScript("OnDragStart", function() frame:StartMoving() end)
     hit:SetScript("OnDragStop", function() frame:GetScript("OnDragStop")(frame) end)
     hit:SetScript("OnEnter", function(self)
         Skin.Tooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        Skin.Tooltip:AddLine("Click to Reload UI")
+        for _, line in ipairs(UI.StatusLines()) do Skin.Tooltip:AddLine(line) end
         Skin.Tooltip:Show()
     end)
     hit:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
-    hit:Hide()
 end
 
 local function makeScroll(parent, width)
@@ -4148,6 +4147,36 @@ function UI.CompanionNote()
     return format("T3 WoW companion %s is older than this addon (%s): update it from its tray menu", inbox.cv, LOADED_VERSION)
 end
 
+-- The pill's tooltip: its status in full (the pill can cut it short), then the rest worth
+-- knowing about the link, one short line each.
+function UI.StatusLines()
+    local lines = { connection:GetText() }
+    local link = ns.Link.Status()
+    local used, total = ns.Link.SlotsUsed()
+    local left = total - used
+    lines[#lines + 1] = format("%s%d of %d updates left this UI session%s", left == 0 and "|cffff8000" or (ns.Link.SlotsLow() and "|cffffd100" or ""),
+        left, total, ns.Link.SlotsLow() and ": Reload UI gives back all of them|r" or "")
+    if link.inboxAge then
+        local age = math.floor(link.inboxAge)
+        lines[#lines + 1] = "Last update " .. (age < 60 and format("%ds", age) or format("%dm", math.floor(age / 60))) .. " ago"
+            .. (link.signals == "off" and ", on a timer: font signals don't work in this game client" or "")
+    else
+        lines[#lines + 1] = "No update from the companion yet"
+    end
+    local versions = "Addon " .. (LOADED_VERSION or "?")
+    if inbox then versions = versions .. ", companion " .. (type(inbox.cv) == "string" and inbox.cv or "older (it doesn't say)") end
+    lines[#lines + 1] = versions
+    -- The T3 Code update, when another note has the pill.
+    if inbox and type(inbox.t3u) == "string" and not lines[1]:find(inbox.t3u, 1, true) then
+        lines[#lines + 1] = "|cffffd100" .. inbox.t3u .. "|r"
+    end
+    if UI.CompanionNote() then
+        lines[#lines + 1] = "Right-click T3 WoW in the system tray, by the clock: Check for updates, then Update."
+    end
+    if connectionPill.hit.reloads then lines[#lines + 1] = "Click to Reload UI" end
+    return lines
+end
+
 local function renderStatus()
     local link = ns.Link.Status()
     local connected
@@ -4186,7 +4215,7 @@ local function renderStatus()
     local showReload = (ns.Link.Exhausted() or ns.Link.SlotsLow() or link.loadError ~= nil) and true or false
     reload:SetShown(showReload)
     statusLine:SetPoint("LEFT", showReload and reload or refresh, "RIGHT", 8, 0)
-    connectionPill.hit:SetShown(connected:find("Reload UI", 1, true) ~= nil)
+    connectionPill.hit.reloads = connected:find("Reload UI", 1, true) ~= nil
     local line = notice
     if not line and inbox and inbox.notes and #inbox.notes > 0 then
         local last = inbox.notes[#inbox.notes]

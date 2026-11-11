@@ -20,6 +20,7 @@ function companionLines()
   for _, line in ipairs(printed) do if line:find("update it from its tray menu", 1, true) then n = n + 1 end end
   return n
 end
+function hover() return table.concat(UI.StatusLines(), "~") end
 Link.Init()
 UI.Toggle()
 ${script}`,
@@ -31,13 +32,14 @@ ${script}`,
     },
   );
 
-test("an older companion shows on the pill and once in chat", () => {
+test("an older companion shows on the pill, in the tooltip, and once in chat", () => {
   assert.equal(
     run(`
 inbox("0.9.1")
 assert(showing("^|cffff8000T3 WoW companion 0%.9%.1 is older than this addon %(0%.9%.2%): update it from its tray menu|r$"), "the pill doesn't say it")
 assert(companionLines() == 1, "chat lines: " .. companionLines())
 assert(printed[#printed]:find("Check for updates", 1, true), printed[#printed])
+assert(hover():find("Addon 0.9.2, companion 0.9.1~Right-click T3 WoW in the system tray", 1, true), hover())
 inbox("0.9.1")
 inbox("0.9.1")
 assert(showing("is older than this addon"), "the note went away")
@@ -45,6 +47,25 @@ assert(companionLines() == 1, "chat lines: " .. companionLines())
 -- Updated (it restarts on the new version): the pill is back to Connected.
 inbox("0.9.2")
 assert(showing("^|cff40c040Connected|r$"), "not connected after the update")
+assert(not hover():find("Right-click", 1, true), hover())
+return "ok"
+`),
+    "ok",
+  );
+});
+
+test("with the companion note on the pill, the tooltip still shows the T3 Code update", () => {
+  assert.equal(
+    run(`
+UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = "0.9.1",
+  t3u = "Update T3 Code: this T3 WoW is made for 0.19.0" })
+assert(showing("is older than this addon"), "the pill doesn't show the companion note")
+assert(hover():find("~|cffffd100Update T3 Code: this T3 WoW is made for 0.19.0|r~", 1, true), hover())
+-- Once the companion is updated the T3 Code note has the pill, and the tooltip doesn't repeat it.
+UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = "0.9.2",
+  t3u = "Update T3 Code: this T3 WoW is made for 0.19.0" })
+local _, n = hover():gsub("Update T3 Code", "")
+assert(n == 1, hover())
 return "ok"
 `),
     "ok",
@@ -57,6 +78,7 @@ test("a companion from before it named its version is older too", () => {
 inbox(nil)
 assert(showing("^|cffff8000The T3 WoW companion is older than this addon %(0%.9%.2%): update it from its tray menu|r$"), "the pill doesn't say it")
 assert(companionLines() == 1, "chat lines: " .. companionLines())
+assert(hover():find("Addon 0.9.2, companion older (it doesn't say)", 1, true), hover())
 return "ok"
 `),
     "ok",

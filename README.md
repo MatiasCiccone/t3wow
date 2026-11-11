@@ -103,6 +103,7 @@ When an agent asks for a secret (T3's secret card: a token, a login, a pairing c
 
 When the tray's **Commands from the game** is set to **No new threads** or **Read-only**, the window greys out what that blocks (**Start**, or the box's Send, **Stop**, **Settle** and the answer buttons), says why, and keeps what you typed.
 
+The pill beside the window's title shows the link's state. Hover it for that state in full, how many of the UI session's 200 updates are left, how long ago the last one came, and the addon's and the companion's versions; while it says to Reload UI, clicking it does.
 
 Commands:
 

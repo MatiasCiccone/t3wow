@@ -51,6 +51,7 @@ function inboxWith(envs, extra)
   for _, p in ipairs(extra and extra.projects or {}) do data.projects[#data.projects + 1] = p end
   data.view, data.out, data.trust = extra and extra.view, extra and extra.out, extra and extra.trust
   data.auth = extra and extra.auth
+  data.cv = extra and extra.cv
   data.more = extra and extra.more
   data.att, data.pi = extra and extra.att, extra and extra.pi
   data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
@@ -1927,15 +1928,45 @@ local function pillHit()
 end
 inboxWith(ENVS)
 assert(showing("^|cff40c040Connected|r$"), "not connected")
-assert(not pillHit().shown, "clickable while connected")
+pillHit().scripts.OnClick(pillHit(), "LeftButton")
+assert(reloads == 0, "a click reloads while connected")
 Link.state.nextSlot = 192
 UI.Refresh()
 assert(showing("191/200 updates used: Reload UI soon"), "no Reload UI soon")
-assert(pillHit().shown, "Reload UI soon isn't clickable")
+pillHit().scripts.OnEnter(pillHit())
+assert(showing("^Click to Reload UI$"), "the tooltip doesn't say a click reloads")
 pillHit().scripts.OnClick(pillHit(), "LeftButton")
 return tostring(reloads)
 `, { before: `reloads = 0; function ReloadUI() reloads = reloads + 1 end` });
   assert.equal(out, "1");
+});
+
+test("hovering the pill shows its status in full, the updates left, the last one's age and both versions", () => {
+  const out = run(`
+local function lines() return table.concat(UI.StatusLines(), "~") end
+assert(lines():find("No update from the companion yet", 1, true), "before any update: " .. lines())
+inboxWith(ENVS, { cv = "0.0.0" })
+Link.state.nextSlot = 43
+Link.state.inboxAt = GetTime() - 75
+UI.Refresh()
+local hover = lines()
+assert(hover:find("^|cff40c040Connected|r~"), hover)
+assert(hover:find("158 of 200 updates left this UI session~", 1, true), hover)
+assert(hover:find("Last update 1m ago~", 1, true), hover)
+assert(hover:find("Addon 0.0.0, companion 0.0.0$"), hover)
+assert(not hover:find("Click to Reload UI", 1, true), hover)
+-- Low: the count says what Reload UI does.
+Link.state.nextSlot = 192
+UI.Refresh()
+assert(lines():find("|cffffd1009 of 200 updates left this UI session: Reload UI gives back all of them|r", 1, true), lines())
+-- The hover draws the same lines in the tooltip.
+for _, f in ipairs(frames) do
+  if f.kind == "Button" and f.parent == T3WoWFrame and f.scripts.OnDragStart then f.scripts.OnEnter(f) end
+end
+assert(showing("^Addon 0%.0%.0, companion 0%.0%.0$"), "the tooltip doesn't show the versions")
+return "ok"
+`, { before: `C_AddOns.GetAddOnMetadata = function(name, field) if name == "T3WoW" and field == "Version" then return "0.0.0" end end` });
+  assert.equal(out, "ok");
 });
 
 // Presses Ctrl+V in the message box. `pasted` is the text the game pastes, if any.
