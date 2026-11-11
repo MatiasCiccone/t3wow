@@ -88,6 +88,8 @@ impl SlotWriter for RecordingSlots {
 const OPTIONAL: &[&str] = &[
     // Codex's questions leave it out (single choice); Claude's say it.
     "t3_pending_request.questions[].multiSelect",
+    // Only a run that continues the agent's work has it, and T3 0.19.0 doesn't send it yet.
+    "t3_thread_read.recentRuns[].workStartedAt",
 ];
 
 /// The JSON kind of a value, for messages.
