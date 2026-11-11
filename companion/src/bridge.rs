@@ -778,6 +778,8 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
+    /// The requests each thread waiting on you has notified for, until it stops waiting.
+    shown_requests: HashMap<String, HashSet<String>>,
     /// Active threads off the lists whose last reads failed, and how many times in a row.
     unlisted_misses: HashMap<String, u32>,
     /// What working threads wait on, keyed by thread: T3's list says "running" while an
@@ -1507,6 +1509,9 @@ struct Pending {
     status: Option<&'static str>,
     /// The card, when it waits on one.
     card: Option<Card>,
+    /// The request behind the status, as T3's notifications key it: the newest question,
+    /// or the card. None for an approval: T3's tools don't give its id.
+    request: Option<String>,
 }
 
 /// A card only T3 can answer: "secret" or "link", and what it asks for.
@@ -1792,6 +1797,7 @@ impl Bridge {
             events: Vec::new(),
             event_seq: 0,
             last_status: HashMap::new(),
+            shown_requests: HashMap::new(),
             unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
             watches: HashMap::new(),
@@ -1954,6 +1960,7 @@ impl Bridge {
         self.settled_totals.clear();
         self.list_more.clear();
         self.last_status.clear();
+        self.shown_requests.clear();
         self.unlisted_misses.clear();
         self.pending_counts.clear();
         self.watches.clear();
@@ -2871,9 +2878,10 @@ impl Bridge {
         match self.client.call("t3_thread_read", args) {
             Ok(read) if read["thread"]["pendingRequestCount"].as_u64().unwrap_or(0) == 0 => {
                 // The newest waiting card, as T3's sidebar picks it.
-                let card = read["items"].as_array().into_iter().flatten().rev().find_map(waiting_card);
+                let found = read["items"].as_array().into_iter().flatten().rev().find_map(|item| Some((waiting_card(item)?, item["itemId"].as_str().map(str::to_string))));
+                let (card, request) = found.unzip();
                 let status = card.is_some().then_some(CARD);
-                self.pending_counts.insert(key.clone(), Pending { updated, read_at: now, status, card });
+                self.pending_counts.insert(key.clone(), Pending { updated, read_at: now, status, card, request: request.flatten() });
                 self.mark_waiting(i, key, status);
             }
             // Something's pending: what it is comes next.
@@ -2899,9 +2907,10 @@ impl Bridge {
         let args = with_args(json!({ "action": "list", "threadId": id }), &self.env_arg(&env));
         match self.client.call("t3_pending_request", args) {
             Ok(list) => {
-                let questions = list["requestIds"].as_array().is_some_and(|ids| !ids.is_empty());
-                let status = Some(if questions { "waiting" } else { "approval" });
-                self.pending_counts.insert(key.clone(), Pending { updated, read_at, status, card: None });
+                // Oldest first: the newest is the one T3 notifies for.
+                let request = list["requestIds"].as_array().and_then(|ids| ids.last()).and_then(Value::as_str).map(str::to_string);
+                let status = Some(if request.is_some() { "waiting" } else { "approval" });
+                self.pending_counts.insert(key.clone(), Pending { updated, read_at, status, card: None, request });
                 self.mark_waiting(i, key, status);
             }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
@@ -3086,6 +3095,8 @@ impl Bridge {
                 self.unlisted_misses.remove(&key);
             }
         }
+        let last_status = &self.last_status;
+        self.shown_requests.retain(|k, _| last_status.contains_key(k));
         if let Some(run) = self.poll_run.as_mut() {
             run.listed = Some(listed);
         }
@@ -3213,6 +3224,7 @@ impl Bridge {
         self.list_more.retain(|env, _| linked(env));
         self.listed_envs.retain(|env| linked(env));
         self.last_status.retain(|key, _| linked(env_of(key)));
+        self.shown_requests.retain(|key, _| linked(env_of(key)));
         self.unlisted_misses.retain(|key, _| linked(env_of(key)));
         self.pending_counts.retain(|key, _| linked(env_of(key)));
         self.watches.retain(|key, _| linked(env_of(key)));
@@ -3405,11 +3417,22 @@ impl Bridge {
             self.note("Stopped.");
         }
         let before = self.last_status.insert(key.clone(), status.clone());
+        // Each request a thread waits on notifies once, until the thread stops waiting on you
+        // (as in T3): a second question that replaces the first notifies, and the first, back
+        // when the second is answered, doesn't again. An approval has no id: its status rules.
+        let request = needs_you(&status).then(|| self.pending_counts.get(&key).and_then(|p| p.request.clone())).flatten();
+        let new_request = match request {
+            Some(request) => self.shown_requests.entry(key.clone()).or_default().insert(request),
+            None => false,
+        };
+        if !needs_you(&status) {
+            self.shown_requests.remove(&key);
+        }
         let notify = match before.as_deref() {
             // A thread new since the last list that already waits on you (an agent that
             // asked straight away) notifies too; on the first list everything is old news.
             None => needs_you(&status) && self.listed_envs.contains(env),
-            Some(before) if before == status => false,
+            Some(before) if before == status => new_request,
             // Stopped working: finished, failed, stopped, or now waits on you. A run that
             // ended watching its pull request isn't done yet: it notifies when that ends.
             Some(before) if active(before) => !active(&status),
