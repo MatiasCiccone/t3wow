@@ -18,6 +18,7 @@ mod dialog;
 mod keys;
 mod log;
 mod lua;
+mod made_for;
 mod render;
 mod slots;
 mod t3;
@@ -137,6 +138,15 @@ fn target(origin: &Option<Option<String>>) -> Option<t3::Target> {
     t3::target_in(&config)
 }
 
+/// What the terminal says when this T3 runs an older T3 Code than this release is made for
+/// (nothing when it doesn't, or its version can't be read).
+fn older_t3_note(client: &t3::McpClient) -> Option<String> {
+    use t3::T3;
+    let read = client.call("t3_environment_read", serde_json::json!({})).ok()?;
+    let older = made_for::older_t3(read["serverVersion"].as_str().unwrap_or_default(), read["platform"]["os"].as_str().unwrap_or_default())?;
+    Some(format!("Update T3 Code to {}: {}", made_for::T3_CODE, older.note()))
+}
+
 fn command(args: Args) -> Result<(), String> {
     let config = Config::load();
     let command = args.command.as_deref().unwrap_or("help");
@@ -178,6 +188,9 @@ fn command(args: Args) -> Result<(), String> {
             if connected.read_only {
                 println!("Warning: {}", t3::READ_ONLY_NOTE.replace("Sign in again", "Run t3wow.exe login again"));
             }
+            if let Some(note) = t3::target().and_then(|t| t.token.map(|token| t3::McpClient::new(&t.origin, &token))).as_ref().and_then(older_t3_note) {
+                println!("{note}");
+            }
         }
         "status" => {
             let dir = wow_dir(&args, &config)?;
@@ -201,6 +214,9 @@ fn command(args: Args) -> Result<(), String> {
             }
             let machines = 1 + links["links"].as_array().map(Vec::len).unwrap_or(0);
             println!("  {machines} machine(s) reachable through T3");
+            if let Some(note) = older_t3_note(&client) {
+                println!("  {note}");
+            }
         }
         "update" => match updater::check()? {
             None => println!("Up to date ({}), or no release is visible yet.", updater::current_version()),

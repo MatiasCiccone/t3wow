@@ -1,11 +1,12 @@
 // Gives t3wow.exe its icon and version details (Explorer, taskbar, Task Manager), and its
-// version string (T3WOW_VERSION).
+// version string (T3WOW_VERSION) and the T3 Code it is made for (T3WOW_T3_CODE).
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets");
     let version = build_version();
     println!("cargo:rustc-env=T3WOW_VERSION={version}");
+    made_for_t3();
     #[cfg(windows)]
     {
         let mut res = winresource::WindowsResource::new();
@@ -70,4 +71,14 @@ fn build_version() -> String {
     // FNV-1a, 28 bits: seven hex digits, like the commit.
     let hash = changes.iter().fold(0x811c_9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193));
     format!("{base}-dev+{commit}.dirty.{:07x}", hash >> 4)
+}
+
+/// The T3 Code this release is made for: package.json's `t3Code`, the one place it's written
+/// (the docs that name it are checked against it). The companion reads it as `T3WOW_T3_CODE`.
+fn made_for_t3() {
+    println!("cargo:rerun-if-changed=../package.json");
+    let package = std::fs::read_to_string("../package.json").expect("package.json, next to the companion folder");
+    let field = package.split("\"t3Code\"").nth(1).expect("package.json has no t3Code (the T3 Code this release is made for)");
+    let version = field.split('"').nth(1).filter(|v| !v.is_empty() && v.split('.').all(|n| n.parse::<u64>().is_ok())).expect("package.json's t3Code reads like 0.19.0");
+    println!("cargo:rustc-env=T3WOW_T3_CODE={version}");
 }

@@ -3980,6 +3980,10 @@ local addonName = ...
 local getMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
 local LOADED_VERSION = getMetadata and getMetadata(addonName, "Version")
 local restartSaid = false -- said in chat this UI session
+-- The companion's suggestion to update T3 Code (inbox.t3u, when the T3 it talks to runs an
+-- older one than the companion is made for; older companions leave it out), and the one
+-- chat said this UI session.
+local t3UpdateSaid
 
 -- A test build's label ("0.9.1-dev+57ee2ec") doesn't count here: it is 0.9.1.
 local function versionNumbers(v)
@@ -4024,6 +4028,8 @@ local function renderStatus()
         connected = "|cffff8000" .. restartNote() .. "|r"
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
+    elseif type(inbox.t3u) == "string" then
+        connected = "|cffffd100" .. inbox.t3u .. "|r"
     elseif inbox.trust and TRUST_NAME[inbox.trust] then
         connected = format("|cff40c040Connected|r |cffa0a0a0(%s: see Commands from the game in the T3 WoW tray menu)|r", TRUST_NAME[inbox.trust])
     else
@@ -4730,6 +4736,10 @@ function UI.OnInbox(data)
     if not restartSaid and restartNote() then
         restartSaid = true
         print("|cff8f8fffT3 WoW|r |cffff8000" .. restartNote() .. ".|r")
+    end
+    if type(data.t3u) == "string" and data.t3u ~= t3UpdateSaid then
+        t3UpdateSaid = data.t3u
+        print("|cff8f8fffT3 WoW|r |cffffd100" .. data.t3u .. ".|r")
     end
     notice = takeOutcomes(data)
     -- The run ended (or the thread dropped off the list's working states): Stop is done.

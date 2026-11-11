@@ -1932,6 +1932,34 @@ fn a_send_from_the_games_clear_starts_a_fresh_session_where_t3_can() {
     assert!(envs[0]["fc"].is_null() && envs[1]["fc"].is_null(), "{envs}");
 }
 
+#[test]
+fn an_older_t3_code_on_this_server_is_said_in_the_tray_and_the_game() {
+    let mut rig = Rig::new(27_500_000);
+    // A linked machine on an older T3 isn't what the companion talks to: only this server counts.
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.8"), ("mac".to_string(), "0.1.7")]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    let older = rig.bridge.status().older_t3.expect("T3 Code 0.18.0 is older than this release is made for");
+    assert_eq!(older.running, "0.18.0");
+    assert_eq!(rig.bridge.snapshot()["t3u"], json!(older.line()));
+
+    // Updated to the T3 Code it's made for: nothing more to say.
+    let made_for = crate::made_for::T3_CODE.strip_prefix("0.1").and_then(|rest| rest.strip_suffix(".0")).map(|n| format!("0.1.{n}")).unwrap();
+    rig.t3.versions.lock().unwrap().insert("local".to_string(), Box::leak(made_for.into_boxed_str()));
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.status().older_t3, None);
+    assert!(rig.bridge.snapshot()["t3u"].is_null());
+
+    // Another T3's sign-in forgets what the previous one ran.
+    rig.t3.versions.lock().unwrap().insert("local".to_string(), "0.1.8");
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert!(rig.bridge.status().older_t3.is_some());
+    rig.bridge.sign_out();
+    assert_eq!(rig.bridge.status().older_t3, None);
+}
+
 /// Every command kind the window sends, one frame's worth (the answer names the question
 /// the fake T3 asks, so it reaches T3 when allowed).
 fn every_kind(rig: &mut Rig, u: &str) -> Vec<(u64, &'static str)> {

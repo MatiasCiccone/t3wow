@@ -5,6 +5,7 @@
 use crate::clip::{self, Clipped};
 use crate::codec::decode_cells;
 use crate::config::Trust;
+use crate::made_for::{self, older_t3, OlderT3};
 use crate::lua::{name_model_refs, name_thread_links, plain, to_lua, wow_segments, wow_text, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
@@ -727,6 +728,8 @@ pub struct BridgeStatus {
     pub signals_lost: bool,
     /// Writing the game's update files keeps failing.
     pub write_problem: Option<String>,
+    /// The T3 the companion talks to runs an older T3 Code than this release is made for.
+    pub older_t3: Option<OlderT3>,
 }
 
 /// After this many failed publishes in a row, the tray shows the error.
@@ -754,6 +757,9 @@ pub struct Bridge {
     /// The machines whose T3 can start a fresh provider session in a thread (`freshContext`
     /// on a send, T3's /clear), by the version each one reports.
     fresh_context: HashSet<String>,
+    /// The T3 the companion talks to runs an older T3 Code than this release is made for (by
+    /// the version it reports): the tray and the game suggest updating it.
+    older_t3: Option<OlderT3>,
     /// What each machine offers for the model and effort selectors.
     catalogs: BTreeMap<String, Catalog>,
     /// T3's folder of provider caches, while the T3 in use is the one on this PC: MCP doesn't
@@ -1782,6 +1788,7 @@ impl Bridge {
             projects: BTreeMap::new(),
             new_worktrees: BTreeMap::new(),
             fresh_context: HashSet::new(),
+            older_t3: None,
             catalogs: BTreeMap::new(),
             provider_caches: None,
             t3_settings: None,
@@ -1956,6 +1963,7 @@ impl Bridge {
         self.activity.clear();
         self.new_worktrees.clear();
         self.fresh_context.clear();
+        self.older_t3 = None;
         self.catalogs.clear();
         self.settled_totals.clear();
         self.list_more.clear();
@@ -2026,6 +2034,7 @@ impl Bridge {
             signals_out: self.signals_out.is_some(),
             signals_lost: self.signals_out.as_deref() == Some(SIGNALS_LOST),
             write_problem: self.write_error.clone().filter(|_| self.write_failures >= WRITE_FAILURES_SHOWN),
+            older_t3: self.older_t3.clone(),
         }
     }
 
@@ -3181,6 +3190,7 @@ impl Bridge {
                 let local = self.local_env_id.clone().unwrap_or_default();
                 self.new_worktrees.insert(local.clone(), read["preferences"]["defaultThreadEnvMode"] == "worktree");
                 self.note_fresh_context(&local, &read);
+                self.note_t3_version(&read);
                 read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string)
             }
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
@@ -3245,6 +3255,20 @@ impl Bridge {
             self.fresh_context.insert(env.to_string());
         } else {
             self.fresh_context.remove(env);
+        }
+    }
+
+    /// Notes from the server's `t3_environment_read` whether it runs an older T3 Code than
+    /// this release is made for, and logs each change.
+    fn note_t3_version(&mut self, read: &Value) {
+        let older = older_t3(str_of(&read["serverVersion"]), str_of(&read["platform"]["os"]));
+        if older != self.older_t3 {
+            match &older {
+                Some(older) => self.log(&format!("T3 runs T3 Code {}, older than the {} this release is made for", older.running, made_for::T3_CODE)),
+                None if self.older_t3.is_some() => self.log(&format!("T3 now runs T3 Code {} or later", made_for::T3_CODE)),
+                None => {}
+            }
+            self.older_t3 = older;
         }
     }
 
@@ -4545,6 +4569,11 @@ impl Bridge {
         if let Some(version) = self.slots.addon_version() {
             out.insert("av".into(), json!(plain(&version, 40)));
         }
+        // The T3 runs an older T3 Code than this release is made for: what to say about it
+        // (left out otherwise).
+        if let Some(older) = &self.older_t3 {
+            out.insert("t3u".into(), json!(plain(&older.line(), 200)));
+        }
         Value::Object(out)
     }
 
@@ -4570,6 +4599,7 @@ impl Bridge {
             "auth": data["auth"],
             "trust": data["trust"],
             "av": data["av"],
+            "t3u": data["t3u"],
             "att": data["att"],
             "open": self.window_open,
             // A question appearing (or going away) in the open thread is urgent too.

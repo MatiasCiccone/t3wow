@@ -13,7 +13,8 @@ The Flat and Classic themes and the compact thread list are in [`assets/screensh
 ## What you need
 
 - Windows, with WoW: Forever in **windowed** or **borderless windowed** mode (exclusive fullscreen blocks screen capture).
-- T3 Code desktop running on the same PC, or on another machine this PC can reach over the network (see [T3 on another machine](#t3-on-another-machine)). Threads on other machines also show up when they are linked to T3 under **Settings → Environments → Linked environments**.
+- T3 Code desktop 0.19.0 running on the same PC, or on another machine this PC can reach over the network (see [T3 on another machine](#t3-on-another-machine)). Threads on other machines also show up when they are linked to T3 under **Settings → Environments → Linked environments**.
+- **Made for T3 Code 0.19.0.** When the T3 the companion talks to runs an older version, the companion says to update it: a tray notification, the menu's T3 line, `t3wow.exe status` and `login`, and the game window's top line and chat. Update it in T3 Code under **Help → Check for Updates...** (on a Mac, in the T3 Code menu). The companion can't start the update itself: T3 Code has no way to start one from outside.
 
 ## Set up
 
@@ -58,7 +59,7 @@ Plain `http://` over your LAN works, but it sends the sign-in token across the n
 - `run` runs in that console instead of the tray.
 - `install` reinstalls the addon from scratch (`--wow "<path to _forever_>"` if WoW lives somewhere unusual, `--interface <number>` to set the interface version).
 - `login` signs in again. `--origin <url>` points the companion at a T3 on another machine, and `--origin local` goes back to the T3 on this PC once it's running, as the tray's **T3 server** menu does (but always through the browser). The new T3 is saved only once its sign-in succeeds: a failed or cancelled sign-in leaves the companion on the T3 it had. A running companion picks up the new T3 and sign-in within 30 seconds, and the game window then shows only the new T3's threads.
-- `status` checks the addon install and the T3 connection. `status --origin <url>` (or `local`) checks that T3 with its own saved sign-in, without switching to it. Other commands don't take `--origin`.
+- `status` checks the addon install and the T3 connection, and says when that T3 runs an older T3 Code than this release is made for. `status --origin <url>` (or `local`) checks that T3 with its own saved sign-in, without switching to it. Other commands don't take `--origin`.
 - `update` downloads and installs the newest release, with the same checks as the tray. It doesn't restart a companion running in the tray: quit it from its menu and start it again. Only one update runs at a time; a second one stops with "another update is already running".
 - `uninstall` removes the addon.
 
