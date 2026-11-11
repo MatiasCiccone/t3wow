@@ -179,6 +179,26 @@ pub fn scope_can_operate(scope: &str) -> bool {
 pub const PICK_ACCESS_NOTE: &str =
     "Pick Auto on T3's sign-in page, or Full access if your threads run in full access. With Read only, the game can't send anything.";
 
+/// What to say before T3's approval page opens, from where T3's authorize step redirects. A
+/// sign-in on an environment's T3 Connect (tunnel) address goes to T3's hosted page
+/// (`https://app.t3.codes/approve-agent`, nightly.app.t3.codes on nightlies): the owner signs in
+/// to T3 Connect there, and it starts with no access picked. Any other goes to the
+/// environment's own `/connect-agent` page, where approving without a code grants Read only.
+fn approval_notes(redirect: Option<&str>) -> [String; 2] {
+    let path = redirect.unwrap_or("").split(['?', '#']).next().unwrap_or("");
+    if path.trim_end_matches('/').ends_with("/approve-agent") {
+        [
+            format!("Opening T3 Connect's sign-in page. {PICK_ACCESS_NOTE} It starts with no access picked."),
+            "If it asks you to sign in, use your T3 Connect account.".to_string(),
+        ]
+    } else {
+        [
+            format!("Opening the T3 sign-in page. {PICK_ACCESS_NOTE} T3 starts at Read only when you approve without a code."),
+            "If it asks for a code, make one in T3 under Settings > Sharing & access.".to_string(),
+        ]
+    }
+}
+
 /// Said after a sign-in that can only read, and on the tray menu and the game's top line
 /// while it's the one in use.
 pub const READ_ONLY_NOTE: &str =
@@ -269,6 +289,14 @@ fn reachable(origin: &str) -> Result<(), String> {
     agent().get(origin).config().max_redirects(0).build().call().map(drop).map_err(|e| e.to_string())
 }
 
+/// The status of T3's authorize step and where it redirects: to its approval page, which says
+/// which page the user will see (`approval_notes`).
+fn authorize_redirect(url: &str) -> Result<(u16, Option<String>), String> {
+    let response = agent().get(url).config().max_redirects(0).build().call().map_err(|e| e.to_string())?;
+    let location = response.headers().get("location").and_then(|l| l.to_str().ok()).map(str::to_string);
+    Ok((response.status().as_u16(), location))
+}
+
 /// T3's MCP sign-in: register a public client (once per server: the client id is saved under
 /// `key`), send the user to the approval page, receive the code on a loopback port, exchange
 /// it with PKCE. The approval page is where the user picks the access: Read only can't send,
@@ -297,17 +325,19 @@ fn login(origin: &str, key: &str, log: &dyn Fn(&str), on_browser: &dyn Fn(), can
         format!("{origin}/oauth/mcp/authorize?{}", query.join("&"))
     };
 
-    // A saved client is still good while T3's authorize step redirects for it (to the approval
-    // page); an unknown client gets an error page (400) instead. Loopback redirects match
-    // whatever the port, so the saved registration fits this sign-in's port too.
+    let approval_page = |id: &str| authorize_redirect(&authorize_url(id)).map_err(|e| format!("T3 unreachable at {origin}: {e}"));
+    // A saved client is still good while T3's authorize step redirects for it; an unknown client
+    // gets an error page (400) instead. Loopback redirects match whatever the port, so the saved
+    // registration fits this sign-in's port too.
     let mut client_id = Config::load().client_id(key);
+    let mut page = None;
     if let Some(id) = &client_id {
-        let response = http.get(&authorize_url(id)).config().max_redirects(0).build().call();
-        let status = response.map_err(|e| format!("T3 unreachable at {origin}: {e}"))?.status().as_u16();
+        let (status, location) = approval_page(id)?;
         if (400..500).contains(&status) {
             log("T3 no longer knows this app's registration: registering again.");
             client_id = None;
         }
+        page = location;
     }
     let client_id = match client_id {
         Some(id) => id,
@@ -325,13 +355,15 @@ fn login(origin: &str, key: &str, log: &dyn Fn(&str), on_browser: &dyn Fn(), can
             }
             let id = registration["client_id"].as_str().ok_or("Registration returned no client id")?.to_string();
             Config::update(|c| c.set_client_id(key, Some(id.clone())));
+            page = approval_page(&id)?.1;
             id
         }
     };
 
     let authorize = authorize_url(&client_id);
-    log(&format!("Opening the T3 sign-in page. {PICK_ACCESS_NOTE} T3 starts at Read only when you approve without a code."));
-    log("If it asks for a code, make one in T3 under Settings > Sharing & access.");
+    for line in approval_notes(page.as_deref()) {
+        log(&line);
+    }
     log(&format!("If no browser opened, visit: {authorize}"));
     open_browser(&authorize);
     on_browser();
@@ -681,6 +713,42 @@ impl McpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sign_in_note_follows_the_page_t3_sends_the_browser_to() {
+        // T3 Code 0.19.0 sends a sign-in on a T3 Connect address to its hosted page, which starts
+        // with no access picked; any other keeps the environment's page, where no code means Read only.
+        let hosted = approval_notes(Some("https://app.t3.codes/approve-agent?response_type=code&client_id=c&environment=e"));
+        assert!(hosted[0].contains("no access picked"), "{}", hosted[0]);
+        assert!(!hosted.concat().contains("Read only when"), "{hosted:?}");
+        assert!(approval_notes(Some("https://nightly.app.t3.codes/approve-agent/?x=1"))[0].contains("T3 Connect"));
+        for local in [Some("/connect-agent?response_type=code"), Some("http://127.0.0.1:3773/connect-agent"), None] {
+            let notes = approval_notes(local);
+            assert!(notes[0].contains("T3 starts at Read only when you approve without a code"), "{local:?}: {}", notes[0]);
+            assert!(notes[1].contains("Settings > Sharing & access"), "{local:?}");
+        }
+        // A query that names the hosted page doesn't count: only the redirect's path does.
+        assert!(approval_notes(Some("/connect-agent?next=/approve-agent"))[0].contains("Read only"));
+    }
+
+    #[test]
+    fn the_authorize_step_is_read_without_following_its_redirect() {
+        // As T3 Code 0.19.0 answers an authorize request that came in on a T3 Connect address.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t3 = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let location = "https://app.t3.codes/approve-agent?response_type=code&environment=e";
+            let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+        let (status, location) = authorize_redirect(&format!("http://127.0.0.1:{port}/oauth/mcp/authorize?client_id=c")).unwrap();
+        assert_eq!(status, 302);
+        assert!(approval_notes(location.as_deref())[0].contains("T3 Connect"), "{location:?}");
+        assert!(t3.join().unwrap().starts_with("GET /oauth/mcp/authorize?client_id=c "));
+    }
 
     #[test]
     fn query_strings_round_trip() {
