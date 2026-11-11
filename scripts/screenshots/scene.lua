@@ -58,7 +58,7 @@ local view = { e = 1, id = "t2", t = "Pick a theme for the landing page", s = "w
 
 local function inbox(extra)
   local data = { k = "c1", ack = 0, envs = ENVS, threads = THREADS, projects = {}, notes = {}, events = {}, now = time(), u = Link.Session(),
-    sel = true, models = CATALOG, more = { open = true }, settledTotal = 42 }
+    sel = true, models = CATALOG, more = { open = true }, settledTotal = 42, cv = "0.0.0" }
   for k, v in pairs(extra or {}) do data[k] = v end
   local q = Link.Queue()
   for i = #q, 1, -1 do q[i] = nil end

@@ -4726,6 +4726,9 @@ impl Bridge {
         if let Some(older) = &self.older_t3 {
             out.insert("t3u".into(), json!(plain(&older.line(), 200)));
         }
+        // This companion's version, so the game can say when the companion is older than
+        // the addon (one updated from CurseForge, say) and needs an update itself.
+        out.insert("cv".into(), json!(plain(crate::updater::current_version(), 40)));
         Value::Object(out)
     }
 

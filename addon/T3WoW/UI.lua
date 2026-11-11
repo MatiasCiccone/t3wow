@@ -4119,6 +4119,35 @@ local function restartNote()
     return labelled and inbox.av ~= LOADED_VERSION and note or nil
 end
 
+-- -1, 0 or 1 as version a (a list of numbers) is older than, the same as or newer than b.
+function UI.CompareVersions(a, b)
+    for i = 1, math.max(#a, #b) do
+        local x, y = a[i] or 0, b[i] or 0
+        if x ~= y then return x < y and -1 or 1 end
+    end
+    return 0
+end
+
+-- The companion names its own version (inbox.cv; older companions leave it out). The
+-- addon and the companion are released together under one version (release.yml checks
+-- they match), so the companion this addon was made for has the addon's version, and an
+-- older one is out of date: CurseForge updated the addon, say, but not the companion.
+-- What to say then (nil otherwise). An update written for an earlier UI session doesn't
+-- count: one left in a slot may come from the companion that ran before an update. One
+-- that doesn't name its session (0.4.1 and before) does, as for its ack (Link.lua).
+-- UI.companionSaid: said in chat this UI session.
+function UI.CompanionNote()
+    local loaded = versionNumbers(LOADED_VERSION)
+    if not loaded or not inbox or not ns.Link.IsMine(inbox) or (inbox.u ~= nil and inbox.u ~= ns.Link.Session()) then return nil end
+    if inbox.cv == nil then
+        return format("The T3 WoW companion is older than this addon (%s): update it from its tray menu", LOADED_VERSION)
+    end
+    -- A test build's label (0.9.2-dev+57ee2ec) doesn't make it older: versionNumbers.
+    local numbers = versionNumbers(inbox.cv)
+    if not numbers or UI.CompareVersions(numbers, loaded) >= 0 then return nil end
+    return format("T3 WoW companion %s is older than this addon (%s): update it from its tray menu", inbox.cv, LOADED_VERSION)
+end
+
 local function renderStatus()
     local link = ns.Link.Status()
     local connected
@@ -4134,6 +4163,8 @@ local function renderStatus()
         connected = "|cffff4040" .. inbox.auth .. "|r"
     elseif restartNote() then
         connected = "|cffff8000" .. restartNote() .. "|r"
+    elseif UI.CompanionNote() then
+        connected = "|cffff8000" .. UI.CompanionNote() .. "|r"
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
     elseif type(inbox.t3u) == "string" then
@@ -4848,6 +4879,10 @@ function UI.OnInbox(data)
     if type(data.t3u) == "string" and data.t3u ~= t3UpdateSaid then
         t3UpdateSaid = data.t3u
         print("|cff8f8fffT3 WoW|r |cffffd100" .. data.t3u .. ".|r")
+    end
+    if not UI.companionSaid and UI.CompanionNote() then
+        UI.companionSaid = true
+        print("|cff8f8fffT3 WoW|r |cffff8000" .. UI.CompanionNote() .. " (right-click T3 WoW in the system tray: Check for updates).|r")
     end
     notice = takeOutcomes(data)
     -- The run ended (or the thread dropped off the list's working states): Stop is done.
