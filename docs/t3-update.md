@@ -1,6 +1,6 @@
 # Moving to a new T3 Code release
 
-T3 WoW says which T3 Code it's made for (`assets/curseforge-description.md`). Before that changes, compare what the new T3 changed with what the companion relies on: `npm run test:live` catches changed tool inputs and answers, but not a change in what the same inputs do.
+T3 WoW says which T3 Code it's made for: `t3Code` in `package.json` is the one place that version is set. The companion is built with it (it suggests updating a T3 that runs an older one), and `npm test` checks that the README and `assets/curseforge-description.md` say the same. Before that changes, compare what the new T3 changed with what the companion relies on: `npm run test:live` catches changed tool inputs and answers, but not a change in what the same inputs do.
 
 **Version names:** T3's GitHub tags and the `serverVersion` that `t3_environment_read` reports read `0.1.N`; this project's docs write that as `0.1N.0` (tag `v0.1.8` is T3 Code 0.18.0).
 
@@ -34,4 +34,4 @@ Then record the new T3's tools: `T3WOW_LIVE_UPDATE_TOOLS=1 npm run test:live`. I
 
 ## 4. Release
 
-When `npm run test:live` passes, change **Made for T3 Code** in `assets/curseforge-description.md` (all four mentions), and release as the README's **Releasing** says. If the companion or the addon changed, do the [smoke test in the game](smoke-test.md) first.
+When `npm run test:live` passes, change `t3Code` in `package.json`, then the version in the README's **What you need** and in `assets/curseforge-description.md` (all four mentions), until `npm test` passes. Release as the README's **Releasing** says. If the companion or the addon changed, do the [smoke test in the game](smoke-test.md) first.

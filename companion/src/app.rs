@@ -6,6 +6,7 @@
 use crate::bridge::{Bridge, CaptureMessage};
 use crate::config::{config_dir, now_ms, server_label, unencrypted_over_network, update_check_due, Config, Trust, UpdateChecks};
 use crate::log;
+use crate::made_for::{self, OlderT3};
 use crate::slots::{Slots, SLOT_COUNT};
 
 use crate::t3::{self, McpClient, T3};
@@ -347,6 +348,17 @@ impl App {
 }
 
 /// What the tray says while T3's sign-in page waits in the browser.
+/// The tray's notification when the T3 runs an older T3 Code than this release is made for:
+/// once for each version it runs, so it doesn't come back with every poll.
+fn older_t3_notice(older: Option<&OlderT3>, said: &mut Option<String>) -> Option<Notice> {
+    let older = older?;
+    if said.as_deref() == Some(older.running.as_str()) {
+        return None;
+    }
+    *said = Some(older.running.clone());
+    Some(Notice::new(Level::Warning, format!("Update T3 Code to {}", made_for::T3_CODE), older.note()))
+}
+
 fn browser_open_text() -> String {
     format!("T3's sign-in page is open in your browser. {} Asked for a code? Make one in T3 under Settings → Sharing & access.", t3::PICK_ACCESS_NOTE)
 }
@@ -653,6 +665,8 @@ pub fn run(app: Arc<App>) {
     let mut seen_running = false;
     // When to look for addon files gone next (Put back missing addon files automatically).
     let mut put_back_at = Instant::now() + PUT_BACK_EVERY;
+    // The older T3 Code the tray's notification last went out for: once per start and version.
+    let mut older_said: Option<String> = None;
     loop {
         while let Ok(message) = capture_rx.try_recv() {
             bridge.on_capture(message);
@@ -757,10 +771,17 @@ pub fn run(app: Arc<App>) {
         } else if s.t3_ok && s.sign_in_read_only {
             READ_ONLY_LINE.to_string()
         } else if s.t3_ok {
-            format!("T3: connected ({} machine{})", s.machines, if s.machines == 1 { "" } else { "s" })
+            let connected = format!("T3: connected ({} machine{})", s.machines, if s.machines == 1 { "" } else { "s" });
+            match &s.older_t3 {
+                Some(older) => format!("{connected}. {}", older.line()),
+                None => connected,
+            }
         } else {
             "T3: connecting…".to_string()
         };
+        if let Some(notice) = older_t3_notice(s.older_t3.as_ref(), &mut older_said) {
+            app.notify(notice);
+        }
         let used = s.slot.saturating_sub(1).min(SLOT_COUNT);
         let wow_line = match (s.wow_running, s.in_game, s.signals) {
             (false, _, _) => "not running".to_string(),
@@ -840,6 +861,21 @@ mod tests {
         // The page's own notice says which level to pick, whole.
         assert!(browser_open_text().contains("Pick Auto"));
         assert!(fits_a_toast(&browser_open_text()), "{}", browser_open_text());
+    }
+
+    #[test]
+    fn an_older_t3_code_is_announced_once_per_version_it_runs() {
+        let older = crate::made_for::older_t3("0.1.7", "windows").unwrap();
+        let mut said = None;
+        let notice = older_t3_notice(Some(&older), &mut said).expect("the first time");
+        assert_eq!(notice.level, Level::Warning);
+        assert_eq!(notice.title, format!("Update T3 Code to {}", made_for::T3_CODE));
+        assert!(notice.text.contains("T3 Code 0.17.0") && notice.text.contains("Help > Check for Updates..."), "{}", notice.text);
+        assert!(fits_a_toast(&notice.text), "{}", notice.text);
+        assert_eq!(older_t3_notice(Some(&older), &mut said), None, "not with every poll");
+        assert_eq!(older_t3_notice(None, &mut said), None);
+        let older_still = crate::made_for::older_t3("0.1.8", "windows").unwrap();
+        assert!(older_t3_notice(Some(&older_still), &mut said).is_some(), "another older version is said again");
     }
 
     #[test]
