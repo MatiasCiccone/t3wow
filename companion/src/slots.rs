@@ -90,13 +90,16 @@ pub fn parse_version(toc: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The `## Version:` of the addon this companion ships.
+/// The `## Version:` of the addon this companion ships: the companion's own version, so a
+/// test build's addon names its commit too ("0.9.1-dev+57ee2ec").
 pub fn shipped_version() -> String {
-    parse_version(&String::from_utf8_lossy(ADDON_FILES[0].1)).unwrap_or_else(|| "0".into())
+    crate::VERSION.to_string()
 }
 
+/// Orders versions by their numbers, part by part. A build label ("-dev+57ee2ec") doesn't
+/// count: a test build of 0.9.1 is no older or newer than 0.9.1 itself.
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse = |v: &str| v.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let parse = |v: &str| v.split(['-', '+']).next().unwrap_or_default().split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     let (pa, pb) = (parse(a), parse(b));
     for i in 0..pa.len().max(pb.len()) {
         let order = pa.get(i).unwrap_or(&0).cmp(pb.get(i).unwrap_or(&0));
@@ -192,7 +195,15 @@ impl Slots {
             if *name == "T3WoW.toc" {
                 let toc = String::from_utf8_lossy(data)
                     .lines()
-                    .map(|line| if line.starts_with("## Interface:") { format!("## Interface: {}", self.interface) } else { line.to_string() })
+                    .map(|line| {
+                        if line.starts_with("## Interface:") {
+                            format!("## Interface: {}", self.interface)
+                        } else if line.starts_with("## Version:") {
+                            format!("## Version: {}", shipped_version())
+                        } else {
+                            line.to_string()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\r\n");
                 fs::write(path, toc + "\r\n")?;
@@ -315,6 +326,12 @@ impl Slots {
                 std::cmp::Ordering::Greater => {
                     self.write_addon()?;
                     Some(format!("updated {installed} to {shipped}"))
+                }
+                // The same release, another build (a test build, or back from one): this
+                // companion's files, so the game runs the addon made for it.
+                std::cmp::Ordering::Equal if installed != shipped => {
+                    self.write_addon()?;
+                    Some(format!("replaced {installed} with {shipped}"))
                 }
                 std::cmp::Ordering::Equal => {
                     let restored = self.write_addon_files(true)?;
@@ -672,5 +689,32 @@ mod tests {
         assert_eq!(compare_versions("0.10.0", "0.9.9"), Greater);
         assert_eq!(compare_versions("0.3", "0.3.0"), Equal);
         assert_eq!(compare_versions("0.2.7", "0.3.0"), Less);
+        // A test build's label doesn't order it: a build of 0.9.1 is 0.9.1.
+        assert_eq!(compare_versions("0.9.1-dev+57ee2ec", "0.9.1"), Equal);
+        assert_eq!(compare_versions("0.9.1-dev+57ee2ec.dirty", "0.9.1-dev+0123abc"), Equal);
+        assert_eq!(compare_versions("0.9.2", "0.9.1-dev+57ee2ec"), Greater);
+        assert_eq!(compare_versions("0.10.0-dev", "0.9.9"), Greater);
+    }
+
+    #[test]
+    fn another_build_of_the_same_release_replaces_the_addon() {
+        let dir = temp_dir("other-build");
+        let slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        // The installed toc names this build, whatever the repo's toc says.
+        assert_eq!(slots.installed_version(), Some(shipped_version()));
+        let toc = dir.join("T3WoW/T3WoW.toc");
+        let base = env!("CARGO_PKG_VERSION");
+        for other in [format!("{base}-dev+0123abc"), base.to_string()].into_iter().filter(|v| *v != shipped_version()) {
+            let text = fs::read_to_string(&toc).unwrap().replace(&format!("## Version: {}", shipped_version()), &format!("## Version: {other}"));
+            fs::write(&toc, text).unwrap();
+            fs::write(dir.join("T3WoW/UI.lua"), "-- the other build's").unwrap();
+            assert_eq!(slots.repair().unwrap().addon, Some(format!("replaced {other} with {}", shipped_version())));
+            assert_eq!(slots.installed_version(), Some(shipped_version()));
+            assert_ne!(fs::read_to_string(dir.join("T3WoW/UI.lua")).unwrap(), "-- the other build's");
+        }
+        // This build again: nothing to do.
+        assert_eq!(slots.repair().unwrap().addon, None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

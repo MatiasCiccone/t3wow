@@ -225,7 +225,7 @@ impl App {
                 }
                 Ok(None) => {
                     if asked {
-                        app.notify(Notice::new(Level::Info, "T3 WoW is up to date", format!("You have {current}, the newest release.")));
+                        app.notify(Notice::new(Level::Info, "T3 WoW is up to date", updater::up_to_date_text()));
                     }
                     Update::UpToDate
                 }
@@ -266,7 +266,7 @@ impl App {
             }
             let Some(release) = release_to_install(offered, newest) else {
                 app.set_activity(Task::Update, None);
-                app.notify(Notice::new(Level::Info, "T3 WoW is up to date", format!("You have {}, the newest release.", updater::current_version())));
+                app.notify(Notice::new(Level::Info, "T3 WoW is up to date", updater::up_to_date_text()));
                 *app.update.lock().unwrap() = Update::UpToDate;
                 return;
             };
@@ -630,7 +630,7 @@ pub fn run(app: Arc<App>) {
     // Another T3 than the game's updates came from last time (`login --origin` while the
     // companion was off): the game drops the previous one's threads.
     bridge.set_login(&key);
-    log::line(&format!("T3 WoW companion {}: T3 at {origin}, WoW at {}", env!("CARGO_PKG_VERSION"), wow_dir.display()));
+    log::line(&format!("T3 WoW companion {}: T3 at {origin}, WoW at {}", crate::VERSION, wow_dir.display()));
     // Pages and images go to the game as pictures, drawn with the browser Windows has.
     match crate::render::Edge::find(config_dir().join("render")) {
         Some(edge) => bridge.set_painter(Some(Box::new(edge))),

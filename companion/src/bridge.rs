@@ -4526,7 +4526,7 @@ impl Bridge {
         // The addon version on disk, so the game can say when it needs a restart of WoW to
         // load newer files (left out when unknown).
         if let Some(version) = self.slots.addon_version() {
-            out.insert("av".into(), json!(plain(&version, 20)));
+            out.insert("av".into(), json!(plain(&version, 40)));
         }
         Value::Object(out)
     }

@@ -610,7 +610,7 @@ impl McpClient {
             "jsonrpc": "2.0",
             "id": self.next_id.fetch_add(1, Ordering::SeqCst),
             "method": "initialize",
-            "params": { "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "t3wow", "version": env!("CARGO_PKG_VERSION") } },
+            "params": { "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "t3wow", "version": crate::VERSION } },
         });
         for (body, reply) in [(init, true), (json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), false)] {
             match self.post(&body, reply, deadline) {
