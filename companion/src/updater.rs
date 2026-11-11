@@ -55,6 +55,16 @@ fn repo() -> String {
     REPO.to_string()
 }
 
+/// Debug builds can also send the API call elsewhere (`T3WOW_UPDATE_API`, say a local server
+/// answering 403, to try the release page fallback).
+fn api() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(api) = std::env::var("T3WOW_UPDATE_API") {
+        return api;
+    }
+    "https://api.github.com".to_string()
+}
+
 fn http() -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -90,15 +100,52 @@ fn up_to_date_for(current: &str) -> String {
 /// The newest release if it is newer than this companion. Ok(None): up to date, or no
 /// release can be seen (a private repository looks the same as one without releases).
 pub fn check() -> Result<Option<Release>, String> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", repo());
+    let url = format!("{}/repos/{}/releases/latest", api(), repo());
     let mut response = http().get(&url).header("accept", "application/vnd.github+json").call().map_err(|e| e.to_string())?;
-    match response.status().as_u16() {
-        200 => {}
+    let release: Value = match response.status().as_u16() {
+        200 => response.body_mut().read_json().map_err(|e| e.to_string())?,
         404 => return Ok(None),
+        // Without a sign-in, GitHub's API allows 60 calls an hour per network address, shared
+        // by every program behind it; past that it answers 403 (or 429). The release page
+        // isn't counted against that, and names the newest release too.
+        code @ (403 | 429) => latest_from_page()
+            .map_err(|e| format!("GitHub is limiting update checks from this network ({code}), and its release page didn't answer: {e}"))?,
         code => return Err(format!("GitHub answered {code}")),
-    }
-    let release: Value = response.body_mut().read_json().map_err(|e| e.to_string())?;
+    };
     newer_release(&release, current_version(), release_key().is_some())
+}
+
+/// The newest release as github.com/<repo>/releases/latest names it (it redirects to the
+/// release's tag), with the files every release carries. Null when there's none to see.
+fn latest_from_page() -> Result<Value, String> {
+    let repo = repo();
+    let url = format!("https://github.com/{repo}/releases/latest");
+    let response = http().get(&url).config().max_redirects(0).build().call().map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let location = response.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    match (status, tag_in(location)) {
+        (300..=399, Some(tag)) => Ok(release_at(&repo, tag)),
+        // No release yet (the page sends you to the empty list), or no such repository.
+        (300..=399, None) | (404, _) => Ok(Value::Null),
+        _ => Err(format!("it answered {status}")),
+    }
+}
+
+/// The tag in a release page's address: ".../releases/tag/v0.9.1" -> "v0.9.1".
+fn tag_in(location: &str) -> Option<&str> {
+    let (_, rest) = location.split_once("/releases/tag/")?;
+    let tag = rest.split(['?', '#']).next().unwrap_or_default();
+    (!tag.is_empty() && !tag.contains('/')).then_some(tag)
+}
+
+/// A release as the API would describe it, from its tag alone: its files are where every
+/// release keeps them. One missing (say, a signature) shows when the update downloads it.
+fn release_at(repo: &str, tag: &str) -> Value {
+    let assets: Vec<Value> = [EXE, SHA, SIG]
+        .iter()
+        .map(|name| serde_json::json!({ "name": name, "browser_download_url": format!("https://github.com/{repo}/releases/download/{tag}/{name}") }))
+        .collect();
+    serde_json::json!({ "tag_name": tag, "assets": assets })
 }
 
 /// The release if it is newer than `current`. A newer release without its checksum (or,
@@ -405,6 +452,41 @@ mod tests {
         assert_eq!(newer_release(&release("v0.9.2"), "0.9.1-dev+57ee2ec", true).unwrap().unwrap().version, "0.9.2");
         assert_eq!(up_to_date_for("0.9.1"), "You have 0.9.1, the newest release.");
         assert_eq!(up_to_date_for("0.9.1-dev+57ee2ec"), "You have 0.9.1-dev+57ee2ec, a test build: no release is newer than 0.9.1.");
+    }
+
+    #[test]
+    fn the_release_page_names_the_newest_release_when_the_api_is_rate_limited() {
+        assert_eq!(tag_in("https://github.com/o/r/releases/tag/v0.9.1"), Some("v0.9.1"));
+        assert_eq!(tag_in("/o/r/releases/tag/v0.9.1?x=1"), Some("v0.9.1"));
+        assert_eq!(tag_in("https://github.com/o/r/releases"), None);
+        assert_eq!(tag_in(""), None);
+        assert_eq!(
+            newer_release(&release_at("o/r", "v1.0.0"), "0.9.1", true),
+            Ok(Some(Release {
+                version: "1.0.0".into(),
+                exe_url: "https://github.com/o/r/releases/download/v1.0.0/t3wow.exe".into(),
+                sha_url: "https://github.com/o/r/releases/download/v1.0.0/t3wow.exe.sha256".into(),
+                sig_url: Some("https://github.com/o/r/releases/download/v1.0.0/t3wow.exe.sha256.sig".into()),
+            }))
+        );
+        assert_eq!(newer_release(&release_at("o/r", "v0.9.1"), "0.9.1", true), Ok(None));
+        assert_eq!(newer_release(&Value::Null, "0.9.1", true), Ok(None));
+    }
+
+    /// The real release page, as the fallback reads it, against the API. Needs the network:
+    /// `cargo test updater::tests::live -- --ignored`.
+    #[test]
+    #[ignore = "needs the network"]
+    fn live_the_release_page_names_the_same_release_as_the_api() {
+        let page = latest_from_page().unwrap();
+        let mut response = http().get(&format!("https://api.github.com/repos/{REPO}/releases/latest")).call().unwrap();
+        assert_eq!(response.status().as_u16(), 200, "the API is rate limited right now: try later");
+        let api: Value = response.body_mut().read_json().unwrap();
+        assert_eq!(page["tag_name"], api["tag_name"]);
+        for asset in page["assets"].as_array().unwrap() {
+            let listed = api["assets"].as_array().unwrap().iter().any(|a| a["browser_download_url"] == asset["browser_download_url"]);
+            assert!(listed || asset["name"] == SIG, "{asset} isn't in the release");
+        }
     }
 
     #[test]
