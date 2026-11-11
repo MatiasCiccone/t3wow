@@ -4,9 +4,9 @@ A bad release can be unlisted: it stays on [t3wow-releases](https://github.com/M
 
 ## How it works
 
-- Every companion, from 0.4.0 on, asks GitHub for the repository's **latest** release (`/releases/latest`) and offers it only when it's newer than itself. GitHub never answers a prerelease there, and the companion skips a prerelease as well.
+- Every companion, from 0.4.0 on, asks GitHub for the repository's **latest** release and offers it only when it's newer than itself. It asks the API (`api.github.com/repos/…/releases/latest`), or the release page (`github.com/…/releases/latest`) when the API limits it. Both follow the same "latest" pointer, which never points at a prerelease. A release from the API that is marked prerelease is skipped as well.
 - So **unlisting a release means marking it a prerelease**. A listed release is a published release that isn't a prerelease.
-- GitHub doesn't reliably move "latest" on its own when the latest release becomes a prerelease. The releases on t3wow-releases all share one commit, so GitHub can't order them by date. `scripts/unlist-release.mjs` therefore marks the newest listed release "latest" itself, then reads it back from the same address companions ask.
+- GitHub doesn't reliably move "latest" on its own when the latest release becomes a prerelease. The releases on t3wow-releases all share one commit, so GitHub can't order them by date. `scripts/unlist-release.mjs` therefore marks the newest listed release "latest" itself, then reads it back from the API address companions ask (the release page follows the same pointer).
 - Nothing is deleted, rebuilt or re-signed. Each release keeps its `t3wow.exe`, `t3wow.exe.sha256` and `t3wow.exe.sha256.sig`. Whatever a companion installs is checked exactly as before: the SHA-256 and, once the release key is in, the signature.
 
 What it means for each companion, with 0.9.1 unlisted and 0.9.0 the newest listed release:
