@@ -3999,15 +3999,25 @@ fn back_to_back_messages_sent_into_a_turn_split_it_once_after_the_last() {
         at(in_run(said(5, "assistant_message", "all done"), "r1"), "2026-11-06T10:02:00Z"),
     ];
     let rig = fold_rig(68_000_000, "completed", activity, json!([run_of("r1", "completed")]));
-    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "working on it", "one", "two", "Continued for 1m", "Read 1 file", "all done"]);
+    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "working on it", "one", "two", "Continued for 1m 0s", "Read 1 file", "all done"]);
 }
 
 #[test]
 fn durations_read_as_t3_says_them() {
-    assert_eq!(format_duration(22), "22s");
-    assert_eq!(format_duration(167), "2m 47s");
-    assert_eq!(format_duration(120), "2m");
-    assert_eq!(format_duration(3605), "1h 5s");
+    // Seconds show whenever minutes do (T3 0.19.0); hours alone stay bare.
+    for (seconds, said) in [
+        (22, "22s"),
+        (59, "59s"),
+        (60, "1m 0s"),
+        (167, "2m 47s"),
+        (720, "12m 0s"),
+        (736, "12m 16s"),
+        (3600, "1h"),
+        (3605, "1h 5s"),
+        (3660, "1h 1m 0s"),
+    ] {
+        assert_eq!(format_duration(seconds), said, "{seconds}s");
+    }
 }
 
 #[test]
