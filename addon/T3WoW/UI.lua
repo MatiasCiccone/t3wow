@@ -95,7 +95,7 @@ local inbox
 -- Machines and projects are kept by id: their places in the lists change between updates.
 local selected
 local collapsed = { settled = true, snoozed = true }
-local echo -- { id, text, s } shown until the thread view catches up
+local echo -- { id, text, sent, s } shown until the thread view catches up; sent: what went out
 local notice
 -- Commands whose outcome matters, by number, until the companion reports it (inbox.out):
 -- { kind = "send" | "new" | "answer", text, at }. A failure puts the text back.
@@ -2675,14 +2675,14 @@ function renderView()
         -- Your message is in once any recent message of yours matches it: the agent may
         -- already have answered, so it needn't be the last one. Compare letters and digits
         -- only, since the thread view reformats text (markdown, escaped pipes). A message that
-        -- names a model shows its name; its copy text (cx) has the model:... you typed.
+        -- names a model shows its name; its copy text (cx) has the model:... that went out.
         local function key(text)
             return (text or ""):gsub("||", ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("[^%w]", ""):lower():sub(1, 40)
         end
-        local wanted, arrived = key(echo.text), false
+        local wanted, sent, arrived = key(echo.text), key(echo.sent), false
         for i = count, math.max(1, count - 7), -1 do
             local item = items[i]
-            if item.r == "u" and (key(item.x) == wanted or (item.cx and key(item.cx) == wanted)) then arrived = true break end
+            if item.r == "u" and (key(item.x) == wanted or (item.cx and (key(item.cx) == wanted or key(item.cx) == sent))) then arrived = true break end
         end
         if arrived then
             echo = nil
@@ -3495,7 +3495,7 @@ local function sendCurrent()
     if selected.new then
         UI.Notice("Starting a new thread…")
     elseif text ~= "" then
-        echo = { id = selected.id, text = text, s = s, images = images }
+        echo = { id = selected.id, text = text, sent = command.m, s = s, images = images }
     end
     input:SetText("")
     UI.Refresh()
@@ -3734,14 +3734,63 @@ do
         return {}
     end
 
+    -- How each of a machine's models reads in the box while you write: @ and its name, as
+    -- T3's chip shows it, and what goes out in its place, model:<instance>/<model>. A name
+    -- two models share (or a machine's) says its provider too; still not one of a kind, or
+    -- not something the box can show, it stays as the reference. Keyed by "pv/id". Pure, for
+    -- the tests: providers as inbox.models carries them, taken the machines' names.
+    function Picker.ModelTokens(providers, taken)
+        local list, count = {}, {}
+        local function bump(token) count[token:lower()] = (count[token:lower()] or 0) + 1 end
+        for _, name in ipairs(taken or {}) do bump("@" .. name) end
+        for _, p in ipairs(providers or {}) do
+            for _, model in ipairs(type(p) == "table" and type(p.m) == "table" and p.m or {}) do
+                if referable(p.id, model.id) then
+                    local name = tostring(model.t or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    local entry = { key = p.id .. "/" .. model.id, reference = "model:" .. p.id .. "/" .. model.id, name = name,
+                        provider = tostring(p.t or p.id):gsub("^%s+", ""):gsub("%s+$", "") }
+                    list[#list + 1] = entry
+                    if name ~= "" then bump("@" .. name) end
+                end
+            end
+        end
+        local readable = function(text) return text ~= "" and not text:find("[|\n\r]") end
+        local byKey, qualified = {}, {}
+        for _, entry in ipairs(list) do
+            entry.token = entry.reference
+            if readable(entry.name) and count[("@" .. entry.name):lower()] == 1 then
+                entry.token = "@" .. entry.name
+            elseif readable(entry.name) and readable(entry.provider) then
+                entry.token = "@" .. entry.name .. " (" .. entry.provider .. ")"
+                qualified[entry.token:lower()] = (qualified[entry.token:lower()] or 0) + 1
+            end
+            byKey[entry.key] = entry
+        end
+        for _, entry in ipairs(list) do
+            local lower = entry.token:lower()
+            if entry.token ~= entry.reference and ((qualified[lower] or 0) > 1 or (count[lower] and entry.token ~= "@" .. entry.name)) then
+                entry.token = entry.reference
+            end
+        end
+        return byKey, list
+    end
+
+    local function machineNames()
+        local names = {}
+        for _, e in ipairs(machines()) do names[#names + 1] = e.name end
+        return names
+    end
+
     -- The thread's machine's models for an @ query, best first, as T3 0.18 ranks them
     -- (composer-model-mentions): every word typed starts a word of the model's or provider's
-    -- name, and two letters at least. A pick writes model:<instance>/<model>, which names a
-    -- model for the agent and switches nothing.
+    -- name, and two letters at least. A pick writes @ and the model's name, which goes out
+    -- as model:<instance>/<model>: it names a model for the agent and switches nothing.
     local function models(query)
-        local list = Picker.Models(Selectors.ProvidersOn(selected.env), query)
+        local providers = Selectors.ProvidersOn(selected.env)
+        local list, tokens = Picker.Models(providers, query), Picker.ModelTokens(providers, machineNames())
         for _, m in ipairs(list) do
-            m.text, m.insert, m.note = m.name, "model:" .. m.pv .. "/" .. m.id, m.provider
+            local entry = tokens[m.pv .. "/" .. m.id]
+            m.text, m.insert, m.note = m.name, entry and entry.token or ("model:" .. m.pv .. "/" .. m.id), m.provider
         end
         return list
     end
@@ -3806,20 +3855,32 @@ do
         return true
     end
 
-    -- An @machine goes out as T3 stores one: a link it reads for the chip, the machine's id in it.
+    -- An @machine goes out as T3 stores one: a link it reads for the chip, the machine's id
+    -- in it. An @model goes out as the model:<instance>/<model> T3 reads.
     function Picker.Expand(text)
-        local others = machines()
-        -- The longest first: "@AIQ Mac" isn't "@AIQ" followed by a word.
-        table.sort(others, function(a, b) return #a.name > #b.name end)
-        for _, e in ipairs(others) do
-            local token, from = "@" .. e.name, 1
+        local tags = {}
+        for _, e in ipairs(machines()) do
             local label = e.name:gsub("%]", "")
-            local reference = format("[%s](t3-context://v1/environment/environment_%s)", label, e.id)
+            tags[#tags + 1] = { token = "@" .. e.name, reference = format("[%s](t3-context://v1/environment/environment_%s)", label, e.id) }
+        end
+        if selected then
+            local _, list = Picker.ModelTokens(Selectors.ProvidersOn(selected.env), machineNames())
+            for _, entry in ipairs(list) do
+                -- A sentence goes on after a model's name: "ask @Claude Opus 5.5, then…".
+                if entry.token ~= entry.reference then tags[#tags + 1] = { token = entry.token, reference = entry.reference, punctuated = true } end
+            end
+        end
+        -- The longest first: "@AIQ Mac" isn't "@AIQ" followed by a word.
+        table.sort(tags, function(a, b) return #a.token > #b.token end)
+        for _, tag in ipairs(tags) do
+            local token, reference, from = tag.token, tag.reference, 1
             while true do
                 local first, last = text:find(token, from, true)
                 if not first then break end
                 local before, after = text:sub(first - 1, first - 1), text:sub(last + 1, last + 1)
-                if (before == "" or before:find("%s")) and (after == "" or after:find("%s")) then
+                local ends = after == "" or after:find("%s")
+                    or (tag.punctuated and (after:find("[,;:!?%)]") or (after == "." and text:sub(last + 2, last + 2):find("^%s?$"))))
+                if (before == "" or before:find("%s")) and ends then
                     text = text:sub(1, first - 1) .. reference .. text:sub(last + 1)
                     from = first + #reference
                 else

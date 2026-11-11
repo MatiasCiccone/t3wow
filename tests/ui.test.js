@@ -3092,22 +3092,55 @@ assert(listed() == "Claude Opus 5.5", listed())
 write("@ma")
 assert(listed() == "@Mac Mach 1" and notes() == "Machine,Claude", listed())
 
--- Picking writes the reference T3 reads; it names the model and switches nothing.
+-- Picking writes the model's name while you write; what goes out is the reference T3
+-- reads. It names the model and switches nothing.
 write("ask @op")
 press("OnEnterPressed")
-assert(typed() == "ask model:claudeAgent/claude-opus-5-5 ", typed())
+assert(typed() == "ask @Claude Opus 5.5 ", typed())
 assert(not T3WoWPicker.shown and #queue() == 0, "picking isn't sending")
-typeText("ask model:claudeAgent/claude-opus-5-5 to review")
+typeText("ask @Claude Opus 5.5 to review")
 press("OnEnterPressed")
 local s = sent()
 assert(s.t == "send" and s.m == "ask model:claudeAgent/claude-opus-5-5 to review" and s.pv == nil and s.md == nil, s.m)
+-- The reference typed as such still goes as it is; a sentence can go on after a name.
+typeText("ask model:claudeAgent/claude-opus-5-5 to review")
+press("OnEnterPressed")
+assert(sent().m == "ask model:claudeAgent/claude-opus-5-5 to review", sent().m)
+typeText("@Claude Haiku 5.5, then @Mach 1. Not @Mach 10")
+press("OnEnterPressed")
+assert(sent().m == "model:claudeAgent/claude-haiku-5-5, then model:claudeAgent/mach-1. Not @Mach 10", sent().m)
 
 -- A thread on the Mac offers the Mac's models, though not the other machines.
 openWithModels(2)
 write("@lu")
 assert(listed() == "GPT-6 Luna" and notes() == "Codex", listed())
 press("OnTabPressed")
-assert(typed() == "model:codex/gpt-6-luna ", typed())
+assert(typed() == "@GPT-6 Luna ", typed())
+typeText("@GPT-6 Luna go")
+press("OnEnterPressed")
+assert(sent().m == "model:codex/gpt-6-luna go", sent().m)
+return "ok"
+`);
+});
+
+test("@'s model tags read as the model's name, with its provider where two share one", () => {
+  run(PICKER_HELPERS + `
+local providers = {
+  { id = "claudeAgent", t = "Claude", m = { { id = "opus", t = "Opus" }, { id = "mac", t = "Mac" } } },
+  { id = "codex", t = "Codex", m = { { id = "gpt", t = "GPT" }, { id = "x1", t = "Twin" }, { id = "pipe", t = "A|B" } } },
+  { id = "cursor", t = "Cursor", m = { { id = "gpt", t = "GPT" }, { id = "x2", t = "Twin" } } },
+  { id = "cursor2", t = "Cursor", m = { { id = "x3", t = "Twin" }, { id = "blank", t = "" } } },
+}
+local tokens = UI.Picker.ModelTokens(providers, { "Mac" })
+assert(tokens["claudeAgent/opus"].token == "@Opus", tokens["claudeAgent/opus"].token)
+-- A machine's name is taken: the model says its provider.
+assert(tokens["claudeAgent/mac"].token == "@Mac (Claude)", tokens["claudeAgent/mac"].token)
+assert(tokens["codex/gpt"].token == "@GPT (Codex)" and tokens["cursor/gpt"].token == "@GPT (Cursor)", tokens["codex/gpt"].token)
+-- Two providers called the same with a model called the same: the reference, as it is.
+assert(tokens["codex/x1"].token == "@Twin (Codex)", tokens["codex/x1"].token)
+assert(tokens["cursor/x2"].token == "model:cursor/x2" and tokens["cursor2/x3"].token == "model:cursor2/x3", tokens["cursor/x2"].token)
+-- Nothing the box can show, or no name: the reference.
+assert(tokens["codex/pipe"].token == "model:codex/pipe" and tokens["cursor2/blank"].token == "model:cursor2/blank", tokens["codex/pipe"].token)
 return "ok"
 `);
 });
@@ -3173,6 +3206,26 @@ inboxWith(ENVS, { ack = s, threads = { thread }, view = { e = 1, id = "t1", t = 
 assert(shownString("^Which model is Claude Opus 5%.5 %? Say it$"), "the message isn't in")
 assert(not shownString("%(sending%)"), "echo still there")
 assert(not showing("Sending…"), "Sending… still there")
+return "ok"
+`);
+});
+
+test("a model tag that says its provider stops showing '(sending)' once T3 has the message", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local ENVS = { { id = "local", name = "PC", ok = true } }
+local models = { { e = 1, id = "codex", t = "Codex", m = { { id = "gpt-a", t = "GPT" } } }, { e = 1, id = "cursor", t = "Cursor", m = { { id = "gpt-b", t = "GPT" } } } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Hi" } } }
+inboxWith(ENVS, { threads = { thread }, models = models, view = view })
+UI.Select(thread)
+typeText("ask @GPT (Codex) why")
+click("Send")
+local s = sent()
+assert(s.m == "ask model:codex/gpt-a why", s.m)
+assert(shownString("%(sending%)"), "no echo")
+local items = { view.items[1], { r = "u", x = "ask GPT why", cx = "ask model:codex/gpt-a why" } }
+inboxWith(ENVS, { threads = { thread }, models = models, view = { e = 1, id = "t1", t = "Thread", s = "running", items = items } })
+assert(not shownString("%(sending%)"), "echo still there")
 return "ok"
 `);
 });
