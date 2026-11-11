@@ -4297,7 +4297,9 @@ impl Bridge {
     }
 
     /// Turns the game's answer (per question: a 1-based option index, a list of them, or
-    /// typed text) into T3's answers, keyed by question id with option labels.
+    /// typed text) into T3's answers, keyed by question id with option labels. A list may
+    /// end with typed text, a note on the picks: T3's answers have no place for one (its own
+    /// window sends either), so it goes in the answer after them, as "Note: ...".
     fn answers_for(ask: &PendingAsk, given: &Value) -> Map<String, Value> {
         let mut answers = Map::new();
         for (i, q) in ask.questions.iter().enumerate() {
@@ -4307,8 +4309,23 @@ impl Bridge {
                 Value::Number(_) if q.multi => pick(&given[i]).map(|l| json!([l])),
                 Value::Number(_) => pick(&given[i]).map(Value::String),
                 Value::Array(list) => {
-                    let labels: Vec<String> = list.iter().filter_map(pick).collect();
-                    (!labels.is_empty()).then(|| if q.multi { json!(labels) } else { json!(labels[0]) })
+                    let mut labels: Vec<String> = list.iter().filter_map(pick).collect();
+                    let note = list.iter().filter_map(Value::as_str).map(str::trim).find(|t| !t.is_empty());
+                    match (labels.is_empty(), note) {
+                        (true, None) => None,
+                        (true, Some(note)) => Some(json!(note)),
+                        (false, Some(note)) if q.multi => {
+                            labels.push(format!("Note: {note}"));
+                            Some(json!(labels))
+                        }
+                        (false, Some(note)) => {
+                            let label = &labels[0];
+                            let stop = if label.ends_with(['.', '!', '?']) { "" } else { "." };
+                            Some(json!(format!("{label}{stop} Note: {note}")))
+                        }
+                        (false, None) if q.multi => Some(json!(labels)),
+                        (false, None) => Some(json!(labels[0])),
+                    }
                 }
                 _ => None,
             };

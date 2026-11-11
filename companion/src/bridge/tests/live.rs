@@ -537,13 +537,14 @@ fn live_stop_ends_a_run() {
     }
 }
 
-/// An agent's question shows in the game, and the answer picked there reaches the agent.
+/// An agent's question shows in the game, and the answer picked there reaches the agent,
+/// with what was typed in the box as a note on the pick.
 #[test]
 #[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
 fn live_an_answer_from_the_game_reaches_the_agent() {
     let mut live = Live::start("answer");
     let ask = "Use your tool for asking the user a question (AskUserQuestion) to ask me exactly one question, \
-               \"Which color?\", with two options: Red and Blue. Once I answer, reply with only the color I picked, in capitals. \
+               \"Which color?\", with two options: Red and Blue. Once I answer, reply with only the color I picked, in capitals, and do what a note in my answer says. \
                Do not use any other tools.";
     let id = live.new_thread(ask);
     for attempt in 1..=TRIES {
@@ -557,9 +558,10 @@ fn live_an_answer_from_the_game_reaches_the_agent() {
             let blue = labels.iter().position(|l| l.eq_ignore_ascii_case("blue")).unwrap_or_else(|| panic!("no Blue among {labels:?}"));
             // Its text is in your message too: the buttons are what only the question shows.
             live.checkpoint("an agent's question", &id, &[], &["Red", "Blue", "Submit answer"]);
-            let s = live.command(json!({ "t": "answer", "id": id, "k": view["ask"]["k"], "a": [blue + 1] }));
+            // What was typed in the box goes with the pick, as the game sends it.
+            let s = live.command(json!({ "t": "answer", "id": id, "k": view["ask"]["k"], "a": [[blue + 1, "Also say the word KIWI."]] }));
             live.expect_no_failure(s);
-            live.wait("the reply to the answer", REPLY_TIMEOUT, |live| live.agent_said(&id, "blue"));
+            live.wait("the reply to the answer and its note", REPLY_TIMEOUT, |live| live.agent_said(&id, "blue") && live.agent_said(&id, "kiwi"));
             live.checkpoint("the reply to an answer", &id, &["BLUE"], &[]);
             return live.finish();
         }

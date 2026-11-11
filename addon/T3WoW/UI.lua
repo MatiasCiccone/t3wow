@@ -2027,7 +2027,7 @@ end)
 -- ---------------------------------------------------------------- questions from the agent
 -- A question the agent is waiting on shows at the end of the conversation: one button per
 -- option (they toggle when several may be picked) and Send answer. Text typed in the box
--- answers it too, in your own words. Approvals can't be answered from here: T3's tools
+-- answers it too, in your own words, or goes with a pick as a note. Approvals can't be answered from here: T3's tools
 -- don't allow it, so the window says to answer them in T3.
 local askStrings, askButtons = {}, {}
 local askState = { k = nil, picks = {} }
@@ -2041,8 +2041,10 @@ local function pendingAsk()
     if isSelectedView(view) and view.ask then return view.ask end
 end
 
--- Sends the picks, and typed text for the first question without a pick. The companion
--- turns the indexes back into T3's ids and labels. Returns true when it used the input.
+-- Sends the picks, and typed text for the first question without a pick. With every
+-- question picked, the text goes with the last one's pick as a note ({ picks..., text }),
+-- never dropped. The companion turns the indexes back into T3's ids and labels. Returns
+-- true when it used the input.
 local function sendAnswer(text)
     local ask = pendingAsk()
     if not ask then return false end
@@ -2052,6 +2054,7 @@ local function sendAnswer(text)
         return false -- what you typed stays
     end
     local answers, any, typedUsed = {}, false, false
+    local typed = text and text ~= ""
     for qi, q in ipairs(ask.qs or {}) do
         local list = {}
         for oi = 1, #(q.o or {}) do
@@ -2060,12 +2063,19 @@ local function sendAnswer(text)
         if #list > 0 then
             answers[qi] = q.m and list or list[1]
             any = true
-        elseif text and text ~= "" and not typedUsed then
+        elseif typed and not typedUsed then
             answers[qi] = text
             typedUsed, any = true, true
         else
             answers[qi] = false -- keeps the list in step with the questions
         end
+    end
+    local last = #(ask.qs or {})
+    if typed and not typedUsed and last > 0 then
+        local picks = answers[last]
+        local note = type(picks) == "table" and { unpack(picks) } or { picks }
+        note[#note + 1] = text
+        answers[last], typedUsed = note, true
     end
     if not any then
         UI.Notice("Pick an answer, or type one below.")
@@ -2753,7 +2763,7 @@ setPlaceholder = function()
     local blocked = blockedReason((selected and selected.new) and "new" or (asking and "answer" or "send"))
     local view = inbox and inbox.view
     local card = not asking and isSelectedView(view) and view.card
-    placeholder:SetText(blocked or (asking and "Type your own answer, or pick one above")
+    placeholder:SetText(blocked or (asking and "Type your own answer, or a note to go with your pick")
         or (card and "Answer T3's card in T3, not here (a message goes to the agent)")
         or (inbox and inbox.pi and "Message the agent (Shift+Enter for a new line, Ctrl+V pastes images too)")
         or "Message the agent (Shift+Enter for a new line)")

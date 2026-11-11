@@ -3421,6 +3421,48 @@ return "ok"
 `);
 });
 
+test("text typed with a pick goes with it as a note, not dropped", () => {
+  run(`
+local ask = { k = "abcd1234", qs = { { h = "Check", q = "Does it look right?", m = false, o = { { l = "Looks right", d = "" }, { l = "Needs changes", d = "" } } } } }
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+UI.Select(thread)
+click("Needs changes")
+typeText("the header is too big")
+click("Submit answer")
+local a = sent().a
+assert(sent().t == "answer" and type(a[1]) == "table" and a[1][1] == 2 and a[1][2] == "the header is too big", "the typed text didn't go with the pick")
+assert(typed() == "", "the box kept text that went")
+
+-- Several questions, all picked (one several ways): the note goes with the last.
+local two = { k = "beef0002", qs = {
+  { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } },
+  { h = "Sizes", q = "Which?", m = true, o = { { l = "S", d = "" }, { l = "M", d = "" } } },
+} }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = two } })
+click("Red")
+click("S")
+click("M")
+typeText("and soon")
+click("Submit answers")
+a = sent().a
+assert(a[1] == 1 and a[2][1] == 1 and a[2][2] == 2 and a[2][3] == "and soon", "the note didn't go with the last pick")
+
+-- A question with no pick still takes the text as its answer.
+local open = { k = "beef0003", qs = {
+  { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } },
+  { h = "Name", q = "Which?", m = false, o = { { l = "A", d = "" } } },
+} }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = open } })
+click("Red")
+typeText("Bob")
+click("Submit answers")
+a = sent().a
+assert(a[1] == 1 and a[2] == "Bob", "the text didn't answer the open question")
+return "ok"
+`);
+});
+
 test("a question is laid out as in T3: a quiet header, then options stacked with what they mean and a number", () => {
   run(`
 local ask = { k = "abcd1234", qs = { { h = "Input test", q = "Does it look right?", m = false, o = { { l = "Looks right", d = "The row shows Input" }, { l = "Needs changes", d = "" } } } } }
