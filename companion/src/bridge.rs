@@ -615,10 +615,17 @@ pub struct LinkState {
     /// They start through T3's tools, so T3 records them as an agent's, like the delegated
     /// threads its sidebar leaves out; only this says they're yours.
     pub started_threads: Vec<String>,
+    /// The messages the game's /clear sent in a fresh session, oldest first, at most
+    /// `FRESH_KEPT`. T3 draws its New session line above such a message, but its read
+    /// doesn't say which ones they are (T3 Code 0.19.0), so only this marks them.
+    pub fresh_messages: Vec<String>,
 }
 
 /// How many threads started from the game are remembered.
 const STARTED_KEPT: usize = 500;
+
+/// How many messages sent in a fresh session are remembered.
+const FRESH_KEPT: usize = 500;
 
 /// A picture in an image slot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -648,6 +655,7 @@ impl Default for LinkState {
             images: BTreeMap::new(),
             images_shown: Vec::new(),
             started_threads: Vec::new(),
+            fresh_messages: Vec::new(),
         }
     }
 }
@@ -2093,6 +2101,18 @@ impl Bridge {
         }
     }
 
+    /// A message sent in a fresh session, by the id T3's send answered with.
+    fn remember_fresh(&mut self, sent: &Value) {
+        let Some(message) = sent["messageId"].as_str().filter(|m| !m.is_empty()) else { return };
+        let fresh = &mut self.link.fresh_messages;
+        if !fresh.iter().any(|known| known == message) {
+            fresh.push(message.to_string());
+            let excess = fresh.len().saturating_sub(FRESH_KEPT);
+            fresh.drain(..excess);
+            self.save_state();
+        }
+    }
+
     fn log(&self, message: &str) {
         (self.log)(message);
     }
@@ -2339,7 +2359,10 @@ impl Bridge {
                         if fresh {
                             args["freshContext"] = json!(true);
                         }
-                        self.client.call("t3_thread_send", with_args(args, &env_arg))?;
+                        let sent = self.client.call("t3_thread_send", with_args(args, &env_arg))?;
+                        if fresh {
+                            self.remember_fresh(&sent);
+                        }
                     }
                     self.note(if fresh { "Sent in a fresh session." } else { "Sent." });
                     let depth = self.view.as_ref().filter(|v| v.id == id).map(|v| v.depth).unwrap_or(1);
@@ -3776,6 +3799,12 @@ impl Bridge {
             }
             if let Some(line) = item["position"].as_u64().and_then(|p| handoffs.get(&p)) {
                 shown["ho"] = json!(line);
+            }
+            // A message that started a fresh session (T3's /clear) gets T3's New session line
+            // above it. T3's read doesn't say so yet, so it's the ones the game sent fresh.
+            let message_id = str_of(&item["messageId"]);
+            if item["freshContext"] == true || (!message_id.is_empty() && self.link.fresh_messages.iter().any(|m| m == message_id)) {
+                shown["ns"] = json!(1);
             }
             if chars + length > VIEW_CHARS && !items.is_empty() {
                 break;

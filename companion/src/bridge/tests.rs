@@ -147,6 +147,8 @@ impl T3 for FakeT3 {
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
             "t3_thread_launch" => json!({ "threadId": "new1" }),
+            // T3 answers a send with the message it made, among other things.
+            "t3_thread_send" => json!({ "threadId": args["threadId"], "messageId": format!("message:{}", str_of(&args["message"])), "delivery": "started" }),
             "orchestrator_capabilities" => self.capabilities.lock().unwrap().clone(),
             // As T3 answers: a thread's settings, or a sequence number for a change, which
             // replaces the whole selection, options and all.
@@ -3497,6 +3499,76 @@ fn the_first_message_on_a_new_provider_has_the_handoff_line_and_a_new_model_on_t
 }
 
 #[test]
+fn a_message_the_games_clear_sent_has_t3s_new_session_line_after_a_restart_too() {
+    let dir = std::env::temp_dir().join(format!("t3wow-fresh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("state.json");
+    let message = |position: u64, kind: &str, id: &str| json!({ "position": position, "type": kind, "text": id, "messageId": format!("message:{id}") });
+    let thread = vec![
+        message(0, "user_message", "remember kumquat"),
+        message(1, "assistant_message", "OK"),
+        message(2, "user_message", "start over"),
+        message(3, "assistant_message", "NONE"),
+        message(4, "user_message", "and go on"),
+    ];
+    let marked = |rig: &Rig| -> Vec<String> {
+        let view = rig.bridge.snapshot()["view"].clone();
+        view["items"].as_array().unwrap().iter().filter(|i| i["ns"] == 1).map(|i| str_of(&i["x"]).to_string()).collect()
+    };
+
+    let mut rig = Rig::new(27_500_000);
+    rig.bridge.state_file = Some(state.clone());
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.8")]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "send", "id": "t1", "m": "start over", "fc": true },
+        { "s": 3, "t": "send", "id": "t1", "m": "and go on" },
+    ] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.link.fresh_messages, vec!["message:start over".to_string()], "only the fresh send is remembered");
+    rig.t3.messages.lock().unwrap().insert("t1".into(), thread.clone());
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(5);
+    rig.t3.threads.lock().unwrap()[0]["updatedAt"] = json!("2026-11-06T11:00:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(marked(&rig), vec!["start over"]);
+
+    // After a restart, from the state file. A message T3's read marks itself has it too.
+    let saved: LinkState = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    let mut restarted = Rig::new(27_500_000);
+    restarted.bridge.link.fresh_messages = saved.fresh_messages;
+    let mut thread = thread;
+    thread[4]["freshContext"] = json!(true);
+    restarted.t3.messages.lock().unwrap().insert("t1".into(), thread);
+    restarted.t3.threads.lock().unwrap()[0]["itemCount"] = json!(5);
+    restarted.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "open", "e": "local", "id": "t1" }] }));
+    restarted.advance(5_000);
+    restarted.bridge.tick();
+    assert_eq!(marked(&restarted), vec!["start over", "and go on"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_the_latest_fresh_messages_are_remembered() {
+    let mut rig = Rig::new(27_500_000);
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.8")]);
+    rig.bridge.link.fresh_messages = (0..FRESH_KEPT).map(|n| format!("old{n}")).collect();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "send", "id": "t1", "m": "start over", "fc": true }] }));
+    rig.bridge.tick();
+    let fresh = &rig.bridge.link.fresh_messages;
+    assert_eq!(fresh.len(), FRESH_KEPT);
+    assert_eq!(fresh[0], "old1");
+    assert_eq!(fresh[FRESH_KEPT - 1], "message:start over");
+}
+
+#[test]
 fn a_refused_model_change_comes_back_with_its_reason_and_an_unknown_effort_never_reaches_t3() {
     let mut rig = rig_with_catalog(47_000_000);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "model", "e": "mac", "id": "t1", "pv": "claudeAgent", "md": "claude-opus", "ef": "nonsense" }] }));
@@ -3577,14 +3649,18 @@ fn clear_starts_a_fresh_session_on_the_signed_in_t3() {
     ] }));
     rig.bridge.tick();
     finished(2);
+    // The game draws T3's New session line over the message that went fresh, and only it.
+    let view = settle(&mut rig, &|s| s["view"]["id"] == id.as_str() && s["view"]["items"].as_array().is_some_and(|items| items.len() >= 4))["view"].clone();
     let read = client.call("t3_thread_read", json!({ "threadId": id, "view": "activity", "limit": 20, "maxCharsPerItem": 400 })).unwrap();
     client.call("t3_thread_organize", json!({ "action": "archive", "threadId": id })).unwrap();
     let items = read["items"].as_array().unwrap();
     for item in items {
         println!("{} {}: {}", item["position"], item["type"], str_of(&item["text"]));
     }
-    // Whether T3's read marks the fresh message, for the game's New session line.
+    // Whether T3's read marks the fresh message itself (T3 Code 0.19.0 doesn't).
     println!("marked: {}", items.iter().chain(read["recentRuns"].as_array().unwrap()).any(|i| i.get("freshContext").is_some()));
+    let lines: Vec<&str> = view["items"].as_array().unwrap().iter().filter(|i| i["ns"] == 1).map(|i| str_of(&i["x"])).collect();
+    assert_eq!(lines, vec!["What word did I ask you to remember? If you don't know, reply with just NONE."], "{view}");
     let reply = items.iter().rev().find(|i| i["type"] == "assistant_message").expect("no reply");
     assert!(!str_of(&reply["text"]).to_lowercase().contains("kumquat"), "the fresh session saw the earlier message: {reply}");
 }
