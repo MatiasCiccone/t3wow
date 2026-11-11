@@ -3942,6 +3942,110 @@ fn a_finished_turn_folds_under_worked_for_with_its_last_message_outside() {
     assert!(items[0]["f"].is_null() && items[5]["f"].is_null(), "{items:?}");
 }
 
+/// A checkpoint item as T3's read gives it: the turn's files as pretty-printed JSON.
+fn checkpoint(position: u64, files: &[(&str, u64, u64)]) -> Value {
+    let list: Vec<Value> = files.iter().map(|(path, a, d)| json!({ "path": path, "kind": "modified", "additions": a, "deletions": d })).collect();
+    json!({
+        "position": position, "itemId": format!("checkpoint{position}"), "type": "checkpoint", "status": "completed", "title": null,
+        "text": serde_json::to_string_pretty(&list).unwrap(), "updatedAt": "2026-11-06T10:02:47Z", "runId": "r1",
+    })
+}
+
+fn change_reads(rig: &Rig) -> Vec<Value> {
+    rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| str_of(&a["itemId"]).starts_with("checkpoint")).collect()
+}
+
+#[test]
+fn a_turn_that_changed_files_lists_them_after_its_last_message_outside_the_fold() {
+    let files = [("companion/src/bridge.rs", 9, 2), ("companion/src/bridge/tests.rs", 18, 2), ("README.md", 1, 0)];
+    let mut activity = a_turn();
+    activity.push(checkpoint(5, &files));
+    let mut rig = Rig::new(62_000_000);
+    rig.t3.item_texts.lock().unwrap().insert("checkpoint5".into(), str_of(&activity[5]["text"]).to_string());
+    let messages: Vec<Value> = activity.iter().filter(|i| str_of(&i["type"]).ends_with("_message")).cloned().collect();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    *rig.t3.runs.lock().unwrap() = json!([run_of("r1", "completed")]);
+    rig.t3.set("completed", "2026-11-06T10:03:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 7, "{items:?}");
+    let card = &items[6];
+    assert!(card["f"].is_null(), "folded under Worked for: {card:?}");
+    assert_eq!(items[5]["x"], "all done");
+    assert_eq!(
+        card["cf"],
+        json!({ "n": 3, "a": 28, "d": 4, "more": 0, "f": [
+            { "p": "companion/src/bridge.rs", "a": 9, "d": 2 },
+            { "p": "companion/src/bridge/tests.rs", "a": 18, "d": 2 },
+            { "p": "README.md", "a": 1, "d": 0 },
+        ] })
+    );
+    assert_eq!(card["x"], "3 changed files  +28 -4\ncompanion/src/bridge.rs  +9 -2\ncompanion/src/bridge/tests.rs  +18 -2\nREADME.md  +1 -0");
+    // The scan read the start of it; the rest is read once, by its item.
+    let reads = change_reads(&rig);
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0]["maxCharsPerItem"], json!(CHANGES_CHARS));
+    rig.t3.set("completed", "2026-11-06T10:03:30Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(change_reads(&rig).len(), 1, "read again");
+    assert_eq!(view_items(&rig)[6]["cf"]["n"], 3);
+}
+
+#[test]
+fn a_big_diff_lists_a_few_files_and_counts_the_rest_and_a_turn_with_none_shows_nothing() {
+    let files: Vec<(String, u64, u64)> = (0..40).map(|i| (format!("src/file{i:02}.rs"), 1500, 3)).collect();
+    let refs: Vec<(&str, u64, u64)> = files.iter().map(|(p, a, d)| (p.as_str(), *a, *d)).collect();
+    let mut activity = a_turn();
+    activity.push(checkpoint(5, &refs));
+    let full = str_of(&activity[5]["text"]).to_string();
+    // No files: T3 lists none, and the game gets no card.
+    activity.push(in_run(said(6, "user_message", "again"), "r2"));
+    activity.push(in_run(said(7, "assistant_message", "nothing to change"), "r2"));
+    let mut empty = checkpoint(8, &[]);
+    empty["runId"] = json!("r2");
+    activity.push(empty);
+    let mut rig = Rig::new(63_000_000);
+    rig.t3.item_texts.lock().unwrap().insert("checkpoint5".into(), full);
+    let messages: Vec<Value> = activity.iter().filter(|i| str_of(&i["type"]).ends_with("_message")).cloned().collect();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.activity.lock().unwrap().insert("t1".into(), activity);
+    rig.t3.set("completed", "2026-11-06T10:03:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let cards: Vec<Value> = view_items(&rig).into_iter().filter(|i| i["cf"].is_object()).collect();
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    let cf = &cards[0]["cf"];
+    assert_eq!((cf["n"].clone(), cf["a"].clone(), cf["d"].clone(), cf["more"].clone()), (json!(40), json!(60_000), json!(120), json!(34)));
+    assert_eq!(cf["f"].as_array().unwrap().len(), CHANGED_FILES_SHOWN);
+    let lines: Vec<&str> = str_of(&cards[0]["x"]).lines().collect();
+    assert_eq!(lines.len(), CHANGED_FILES_SHOWN + 2);
+    assert_eq!(lines[0], "40 changed files  +60k -120");
+    assert_eq!(lines[1], "src/file00.rs  +1.5k -3");
+    assert_eq!(lines[CHANGED_FILES_SHOWN + 1], "34 more files");
+    assert_eq!(change_reads(&rig).len(), 1, "a turn with no files is read");
+}
+
+#[test]
+fn a_file_list_too_long_to_read_whole_says_there_are_more_and_gives_no_totals() {
+    let files: Vec<(String, u64, u64)> = (0..2).map(|i| (format!("f{i}.rs"), 4, 1)).collect();
+    let refs: Vec<(&str, u64, u64)> = files.iter().map(|(p, a, d)| (p.as_str(), *a, *d)).collect();
+    let item = checkpoint(1, &refs);
+    let text = str_of(&item["text"]);
+    // Cut inside the second file, as T3 cuts at maxCharsPerItem: the first one stays.
+    let cut = &text[..text.find("f1.rs").unwrap()];
+    assert_eq!(changed_files(cut, true), vec![("f0.rs".to_string(), 4, 1)]);
+    assert_eq!(changed_files(text, false).len(), 2);
+    assert!(changed_files("[\n  {\n    \"pa", true).is_empty());
+    let shown = FoundChanges { position: 1, item_id: "c".into(), files: changed_files(cut, true), cut: true, full: true }.shown();
+    assert_eq!(shown["x"], "1+ changed files\nf0.rs  +4 -1");
+    assert_eq!(shown["cf"]["cut"], 1);
+    assert!(shown["cf"]["a"].is_null() && shown["cf"]["d"].is_null(), "{shown}");
+    assert_eq!([compact_count(999), compact_count(1000), compact_count(1260), compact_count(12_400), compact_count(999_499), compact_count(1_500_000)], ["999", "1k", "1.3k", "12k", "999k", "1.5m"]);
+}
+
 #[test]
 fn a_turn_that_is_running_or_ended_badly_stays_open() {
     for status in ["running", "interrupted", "failed"] {
