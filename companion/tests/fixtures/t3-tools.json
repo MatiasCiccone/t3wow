@@ -1,5 +1,5 @@
 {
-  "t3": "0.1.8, less html_render path and t3_thread_send freshContext (not handled yet)",
+  "t3": "0.1.8",
   "tools": {
     "list_thread_pull_requests": {
       "inputs": {
@@ -179,6 +179,7 @@
           "restart",
           "steer"
         ],
+        "freshContext": [],
         "clientRequestId": []
       },
       "required": [
@@ -198,6 +199,7 @@
     },
     "html_render": {
       "inputs": {
+        "path": [],
         "html": [],
         "title": [],
         "height": []
