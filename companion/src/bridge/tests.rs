@@ -8,6 +8,8 @@ struct FakeT3 {
     threads: Mutex<Vec<Value>>,
     /// false: what's pending is an approval, which T3's pending list leaves out.
     questions: Mutex<bool>,
+    /// The pending questions' ids, oldest first, as T3 lists them.
+    request_ids: Mutex<Vec<&'static str>>,
     /// The server's own environment id; "local" also links a Mac.
     env_id: Mutex<String>,
     /// The machines the "local" server links.
@@ -68,6 +70,7 @@ impl FakeT3 {
                 "settled": false, "updatedAt": "2026-11-06T10:00:00Z", "itemCount": 3
             })]),
             questions: Mutex::new(true),
+            request_ids: Mutex::new(vec!["runtime-request:a-very-long-id"]),
             env_id: Mutex::new("local".into()),
             links: Mutex::new(json!([{ "environmentId": "mac", "label": "Mac", "status": "reachable" }])),
             delays: Mutex::new(HashMap::new()),
@@ -251,12 +254,13 @@ impl T3 for FakeT3 {
                 })
             }
             "t3_thread_read" => json!({ "thread": self.thread(&args["threadId"]), "recentRuns": *self.runs.lock().unwrap(), "items": [], "hasMore": false }),
-            // One pending question, in the shape T3 returns (see the probe in the commit log).
+            // Pending questions, in the shape T3 returns (see the probe in the commit log): a
+            // second question in the same run lists after the first, which stays pending.
             "t3_pending_request" => match args["action"].as_str() {
                 Some("list") if !*self.questions.lock().unwrap() => json!({ "requestIds": [] }),
-                Some("list") => json!({ "requestIds": ["runtime-request:a-very-long-id"] }),
+                Some("list") => json!({ "requestIds": *self.request_ids.lock().unwrap() }),
                 Some("read") => json!({
-                    "requestId": "runtime-request:a-very-long-id",
+                    "requestId": args["requestId"],
                     "questions": [
                         { "id": "Which color?", "header": "Color", "question": "Which color?", "multiSelect": false,
                           "options": [{ "label": "Red", "description": "Warm" }, { "label": "Blue", "description": "Cool" }] },
@@ -906,6 +910,33 @@ fn a_new_thread_that_already_asks_notifies_but_old_ones_dont_at_start() {
     let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
     assert!(latest.contains("e=\"local\",id=\"t2\",t=\"Quick question\",s=\"waiting\"}"), "{latest}");
     assert!(!latest.contains("id=\"t1\",t=\"Fix tests\",s=\"waiting\"}"), "{latest}");
+}
+
+#[test]
+fn a_second_question_in_the_same_run_notifies_once_until_the_thread_works_again() {
+    let mut rig = Rig::new(7_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    // Each step: what's pending (questions, oldest first, as T3 lists them), then how many
+    // alerts the thread has raised so far.
+    let mut step = |minute: u32, ids: Vec<&'static str>| -> usize {
+        rig.t3.threads.lock().unwrap()[0]["pendingRequestCount"] = json!(ids.len());
+        *rig.t3.request_ids.lock().unwrap() = ids;
+        rig.t3.set("running", &format!("2026-11-06T10:{minute:02}:00Z"));
+        rig.advance(15_000);
+        rig.bridge.tick();
+        rig.bridge.events.iter().filter(|e| e["e"] == "local" && e["id"] == "t1" && e["s"] == "waiting").count()
+    };
+    assert_eq!(step(1, vec!["request-a"]), 1, "the first question");
+    // A second question replaces the first before the thread works again: still "waiting",
+    // but a new request, so it notifies (T3 PR #32719).
+    assert_eq!(step(2, vec!["request-a", "request-b"]), 2, "the second question");
+    // The newer one answered: the older one is back, and it was already announced.
+    assert_eq!(step(3, vec!["request-a"]), 2, "the first question again");
+    // Back to working forgets what was shown: each question notifies again.
+    assert_eq!(step(4, vec![]), 2, "working");
+    assert_eq!(step(5, vec!["request-a"]), 3, "waiting again");
+    assert_eq!(step(6, vec!["request-a", "request-b"]), 4, "the second question, after working");
 }
 
 #[test]
