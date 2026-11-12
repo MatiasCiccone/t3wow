@@ -3719,3 +3719,33 @@ assert(sent().t == "answer" and sent().a[1] == 1, "the pick wasn't sent")
 return "ok"
 `);
 });
+
+test("an update that left out the open thread and the list leaves the conversation as drawn", () => {
+  run(`
+function load(inbox)
+  inbox.k, inbox.u, inbox.ack, inbox.now, inbox.envs = "c1", Link.Session(), 0, time(), ENVS
+  Link.state.pollAt = 0
+  inboxes[string.format("T3WoW_S%03d", Link.state.nextSlot)] = inbox
+  tick(0.5)
+end
+local function row() return { { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" } } end
+load({ g = 1, hx = { view = "v1", threads = "l1" }, threads = row(), view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "First reply" } } } })
+UI.Select({ e = 1, id = "t1" })
+assert(showing("First reply"), "not drawn")
+-- Mark what's on screen: a redraw would set it back.
+for _, fs in ipairs(fontStrings) do
+  if not fs.hidden and fs.text == "First reply" then fs.text = "as drawn" end
+end
+-- Kept: not drawn again.
+load({ g = 2, hx = { view = "v1", threads = "l1" }, same = { "view", "threads" } })
+assert(showing("^as drawn$") and not showing("First reply"), "drawn again")
+-- The list sent anew (another thread changed): drawn again, as its row may have.
+load({ g = 3, hx = { view = "v1", threads = "l2" }, threads = row(), same = { "view" } })
+assert(showing("First reply"), "not drawn after the list changed")
+-- A new reply: drawn.
+load({ g = 4, hx = { view = "v2", threads = "l2" }, same = { "threads" },
+  view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "First reply" }, { r = "a", x = "Second reply" } } } })
+assert(showing("Second reply"), "the new reply isn't shown")
+return "ok"
+`);
+});
