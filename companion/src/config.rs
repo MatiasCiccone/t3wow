@@ -1030,8 +1030,8 @@ mod tests {
             answered(&MemoryStore::default());
             let file = temp_file("no-readable-token");
             Config::update_at(&file, |c| {
-                c.set_sign_in(LOCAL, "first-secret", None).unwrap();
-                c.set_sign_in("http://a:1", "second-secret", None).unwrap();
+                c.set_sign_in(LOCAL, "first-secret", None, OPERATE).unwrap();
+                c.set_sign_in("http://a:1", "second-secret", None, OPERATE).unwrap();
             });
             let text = fs::read_to_string(&file).unwrap();
             assert!(!text.contains("secret"), "{text}");
@@ -1049,7 +1049,7 @@ mod tests {
             let file = temp_file("one-lookup");
             Config::update_at(&file, |c| {
                 for n in 0..4 {
-                    c.set_sign_in(&format!("http://box{n}:1"), "t", None).unwrap();
+                    c.set_sign_in(&format!("http://box{n}:1"), "t", None, OPERATE).unwrap();
                 }
             });
             for _ in 0..3 {
@@ -1112,7 +1112,7 @@ mod tests {
             assert_eq!(keychain::blocked(), Some(Problem::Denied), "and that isn't \"signed out\"");
 
             let mut config = Config::update_at(&file, |_| {});
-            let error = config.set_sign_in("http://new:1", "new-secret", None).unwrap_err();
+            let error = config.set_sign_in("http://new:1", "new-secret", None, OPERATE).unwrap_err();
             assert!(error.contains("Keychain") && error.contains("denied"), "{error}");
             assert!(config.saved_token("http://new:1").is_none(), "never kept in plain text");
 
@@ -1130,7 +1130,7 @@ mod tests {
             keychain::retry();
             assert_eq!(keychain::blocked(), None);
             let mut config = Config::default();
-            config.set_sign_in(LOCAL, "t", None).unwrap();
+            config.set_sign_in(LOCAL, "t", None, OPERATE).unwrap();
             assert_eq!(config.saved_token(LOCAL).as_deref(), Some("t"));
         }
 
