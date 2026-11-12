@@ -10,6 +10,9 @@ use std::time::Duration;
 
 const SEARCH: usize = 12;
 
+#[cfg(target_os = "macos")]
+mod stream;
+
 /// What the capture knows about the client between frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Watch {
@@ -317,6 +320,8 @@ mod mac {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
+    pub use super::stream::Backend;
+
     /// How far down from the window's top the strip can be, in points: the title bar when
     /// windowed, the notch band when fullscreen.
     const POINTS_DOWN: usize = 40;
@@ -363,6 +368,7 @@ mod mac {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         static kCGWindowOwnerPID: CFStringRef;
+        static kCGWindowNumber: CFStringRef;
         static kCGWindowBounds: CFStringRef;
         static kCGWindowIsOnscreen: CFStringRef;
         fn CGRequestScreenCaptureAccess() -> bool;
@@ -472,16 +478,17 @@ mod mac {
     #[derive(Clone, Copy, Debug)]
     struct WindowRow {
         pid: i64,
+        id: u32,
         on_screen: bool,
         rect: (f64, f64, f64, f64),
     }
 
     /// The window the game draws in: the largest on-screen one the client owns. The rest of
     /// its windows are small helpers. On a tie, the frontmost (the list runs front to back).
-    fn choose_window(rows: &[WindowRow], pid: u32) -> Option<Rect> {
+    fn choose_window(rows: &[WindowRow], pid: u32) -> Option<(Rect, u32)> {
         let area = |r: &WindowRow| r.rect.2 * r.rect.3;
         let window = rows.iter().filter(|r| r.pid == i64::from(pid) && r.on_screen && r.rect.2 >= 64.0 && r.rect.3 >= 16.0).min_by(|a, b| area(b).total_cmp(&area(a)))?;
-        Some(Rect { x: window.rect.0.round() as i32, y: window.rect.1.round() as i32, w: window.rect.2.round() as u32, h: window.rect.3.round() as u32 })
+        Some((Rect { x: window.rect.0.round() as i32, y: window.rect.1.round() as i32, w: window.rect.2.round() as u32, h: window.rect.3.round() as u32 }, window.id))
     }
 
     fn window_rows() -> Option<Vec<WindowRow>> {
@@ -490,13 +497,19 @@ mod mac {
             return None;
         }
         let list: CFArray<CFDictionary<CFString, CFType>> = unsafe { TCFType::wrap_under_create_rule(list) };
-        let (pid_key, bounds_key, on_screen_key) = unsafe {
-            (CFString::wrap_under_get_rule(kCGWindowOwnerPID), CFString::wrap_under_get_rule(kCGWindowBounds), CFString::wrap_under_get_rule(kCGWindowIsOnscreen))
+        let (pid_key, id_key, bounds_key, on_screen_key) = unsafe {
+            (
+                CFString::wrap_under_get_rule(kCGWindowOwnerPID),
+                CFString::wrap_under_get_rule(kCGWindowNumber),
+                CFString::wrap_under_get_rule(kCGWindowBounds),
+                CFString::wrap_under_get_rule(kCGWindowIsOnscreen),
+            )
         };
         Some(
             list.iter()
                 .filter_map(|row| {
                     let pid = row.find(&pid_key)?.downcast::<CFNumber>()?.to_i64()?;
+                    let id = u32::try_from(row.find(&id_key)?.downcast::<CFNumber>()?.to_i64()?).ok()?;
                     let bounds = row.find(&bounds_key)?;
                     let mut rect = CGRect::default();
                     if !unsafe { CGRectMakeWithDictionaryRepresentation(bounds.as_CFTypeRef() as CFDictionaryRef, &mut rect) } {
@@ -504,10 +517,26 @@ mod mac {
                     }
                     // An off-screen window leaves this out altogether.
                     let on_screen = row.find(&on_screen_key).and_then(|v| v.downcast::<CFBoolean>()).is_some_and(bool::from);
-                    Some(WindowRow { pid, on_screen, rect: (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height) })
+                    Some(WindowRow { pid, id, on_screen, rect: (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height) })
                 })
                 .collect(),
         )
+    }
+
+    /// The on-screen windows in front of window `id` that overlap `rect`: owner pid and
+    /// bounds. For the live test, to tell a covered corner from a misplaced capture.
+    #[cfg(test)]
+    pub fn windows_in_front(id: u32, rect: Rect) -> Vec<(i64, Rect)> {
+        let rows = window_rows().unwrap_or_default();
+        let overlaps = |r: &WindowRow| {
+            let (x, y, w, h) = r.rect;
+            x < f64::from(rect.x) + f64::from(rect.w) && x + w > f64::from(rect.x) && y < f64::from(rect.y) + f64::from(rect.h) && y + h > f64::from(rect.y)
+        };
+        rows.iter()
+            .take_while(|r| r.id != id)
+            .filter(|r| r.on_screen && overlaps(r))
+            .map(|r| (r.pid, Rect { x: r.rect.0 as i32, y: r.rect.1 as i32, w: r.rect.2 as u32, h: r.rect.3 as u32 }))
+            .collect()
     }
 
     /// Pixels per point on the display showing the window's top-left, where the strip is.
@@ -534,8 +563,8 @@ mod mac {
     /// The client's game window on screen and its display's scale; None when it has none
     /// on screen (minimized, or off in another Space).
     pub fn window_of(pid: u32) -> Option<WindowFrame> {
-        let rect = choose_window(&window_rows()?, pid)?;
-        Some(WindowFrame { rect, scale: display_scale(rect) })
+        let (rect, id) = choose_window(&window_rows()?, pid)?;
+        Some(WindowFrame { rect, scale: display_scale(rect), id })
     }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -543,14 +572,16 @@ mod mac {
         pub rect: Rect,
         /// Pixels per point.
         pub scale: u32,
+        /// The window server's number for it: a ScreenCaptureKit stream follows this window.
+        pub id: u32,
     }
 
     /// Pixels of a captured rectangle, top row first, as `sample` and `cell` take them.
-    #[derive(Clone)]
+    #[derive(Clone, Debug, PartialEq)]
     pub struct Image {
-        bgra: Vec<u8>,
-        width: usize,
-        height: usize,
+        pub bgra: Vec<u8>,
+        pub width: usize,
+        pub height: usize,
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -591,8 +622,22 @@ mod mac {
         }
     }
 
-    /// Takes a rectangle of the screen, in points. The one place that knows how, so that
-    /// ScreenCaptureKit can replace it: everything else only gets pixels from it.
+    /// Where the Reader's pictures come from: `grab` (screencapture), a test's closure, or the
+    /// ScreenCaptureKit stream with `grab` behind it (`stream::Capturer`).
+    pub trait Grab {
+        /// A rectangle of the screen, in points, as pixels.
+        fn grab(&mut self, rect: Rect) -> Result<Image, GrabError>;
+    }
+
+    impl<F: FnMut(Rect) -> Result<Image, GrabError>> Grab for F {
+        fn grab(&mut self, rect: Rect) -> Result<Image, GrabError> {
+            self(rect)
+        }
+    }
+
+    /// Takes a rectangle of the screen, in points, with a screencapture process. The one-shot
+    /// way, and the fallback when the ScreenCaptureKit stream can't run: everything else only
+    /// gets pixels from it.
     pub fn grab(rect: Rect) -> Result<Image, GrabError> {
         let dir = private_dir(&std::env::temp_dir()).map_err(|e| GrabError::Failed(format!("no private folder for the capture: {e}")))?;
         let file = dir.join("strip.bmp");
@@ -749,6 +794,12 @@ mod mac {
         Rect { x: window.rect.x, y: window.rect.y, w: points(w_px, window.rect.w), h: points(h_px, window.rect.h) }
     }
 
+    /// The part of the window a ScreenCaptureKit stream covers: all the wide search looks at,
+    /// so the stream serves every capture the Reader asks for.
+    pub fn stream_region(window: WindowFrame) -> Rect {
+        wide_rect(window)
+    }
+
     /// Everything the wide search needs: the largest strip at the largest offset.
     fn wide_rect(window: WindowFrame) -> Rect {
         let scale = window.scale as usize;
@@ -780,13 +831,17 @@ mod mac {
         last_wide: Option<Instant>,
     }
 
-    impl<G: FnMut(Rect) -> Result<Image, GrabError>> Reader<G> {
+    impl<G: Grab> Reader<G> {
         pub fn new(grab: G, magics: impl Into<Vec<Vec<u8>>>) -> Self {
             Reader { grab, magics: magics.into(), window: None, geometry: None, missed: false, last_wide: None }
         }
 
         pub fn geometry(&self) -> Option<Geometry> {
             self.geometry
+        }
+
+        pub fn grabber(&mut self) -> &mut G {
+            &mut self.grab
         }
 
         pub fn forget(&mut self) {
@@ -813,7 +868,7 @@ mod mac {
                 _ => wide_rect(window),
             };
             let started = Instant::now();
-            let image = (self.grab)(rect);
+            let image = self.grab.grab(rect);
             let took = started.elapsed();
             let image = match image {
                 Ok(image) => image,
@@ -890,30 +945,72 @@ mod mac {
         )
     }
 
-    /// How long captures have been taking, for the log.
     #[derive(Default)]
-    pub struct Timing {
+    struct Tally {
         grabs: u32,
         total: Duration,
         slowest: Duration,
     }
 
-    impl Timing {
-        pub fn add(&mut self, took: Duration) {
+    impl Tally {
+        fn add(&mut self, took: Duration) {
             self.grabs += 1;
             self.total += took;
             self.slowest = self.slowest.max(took);
         }
 
+        fn line(&self, how: &str) -> String {
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            format!("{} in the last minute {how}, {:.1} ms on average, {:.1} ms at the slowest", self.grabs, ms(self.total) / f64::from(self.grabs), ms(self.slowest))
+        }
+    }
+
+    /// How long captures have been taking, for the log, per backend. From the stream a capture
+    /// is a copy out of memory, so its age (how long ago macOS sent the frame) says more than
+    /// its time; frames come only when the window's content changes, so an old one can still
+    /// be what is on screen.
+    #[derive(Default)]
+    pub struct Timing {
+        stream: Tally,
+        screencapture: Tally,
+        frames: u32,
+        aged: u32,
+        age_total: Duration,
+    }
+
+    impl Timing {
+        pub fn add(&mut self, backend: Backend, took: Duration, age: Option<Duration>) {
+            match backend {
+                Backend::Stream => self.stream.add(took),
+                Backend::Screencapture => self.screencapture.add(took),
+            }
+            if let Some(age) = age {
+                self.aged += 1;
+                self.age_total += age;
+            }
+        }
+
+        /// Frames the stream sent.
+        pub fn frames(&mut self, count: u32) {
+            self.frames += count;
+        }
+
         /// The line for the log, and starts counting again; None when no capture was taken.
         pub fn take_line(&mut self) -> Option<String> {
-            if self.grabs == 0 {
-                return None;
+            let mut parts = Vec::new();
+            if self.stream.grabs > 0 {
+                let mut part = self.stream.line(&format!("from the {}", Backend::Stream.name()));
+                part += &format!(", out of {} frames it sent", self.frames);
+                if self.aged > 0 {
+                    part += &format!(", the newest {:.0} ms old on average", self.age_total.as_secs_f64() * 1000.0 / f64::from(self.aged));
+                }
+                parts.push(part);
             }
-            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
-            let line = format!("Captures: {} in the last minute, {:.1} ms on average, {:.1} ms at the slowest.", self.grabs, ms(self.total) / f64::from(self.grabs), ms(self.slowest));
+            if self.screencapture.grabs > 0 {
+                parts.push(self.screencapture.line(&format!("with {}", Backend::Screencapture.name())));
+            }
             *self = Timing::default();
-            Some(line)
+            (!parts.is_empty()).then(|| format!("Captures: {}.", parts.join("; ")))
         }
     }
 
@@ -1057,7 +1154,7 @@ mod mac {
 
         #[test]
         fn the_client_window_is_the_one_on_screen_and_full_size() {
-            let row = |pid, on_screen, w, h| WindowRow { pid, on_screen, rect: (0.0, 0.0, w, h) };
+            let row = |pid, on_screen, w, h| WindowRow { pid, id: (w + h) as u32, on_screen, rect: (0.0, 0.0, w, h) };
             const WOW: i64 = 4242;
             // The six windows measured on this Mac, front to back, and another app's.
             let mut rows = vec![
@@ -1069,7 +1166,7 @@ mod mac {
                 row(WOW, false, 1728.0, 33.0),
                 row(WOW, false, 1728.0, 33.0),
             ];
-            assert_eq!(choose_window(&rows, WOW as u32), Some(Rect { x: 0, y: 0, w: 1728, h: 1117 }));
+            assert_eq!(choose_window(&rows, WOW as u32), Some((Rect { x: 0, y: 0, w: 1728, h: 1117 }, 1728 + 1117)));
             // Nothing on screen (another Space, minimized): nothing to capture.
             rows[2].on_screen = false;
             assert_eq!(choose_window(&rows, WOW as u32), None);
@@ -1082,12 +1179,12 @@ mod mac {
 
         #[test]
         fn on_a_tie_the_frontmost_window_wins() {
-            let front = WindowRow { pid: 1, on_screen: true, rect: (10.0, 0.0, 800.0, 600.0) };
-            let back = WindowRow { pid: 1, on_screen: true, rect: (20.0, 0.0, 800.0, 600.0) };
-            assert_eq!(choose_window(&[front, back], 1).unwrap().x, 10);
+            let front = WindowRow { pid: 1, id: 7, on_screen: true, rect: (10.0, 0.0, 800.0, 600.0) };
+            let back = WindowRow { pid: 1, id: 8, on_screen: true, rect: (20.0, 0.0, 800.0, 600.0) };
+            assert_eq!(choose_window(&[front, back], 1).map(|(rect, id)| (rect.x, id)), Some((10, 7)));
         }
 
-        const WINDOW: WindowFrame = WindowFrame { rect: Rect { x: 0, y: 0, w: 1728, h: 1117 }, scale: 2 };
+        const WINDOW: WindowFrame = WindowFrame { rect: Rect { x: 0, y: 0, w: 1728, h: 1117 }, scale: 2, id: 77 };
 
         #[test]
         fn capture_rectangles_cover_the_search_then_just_the_strip() {
@@ -1096,7 +1193,7 @@ mod mac {
             let tight = tight_rect(WINDOW, Geometry { dx: 3, dy: 55, cell: 4 });
             assert_eq!((tight.w, tight.h), (402, 108), "pixels rounded up to points");
             // A small window keeps the rectangle inside it, at its own corner.
-            let small = WindowFrame { rect: Rect { x: 200, y: 100, w: 300, h: 120 }, scale: 2 };
+            let small = WindowFrame { rect: Rect { x: 200, y: 100, w: 300, h: 120 }, scale: 2, id: 78 };
             assert_eq!(wide_rect(small), Rect { x: 200, y: 100, w: 300, h: 120 });
         }
 
@@ -1223,11 +1320,23 @@ mod mac {
             assert!(line.contains("3 px across") && line.contains("55 px down") && line.contains("cell 4 px") && line.contains("scale 2") && line.contains("62.0 ms"), "{line}");
             let mut timing = Timing::default();
             assert_eq!(timing.take_line(), None);
-            timing.add(Duration::from_millis(40));
-            timing.add(Duration::from_millis(60));
+            timing.add(Backend::Screencapture, Duration::from_millis(40), None);
+            timing.add(Backend::Screencapture, Duration::from_millis(60), None);
             let line = timing.take_line().unwrap();
-            assert!(line.contains("2 in the last minute") && line.contains("50.0 ms") && line.contains("60.0 ms"), "{line}");
+            assert_eq!(line, "Captures: 2 in the last minute with screencapture, 50.0 ms on average, 60.0 ms at the slowest.");
             assert_eq!(timing.take_line(), None, "counts start over");
+
+            // From the stream: each backend on its own, with the frames' age.
+            timing.add(Backend::Stream, Duration::from_micros(200), Some(Duration::from_millis(50)));
+            timing.add(Backend::Stream, Duration::from_micros(600), Some(Duration::from_millis(70)));
+            timing.frames(9);
+            timing.add(Backend::Screencapture, Duration::from_millis(90), None);
+            let line = timing.take_line().unwrap();
+            assert_eq!(
+                line,
+                "Captures: 2 in the last minute from the ScreenCaptureKit stream, 0.4 ms on average, 0.6 ms at the slowest, out of 9 frames it sent, the newest 60 ms old on average; \
+                 1 in the last minute with screencapture, 90.0 ms on average, 90.0 ms at the slowest."
+            );
         }
 
         #[test]
@@ -1332,14 +1441,17 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
 
 /// Watches for the WoW client in `client_folder` and sends what changes: the process
 /// starting or stopping, and each new strip. As on Windows, a look at the client and the
-/// strip four times a second; here the capture itself takes part of that quarter second.
+/// strip four times a second, from one ScreenCaptureKit stream on the game's window. When
+/// the stream can't run, a screencapture each time, less often while the strip hides
+/// (`stream::tick_every`).
 #[cfg(target_os = "macos")]
 pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
     use std::time::Instant;
     std::thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            let mut reader = mac::Reader::new(mac::grab, magic_cells());
+            let streams = stream::Streams::new(|target, window| stream::start(target, window, stream::Filter::Window));
+            let mut reader = mac::Reader::new(stream::Capturer::new(streams, mac::grab), magic_cells());
             let mut report = mac::Report::default();
             let mut timing = mac::Timing::default();
             let mut timing_at = Instant::now();
@@ -1350,6 +1462,7 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
             let mut window: Option<mac::WindowFrame> = None;
             let mut window_at: Option<Instant> = None;
             let mut logged: Option<(mac::Geometry, mac::WindowFrame)> = None;
+            let mut strip_seen: Option<Instant> = None;
             loop {
                 let tick = Instant::now();
                 let watch = match &wow {
@@ -1371,6 +1484,7 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                     window = None;
                     window_at = None;
                     logged = None;
+                    strip_seen = None;
                     if tx.send(CaptureMessage::Wow(key)).is_err() {
                         return;
                     }
@@ -1380,9 +1494,15 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                         window = mac::window_of(wow.pid());
                         window_at = Some(Instant::now());
                     }
+                }
+                // Opens, replaces or (with no window) stops the stream.
+                for line in reader.grabber().streams.update(window, window.map(mac::stream_region), Instant::now()) {
+                    crate::log::line(&line);
+                }
+                if wow.is_some() {
                     let (read, took) = reader.read(window, Instant::now());
-                    if let Some(took) = took {
-                        timing.add(took);
+                    if let (Some(took), Some((backend, age))) = (took, reader.grabber().last()) {
+                        timing.add(backend, took, age);
                     }
                     if let Some(line) = report.on(&read) {
                         crate::log::line(&line);
@@ -1397,6 +1517,7 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                         mac::Read::NotCapturable | mac::Read::Failed(_) => {}
                         mac::Read::NoStrip => last_cells.clear(),
                         mac::Read::Cells(cells) => {
+                            strip_seen = Some(Instant::now());
                             if cells != last_cells {
                                 last_cells = cells.clone();
                                 if tx.send(CaptureMessage::Strip(cells, crate::config::now_ms())).is_err() {
@@ -1406,13 +1527,15 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                         }
                     }
                 }
+                timing.frames(reader.grabber().streams.take_frames());
                 if timing_at.elapsed() >= Duration::from_secs(60) {
                     timing_at = Instant::now();
                     if let Some(line) = timing.take_line() {
                         crate::log::line(&line);
                     }
                 }
-                std::thread::sleep(Duration::from_millis(250).saturating_sub(tick.elapsed()));
+                let every = stream::tick_every(reader.grabber().streams.live(), window.is_some(), strip_seen, Instant::now());
+                std::thread::sleep(every.saturating_sub(tick.elapsed()));
             }
         })
         .expect("capture thread");
