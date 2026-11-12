@@ -1108,8 +1108,9 @@ local function renderList()
     -- their launcher (settled while it's open, say) they stand on their own in theirs.
     -- With their launcher not listed at all, settled ones still show under Settled, and
     -- others only while they're working or need you; T3's sidebar has no row for them.
-    -- The same goes for a thread the companion marks "ag": delegated from another machine,
-    -- which T3's sidebar leaves out too. Other agent-made threads are listed like any.
+    -- The same goes for a thread the companion marks "ag": an agent made it, and the
+    -- companion takes it for a task delegated from another machine, which T3's sidebar
+    -- leaves out too. Other agent-made threads are listed like any.
     local function groupOf(t) return (t.set and "settled") or (t.sn and "snoozed") or (inWorking(t.s) and "working") or "open" end
     -- A search keeps the threads whose title, project or machine has every word typed,
     -- case aside. A launched thread whose launcher doesn't match, or isn't listed, stands on its own.

@@ -214,21 +214,24 @@ fn on_sidebar(thread: &Value) -> bool {
 /// How much of an agent-made thread's first message is read, to know where it came from.
 const OPENING_CHARS: u64 = 120;
 
-/// Where an agent-made thread came from, as its first message tells.
-#[derive(Clone)]
-struct Origin {
-    /// The thread that launched it, when the message names a sender.
-    launcher: Option<String>,
-    /// A task another machine delegated here.
-    delegated: bool,
-}
-
-/// Whether a first message opens the way T3 opens a delegated task given a role. T3's
-/// sidebar leaves out what a linked machine delegated, by a field (`delegatedFrom`) its
-/// tools don't return, and this line is the only trace of it they do.
+/// Whether a first message opens the way T3 opens a task delegated with a role.
 fn opens_delegated_task(message: &str) -> bool {
     let line = message.lines().next().unwrap_or("");
     line.starts_with("Act as the ") && line.ends_with(" sub-agent for this task.")
+}
+
+/// Where an agent-made thread came from, as T3's read of it tells.
+#[derive(Clone)]
+struct Origin {
+    /// The thread that launched it, when its first message names a sender.
+    launcher: Option<String>,
+    /// With no sender, whether T3 lists it (`find_launcher`).
+    listed: bool,
+    /// Whether a later read could tell otherwise: not for a sender, a role line or a
+    /// listed thread.
+    open: bool,
+    /// The thread's `updatedAt` when this was read.
+    updated: String,
 }
 
 /// Whether an activity item (its text cut short) is a page an agent showed with html_render.
@@ -801,7 +804,7 @@ pub struct Bridge {
     /// Whether threads with an open pull request watch it, keyed by thread: only T3's
     /// pull request list says so.
     watches: HashMap<String, Watch>,
-    /// The thread that launched each agent-launched thread (None: unknown), read once.
+    /// Where each agent-made thread came from, read once (again on a change, while undecided).
     launchers: HashMap<String, Origin>,
     /// Per machine, the threads the last read found waiting on a subagent.
     delegating: HashMap<String, HashSet<String>>,
@@ -3207,18 +3210,37 @@ impl Bridge {
         Ok(())
     }
 
-    /// Notes where an agent-made thread came from, by its first message: the sender that
-    /// launched it, a task delegated from another machine, or neither (a row of its own).
+    /// Notes where an agent-made thread came from: the thread that launched it (the sender
+    /// of its first message), else whether T3 lists it.
+    ///
+    /// T3's sidebar leaves out a task delegated from another machine, by a field
+    /// (`delegatedFrom`) its tools don't return. Such a task names no sender. One given a
+    /// role opens with it (`opens_delegated_task`); one without opens with the brief alone,
+    /// and runs in the project's checkout, with no branch of its own, usually once. So a
+    /// thread with no role line is taken as listed when it has a branch (launched with a
+    /// worktree) or ran again (talked to), and for a delegated task otherwise, read again
+    /// once it changes. That gets two cases wrong: a role-less delegated task that ran again
+    /// shows, and a thread launched into a project's checkout, from another machine or by an
+    /// outside MCP client, stays out of Open while idle until its second run.
     fn find_launcher(&mut self, i: usize) -> Result<(), T3Error> {
-        let Some((env, id, _)) = self.listed_thread(i) else { return Ok(()) };
+        let Some((env, id, updated)) = self.listed_thread(i) else { return Ok(()) };
         let key = format!("{env}:{id}");
-        if !self.launchers.contains_key(&key) && !self.out_of_time() {
+        let stale = match self.launchers.get(&key) {
+            None => true,
+            Some(origin) => origin.open && origin.updated != updated,
+        };
+        if stale && !self.out_of_time() {
             let args = with_args(json!({ "threadId": id, "view": "messages", "limit": 1, "maxCharsPerItem": OPENING_CHARS }), &self.env_arg(&env));
             match self.client.call("t3_thread_read", args) {
                 Ok(read) => {
                     let first = &read["items"][0];
                     let launcher = first["senderThreadId"].as_str().filter(|s| *s != id).map(str::to_string);
-                    self.launchers.insert(key.clone(), Origin { launcher, delegated: opens_delegated_task(str_of(&first["text"])) });
+                    let thread = &read["thread"];
+                    let role = opens_delegated_task(str_of(&first["text"]));
+                    let looks_listed = thread["branch"].is_string() || thread["runCount"].as_u64().unwrap_or(0) > 1;
+                    let listed = launcher.is_none() && !role && looks_listed;
+                    let open = launcher.is_none() && !role && !listed;
+                    self.launchers.insert(key.clone(), Origin { launcher, listed, open, updated });
                 }
                 Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
                 Err(T3Error::Other(message)) => self.log(&format!("launcher ({key}): {message}")),
@@ -3228,7 +3250,7 @@ impl Bridge {
             if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
                 match origin.launcher {
                     Some(launcher) => thread["launcher"] = json!(launcher),
-                    None if !origin.delegated => thread["ownRow"] = json!(true),
+                    None if origin.listed => thread["ownRow"] = json!(true),
                     None => {}
                 }
             }
@@ -4597,9 +4619,10 @@ impl Bridge {
                 if t["snoozed"] == true {
                     entry["sn"] = json!(true);
                 }
-                // An agent made it: delegated from another machine (or not read yet), the
-                // game keeps it out of Open while it's idle, as T3's sidebar does. T3 lists
-                // any other, and one started from the game is yours, whatever T3 recorded.
+                // An agent made it: taken for a task delegated from another machine (or not
+                // read yet), the game keeps it out of Open while it's idle, as T3's sidebar
+                // does. One T3 lists has a row of its own (`find_launcher`), and one started
+                // from the game is yours, whatever T3 recorded.
                 if t["createdBy"] == "agent" && t["ownRow"] != true && !self.link.started_threads.iter().any(|known| known == str_of(&t["threadId"])) {
                     entry["ag"] = json!(true);
                 }
