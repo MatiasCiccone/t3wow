@@ -430,6 +430,48 @@ end
 
 function Link.Exhausted() return state.exhausted end
 
+-- ---------------------------------------------------------------- AddOns list
+-- The slots are addons only so the game reads their files. In the game's AddOns list they
+-- would be 200 rows under T3 WoW, so they come out of the rows each time the list builds
+-- them (it rebuilds on every key typed in its search box). They stay in the game and load
+-- as before. The list at character select runs before any addon, so it still shows them.
+-- After t3code-wow's in-game AddOns list filter (MIT, github.com/ryanrhughes/t3code-wow/pull/17).
+local function isSlot(name) return type(name) == "string" and name:match("^T3WoW_S%d%d%d$") ~= nil end
+
+local function hideSlots(provider)
+    if not (provider and provider.EnumerateEntireRange and provider.Invalidate) then return end
+    local slots = {}
+    for _, node in provider:EnumerateEntireRange() do
+        local data = node.GetData and node:GetData()
+        if data and data.addonIndex and isSlot(C_AddOns.GetAddOnName(data.addonIndex)) then
+            slots[#slots + 1] = node
+        end
+    end
+    if #slots == 0 then return end
+    -- One redraw for the lot, not one per row.
+    local skipRedraw = true
+    for _, node in ipairs(slots) do node.parent:Remove(node, skipRedraw) end
+    provider:Invalidate()
+end
+
+local hookedList
+local function hookAddonList()
+    local box = AddonList and AddonList.ScrollBox
+    if not box or box == hookedList or not box.SetDataProvider then return end
+    hookedList = box
+    -- An error here would stop the list's own update halfway; the list showing the slots is better.
+    hooksecurefunc(box, "SetDataProvider", function(_, provider) pcall(hideSlots, provider) end)
+    pcall(hideSlots, box.GetDataProvider and box:GetDataProvider())
+end
+
+-- The list's code (Blizzard_AddOnList) may load before or after this addon.
+local listWatcher = CreateFrame("Frame")
+listWatcher:RegisterEvent("ADDON_LOADED")
+listWatcher:SetScript("OnEvent", function(self)
+    hookAddonList()
+    if hookedList then self:UnregisterEvent("ADDON_LOADED") end
+end)
+
 -- How many of the session's updates are used.
 function Link.SlotsUsed() return math.min(SLOT_COUNT, state.nextSlot - 1), SLOT_COUNT end
 function Link.SlotsLow() return state.nextSlot - 1 >= SLOT_WARN end
@@ -585,6 +627,7 @@ function Link.Init()
     db.trace = state.trace
     state.uiSession = format("%x%s", time(), randomHex(4))
     trace("UI session " .. state.uiSession .. " started")
+    hookAddonList()
     checkImages()
     -- The file id may come a moment later: look again.
     if not state.images then C_Timer.After(1, checkImages) end
