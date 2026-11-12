@@ -3369,7 +3369,7 @@ impl Bridge {
     /// Notes from the server's `t3_environment_read` whether it runs an older T3 Code than
     /// this release is made for, and logs each change.
     fn note_t3_version(&mut self, read: &Value) {
-        let older = older_t3(str_of(&read["serverVersion"]), str_of(&read["platform"]["os"]));
+        let older = older_t3(str_of(&read["serverVersion"]));
         if older != self.older_t3 {
             match &older {
                 Some(older) => self.log(&format!("T3 runs T3 Code {}, older than the {} this release is made for", older.running, made_for::T3_CODE)),
@@ -4722,9 +4722,11 @@ impl Bridge {
             out.insert("av".into(), json!(plain(&version, 40)));
         }
         // The T3 runs an older T3 Code than this release is made for: what to say about it
-        // (left out otherwise).
+        // in full (t3u: the version it runs, and where the update is) and in a few words for
+        // the window's status pill (t3s). Both left out otherwise.
         if let Some(older) = &self.older_t3 {
             out.insert("t3u".into(), json!(plain(&older.line(), 200)));
+            out.insert("t3s".into(), json!(plain(&older.title(), 60)));
         }
         // This companion's version, so the game can say when the companion is older than
         // the addon (one updated from CurseForge, say) and needs an update itself.

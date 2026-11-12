@@ -1944,6 +1944,7 @@ fn an_older_t3_code_on_this_server_is_said_in_the_tray_and_the_game() {
     let older = rig.bridge.status().older_t3.expect("T3 Code 0.18.0 is older than this release is made for");
     assert_eq!(older.running, "0.18.0");
     assert_eq!(rig.bridge.snapshot()["t3u"], json!(older.line()));
+    assert_eq!(rig.bridge.snapshot()["t3s"], json!(format!("Update T3 Code to {}", crate::made_for::T3_CODE)));
 
     // Updated to the T3 Code it's made for: nothing more to say.
     let made_for = crate::made_for::T3_CODE.strip_prefix("0.1").and_then(|rest| rest.strip_suffix(".0")).map(|n| format!("0.1.{n}")).unwrap();
@@ -1952,6 +1953,7 @@ fn an_older_t3_code_on_this_server_is_said_in_the_tray_and_the_game() {
     rig.bridge.tick();
     assert_eq!(rig.bridge.status().older_t3, None);
     assert!(rig.bridge.snapshot()["t3u"].is_null());
+    assert!(rig.bridge.snapshot()["t3s"].is_null());
 
     // Another T3's sign-in forgets what the previous one ran.
     rig.t3.versions.lock().unwrap().insert("local".to_string(), "0.1.8");

@@ -143,8 +143,8 @@ fn target(origin: &Option<Option<String>>) -> Option<t3::Target> {
 fn older_t3_note(client: &t3::McpClient) -> Option<String> {
     use t3::T3;
     let read = client.call("t3_environment_read", serde_json::json!({})).ok()?;
-    let older = made_for::older_t3(read["serverVersion"].as_str().unwrap_or_default(), read["platform"]["os"].as_str().unwrap_or_default())?;
-    Some(format!("Update T3 Code to {}: {}", made_for::T3_CODE, older.note()))
+    let older = made_for::older_t3(read["serverVersion"].as_str().unwrap_or_default())?;
+    Some(format!("{}: {}", older.title(), older.note()))
 }
 
 fn command(args: Args) -> Result<(), String> {
