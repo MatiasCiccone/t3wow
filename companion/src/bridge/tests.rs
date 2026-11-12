@@ -4562,8 +4562,13 @@ fn a_part_that_changes_is_sent_until_the_game_is_in_step_and_changing_back_doesn
     ack_only(&mut rig, 5, 4, Some(latest));
     assert!(!parts_in(&rig, 4).0);
 
-    // The game didn't hold a part an update left out (g=0): all of them go again.
-    ack_only(&mut rig, 6, 4, Some(0));
+    // The game didn't hold a part an update left out (g=0): all of them go again, though
+    // nothing else changed.
+    let before = update_in(&rig, 4);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "g": 0, "q": [] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_ne!(update_in(&rig, 4), before, "nothing sent");
     assert_eq!(parts_in(&rig, 4), (true, true, String::new()));
 }
 

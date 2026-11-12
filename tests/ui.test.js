@@ -3739,6 +3739,10 @@ end
 -- Kept: not drawn again.
 load({ g = 2, hx = { view = "v1", threads = "l1" }, same = { "view", "threads" } })
 assert(showing("^as drawn$") and not showing("First reply"), "drawn again")
+-- The tray's setting for commands from the game changed: drawn again (it decides the
+-- question's buttons and the scripts menu).
+load({ g = 3, hx = { view = "v1", threads = "l1" }, same = { "view", "threads" }, trust = "nonew" })
+assert(showing("First reply"), "not drawn after the tray setting changed")
 -- The list sent anew (another thread changed): drawn again, as its row may have.
 load({ g = 3, hx = { view = "v1", threads = "l2" }, threads = row(), same = { "view" } })
 assert(showing("First reply"), "not drawn after the list changed")
