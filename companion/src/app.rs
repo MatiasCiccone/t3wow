@@ -376,7 +376,7 @@ fn signed_in_notice(connected: &t3::Connected) -> Notice {
     let title = if connected.read_only {
         level = Level::Warning;
         // The warning first: the plain-HTTP note after it may not fit.
-        text = format!("{} {text}", t3::READ_ONLY_NOTE.replace("Sign in again", "Choose Sign in to T3…"));
+        text = format!("{} {text}", t3::READ_ONLY_NOTE.replace("Sign in again", SIGN_IN_AGAIN));
         if connected.switched { "Switched T3, but the sign-in is read only" } else { "Signed in to T3, but read only" }
     } else {
         title
@@ -388,8 +388,18 @@ fn signed_in_notice(connected: &t3::Connected) -> Notice {
     Notice::new(level, title, text)
 }
 
+/// How a read-only sign-in is done again: the tray's Sign in to T3…, or on a Mac (no tray
+/// menu yet) `t3wow login`.
+#[cfg(not(target_os = "macos"))]
+const SIGN_IN_AGAIN: &str = "Choose Sign in to T3…";
+#[cfg(target_os = "macos")]
+const SIGN_IN_AGAIN: &str = "Run t3wow login";
+
 /// The tray menu's T3 line while the sign-in in use can only read.
+#[cfg(not(target_os = "macos"))]
 const READ_ONLY_LINE: &str = "T3: connected, but read only: choose Sign in to T3, pick Auto or Full access";
+#[cfg(target_os = "macos")]
+const READ_ONLY_LINE: &str = "T3: connected, but read only: run t3wow login, pick Auto or Full access";
 
 /// The automatic update checks, as the tray's Update checks set them: one when the companion
 /// starts, then one whenever the interval has passed since the last check (a check from the
@@ -585,6 +595,16 @@ fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) 
     }
 }
 
+// The Mac companion has no tray menu yet: its commands do what the menu's items do.
+#[cfg(not(target_os = "macos"))]
+const SIGN_IN_NEEDED: &str = "T3: sign-in needed (approve it in your browser, or choose Sign in to T3)";
+#[cfg(target_os = "macos")]
+const SIGN_IN_NEEDED: &str = "T3: sign-in needed (approve it in your browser, or run t3wow login)";
+#[cfg(not(target_os = "macos"))]
+const NO_LOCAL_T3: &str = "T3 Code isn't running on this PC: start it, or choose T3 server > Connect to T3 on another machine…";
+#[cfg(target_os = "macos")]
+const NO_LOCAL_T3: &str = "T3 Code isn't running on this Mac: start it, or connect to T3 on another machine with t3wow login --origin http://<host>:<port>";
+
 /// The worker loop. Never returns.
 pub fn run(app: Arc<App>) {
     let (control_tx, control_rx) = channel::<Control>();
@@ -664,18 +684,13 @@ pub fn run(app: Arc<App>) {
         match t3::target() {
             Some(t3::Target { key, origin, token: Some(token) }) => break (key, origin, token),
             Some(_) => {
-                app.set("T3: sign-in needed (approve it in your browser, or choose Sign in to T3)", "WoW: waiting for the sign-in", true, false);
+                app.set(SIGN_IN_NEEDED, "WoW: waiting for the sign-in", true, false);
                 if !asked {
                     asked = true;
                     app.sign_in();
                 }
             }
-            None => app.set(
-                "T3 Code isn't running on this PC: start it, or choose T3 server > Connect to T3 on another machine…",
-                "WoW: waiting for T3",
-                true,
-                false,
-            ),
+            None => app.set(NO_LOCAL_T3, "WoW: waiting for T3", true, false),
         }
         wait(&app, &control_rx, 5, Some(&slots));
     };
@@ -894,8 +909,17 @@ mod tests {
         assert!(matches!(notice.level, Level::Warning));
         assert_eq!(notice.title, "Signed in to T3, but read only");
         assert!(notice.text.starts_with("The sign-in is Read only"), "{}", notice.text);
-        assert!(notice.text.contains("Choose Sign in to T3… and pick Auto or Full access"), "{}", notice.text);
-        assert!(notice.text.contains("T3 WoW is signed in to T3 on this PC."), "{}", notice.text);
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(notice.text.contains("Choose Sign in to T3… and pick Auto or Full access"), "{}", notice.text);
+            assert!(notice.text.contains("T3 WoW is signed in to T3 on this PC."), "{}", notice.text);
+        }
+        // No tray on a Mac: the companion's own command signs in again.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(notice.text.contains("Run t3wow login and pick Auto or Full access"), "{}", notice.text);
+            assert!(notice.text.contains("T3 WoW is signed in to T3 on this Mac."), "{}", notice.text);
+        }
         assert!(fits_a_toast(&notice.text), "{} units: {}", notice.text.encode_utf16().count(), notice.text);
 
         // Switched to another machine's T3, with a long name: still whole, warning first.
@@ -911,7 +935,10 @@ mod tests {
         // Auto (or Full access) is the plain notice it always was.
         let notice = signed_in_notice(&connected("http://127.0.0.1:3773", Some("orchestration:read orchestration:operate"), false, false));
         assert!(matches!(notice.level, Level::Info));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!((notice.title.as_str(), notice.text.as_str()), ("Signed in to T3", "T3 WoW is signed in to T3 on this PC."));
+        #[cfg(target_os = "macos")]
+        assert_eq!((notice.title.as_str(), notice.text.as_str()), ("Signed in to T3", "T3 WoW is signed in to T3 on this Mac."));
 
         // The page's own notice says which level to pick, whole.
         assert!(browser_open_text().contains("Pick Auto"));
@@ -981,7 +1008,10 @@ mod tests {
         assert_eq!(update_step_text("0.6.0", Step::Downloading(None)), "Downloading update 0.6.0…");
         assert_eq!(update_step_text("0.6.0", Step::Checking), "Checking the download of 0.6.0…");
         assert_eq!(update_step_text("0.6.0", Step::Installing), "Installing update 0.6.0…");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(t3_named("this PC"), "T3 on this PC");
+        #[cfg(target_os = "macos")]
+        assert_eq!(t3_named("this Mac"), "T3 on this Mac");
         assert_eq!(t3_named("http://box:3773"), "T3 at http://box:3773");
     }
 

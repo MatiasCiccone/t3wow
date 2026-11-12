@@ -168,7 +168,7 @@ const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
   t3wow login          [--origin http://<host>:<port> | local]          sign in to T3 again (local: the T3 on this Mac)
   t3wow status         [--origin http://<host>:<port> | local]          check the addon install and the T3 connection
   t3wow uninstall      remove the addon
-  t3wow update         install the newest release, if there is one";
+  t3wow update         say whether a newer release is out (on a Mac, put it in place by hand)";
 
 #[cfg(windows)]
 const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
@@ -185,6 +185,24 @@ const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
 const NO_WOW: &str = "Could not find WoW: Forever. Pass --wow \"C:\\...\\World of Warcraft\\_forever_\".";
 #[cfg(target_os = "macos")]
 const NO_WOW: &str = "Could not find WoW: Forever. Pass --wow \"/Applications/World of Warcraft/_forever_\".";
+
+// The Mac companion has no tray icon yet: it runs where it was started, in a terminal.
+#[cfg(not(target_os = "macos"))]
+const ALREADY_RUNNING: &str = "T3 WoW is already running. Look for its icon in the system tray (next to the clock).";
+#[cfg(target_os = "macos")]
+const ALREADY_RUNNING: &str = "T3 WoW is already running (another t3wow, in a Terminal window).";
+#[cfg(not(target_os = "macos"))]
+const ALREADY_RUNNING_HERE: &str = "T3 WoW is already running (see the system tray).";
+#[cfg(target_os = "macos")]
+const ALREADY_RUNNING_HERE: &str = "T3 WoW is already running (another t3wow, in a Terminal window).";
+#[cfg(not(target_os = "macos"))]
+const NO_LOCAL_T3: &str = "T3: not running on this PC";
+#[cfg(target_os = "macos")]
+const NO_LOCAL_T3: &str = "T3: not running on this Mac";
+#[cfg(not(target_os = "macos"))]
+const UPDATED: &str = "Updated. Restart T3 WoW (Quit from its tray menu, then start it again), then restart WoW if it is running: /reload does not load new addon files.";
+#[cfg(target_os = "macos")]
+const UPDATED: &str = "Updated. Restart T3 WoW (Ctrl+C where t3wow runs, then start it again), then restart WoW if it is running: /reload does not load new addon files.";
 
 fn wow_dir(args: &Args, config: &Config) -> Result<PathBuf, String> {
     let dir = match &args.wow {
@@ -280,7 +298,7 @@ fn command(args: Args) -> Result<(), String> {
             }
             #[cfg(any(windows, target_os = "macos"))]
             println!("WoW client: {}", if capture::find_wow(&dir).is_some() { "running" } else { "not running" });
-            let t3::Target { origin, token, key } = target(&origin).ok_or("T3: not running on this PC")?;
+            let t3::Target { origin, token, key } = target(&origin).ok_or(NO_LOCAL_T3)?;
             // The sign-in is saved but out of reach: "not signed in" would be wrong.
             #[cfg(target_os = "macos")]
             if let Some(problem) = keychain::blocked().filter(|_| token.is_none()) {
@@ -304,6 +322,8 @@ fn command(args: Args) -> Result<(), String> {
         }
         "update" => match updater::check()? {
             None => println!("Up to date ({}), or no release is visible yet.", updater::current_version()),
+            // Off Windows there's nothing to install it from yet: say it's out, not "Updating…".
+            Some(release) if !cfg!(windows) => println!("{} is out (this is {}). {}", release.version, updater::current_version(), updater::WINDOWS_ONLY),
             Some(release) => {
                 println!("Updating {} to {}…", updater::current_version(), release.version);
                 updater::install(&release, &|step| match step {
@@ -311,7 +331,7 @@ fn command(args: Args) -> Result<(), String> {
                     updater::Step::Installing => println!("Installing…"),
                     updater::Step::Downloading(_) => {}
                 })?;
-                println!("Updated. Restart T3 WoW (Quit from its tray menu, then start it again), then restart WoW if it is running: /reload does not load new addon files.");
+                println!("{UPDATED}");
             }
         },
         "help" => println!("{HELP}"),
@@ -327,7 +347,7 @@ fn main() {
         None => {
             log::init(false);
             if !single_instance::acquire() {
-                message_box("T3 WoW", "T3 WoW is already running. Look for its icon in the system tray (next to the clock).");
+                message_box("T3 WoW", ALREADY_RUNNING);
                 return;
             }
             log::line(&format!("T3 WoW companion {} starting", crate::VERSION));
@@ -347,7 +367,7 @@ fn main() {
             attach_console();
             log::init(true);
             if !single_instance::acquire() {
-                eprintln!("T3 WoW is already running (see the system tray).");
+                eprintln!("{ALREADY_RUNNING_HERE}");
                 std::process::exit(1);
             }
             app::run(app::App::new());

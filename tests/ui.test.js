@@ -98,6 +98,8 @@ UI.Toggle()
 `;
 
 const run = (script, options) => runGame(UI_HELPERS + script, { ui: true, ...options });
+// The game's own check for the Mac client, as the Mac client answers it.
+const ON_MAC = `function IsMacClient() return true end`;
 
 test("a thread stays selected by its machine's id when the machine list changes", () => {
   run(`
@@ -1673,6 +1675,29 @@ return "ok"
 `);
 });
 
+test("on a Mac the copy box says Cmd+C, which closes it as Ctrl+C does elsewhere", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Copy me" } } } })
+UI.Select(thread)
+assert(showing("^Cmd%+C copies the highlighted text%. Escape closes%.$"), "the hint")
+assert(not showing("Ctrl%+C"), "Ctrl+C is offered on a Mac")
+local hit = shownString("Copy me").hit
+hit.scripts.OnClick(hit, "LeftButton")
+local edit
+for _, f in ipairs(frames) do
+  if f.kind == "EditBox" and f.text == "Copy me" then edit = f end
+end
+local box = edit.parent.parent
+assert(box.shown, "copy box hidden")
+metaDown = true
+edit.scripts.OnKeyDown(edit, "C")
+metaDown = false
+assert(not box.shown, "Cmd+C didn't close it")
+return "ok"
+`, { before: ON_MAC + "\nmetaDown = false\nfunction IsMetaKeyDown() return metaDown end" });
+});
+
 test("a table's columns are padded to one width, and cut down to fit a narrow window", () => {
   const out = run(`
 local rows = { { "Name", "Size", "Note" }, { "a|b", "10", "ok" }, { "longer name", "2", "" } }
@@ -2982,6 +3007,66 @@ assert(row and row.status.label == "Input", row and row.status.label)
 assert(tostring(header("Snoozed").count.text) == "0", "still counted under Snoozed")
 return "ok"
 `);
+});
+
+// On a Mac the companion is `t3wow` in a terminal, with no tray menu (and no image paste
+// yet): the window names it so, and says where "Commands from the game" is set instead.
+test("on a Mac the window names the companion without its tray, and Read-only points at its config", () => {
+  run(`${CTRL_V}
+inboxWith(ENVS, { threads = { THREAD }, trust = "readonly" })
+UI.Select({ e = 2, id = "t1" })
+assert(showing("Read%-only: gameCommands in T3 WoW's config.json"), "the status doesn't say where Read-only is set")
+assert(not showing("tray"), "a tray is mentioned on a Mac")
+typeText("please")
+click("Send")
+assert(showing('Sending messages from the game is off: T3 WoW has "Commands from the game" set to Read%-only %(gameCommands in its config.json%)%.'), "no reason, or the tray's")
+-- A Mac companion doesn't paste (no pi): the box offers no Ctrl+V, and Ctrl+V asks nothing.
+inboxWith(ENVS, { threads = { THREAD } })
+assert(showing("^Message the agent %(Shift%+Enter for a new line%)$"), "placeholder")
+assert(not showing("pastes images"), "an image paste is promised")
+local before = #queue()
+ctrlV()
+assert(#queue() == before, "asked a companion that can't paste")
+-- Not answering: it's asked for on this Mac, not in a tray.
+Link.Send({ t = "open", e = "mac", id = "t1" })
+tick(25)
+UI.Refresh()
+assert(showing("Companion not answering: is T3 WoW %(t3wow%) running on this Mac%?"), "stalled wording")
+return "ok"
+`, { before: ON_MAC });
+});
+
+test("off a Mac the window keeps the tray's wording", () => {
+  run(`${CTRL_V}
+inboxWith(ENVS, { threads = { THREAD }, trust = "readonly" })
+UI.Select({ e = 2, id = "t1" })
+assert(showing("Read%-only: see Commands from the game in the T3 WoW tray menu"), "status")
+typeText("please")
+click("Send")
+assert(showing('Sending messages from the game is off: the T3 WoW tray menu has "Commands from the game" set to Read%-only%.'), "reason")
+Link.Send({ t = "open", e = "mac", id = "t1" })
+tick(25)
+UI.Refresh()
+assert(showing("Companion not answering: is T3 WoW running in the system tray%?"), "stalled wording")
+return "ok"
+`, { before: `function IsMacClient() return false end` });
+});
+
+// The welcome T3WoW.lua prints on a first install, after the game has logged in.
+const WELCOME = `
+SlashCmdList = {}
+assert(load(${JSON.stringify(read("T3WoW.lua"))}, "T3WoW.lua"))("T3WoW", ns)
+T3WoWDB = { client = "c1", seq = 0, queue = {} }
+fire("PLAYER_LOGIN")
+return table.concat(printed, "\\n")
+`;
+
+test("the first welcome names the companion as each system runs it", () => {
+  const windows = run(WELCOME);
+  assert.match(windows, /It needs the T3 WoW companion \(t3wow\.exe\) running in the system tray on this PC\./);
+  const mac = run(WELCOME, { before: ON_MAC });
+  assert.match(mac, /It needs the T3 WoW companion \(t3wow\) running on this Mac\./);
+  assert.doesNotMatch(mac, /tray|\.exe|this PC/);
 });
 
 test("the tray's Read-only greys out changing the model; No new threads leaves it", () => {
