@@ -2754,7 +2754,19 @@ do
     end
 end
 
+-- What the conversation was last drawn from. An update that left out the open thread and
+-- the list keeps the same tables (see keepParts in Link.lua), and then the conversation
+-- stays as drawn: drawing a long one again costs the game about 20 ms.
+local drawn = {}
+local function drawnAsIs()
+    local kept = {}
+    for _, part in ipairs(inbox and type(inbox.same) == "table" and inbox.same or {}) do kept[part] = true end
+    return kept.view and kept.threads and drawn.view ~= nil and drawn.view == inbox.view and drawn.listed == selectedThread()
+        and drawn.selected == selected and drawn.echo == echo and drawn.sent == askState.sent
+end
+
 function renderView()
+    drawn = {}
     -- The conversation is hidden while the window is resized, and drawn when you let go.
     if Sizing.from then return end
     -- Stay at the end while new messages come in, unless you scrolled up to read.
@@ -2913,6 +2925,7 @@ function renderView()
     -- settle.
     if stickToBottom then scrollToEnd = false end
     fit(stickToBottom)
+    drawn = { view = view, listed = listed, selected = selected, echo = echo, sent = askState.sent }
 end
 
 -- ---------------------------------------------------------------- composer
@@ -4879,10 +4892,11 @@ end
 
 -- ---------------------------------------------------------------- API used by Link
 
-function UI.Refresh()
+-- viewAsIs: an update that left the conversation as drawn (drawnAsIs).
+function UI.Refresh(viewAsIs)
     if not frame:IsShown() then return end
     renderList()
-    renderView()
+    if not viewAsIs then renderView() end
     Paste.Render()
     Selectors.Render()
     UI.Picker.Sync()
@@ -5030,7 +5044,7 @@ function UI.OnInbox(data)
     -- The run ended (or the thread dropped off the list's working states): Stop is done.
     local t = stopping and listedThread(stopping.env, stopping.id)
     if t and not UI.Stoppable(t.s) then stopping = nil end
-    UI.Refresh()
+    UI.Refresh(drawnAsIs())
 end
 
 -- The companion moved to another T3 sign-in (see Link.ForgetLogin): the previous one's
