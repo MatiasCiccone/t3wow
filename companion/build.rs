@@ -7,6 +7,11 @@ fn main() {
     let version = build_version();
     println!("cargo:rustc-env=T3WOW_VERSION={version}");
     made_for_t3();
+    // ScreenCaptureKit (macOS 12.3 and later) is linked weakly, so the companion still starts
+    // on an older Mac; the capture checks for it at run time and uses screencapture without it.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    }
     #[cfg(windows)]
     {
         let mut res = winresource::WindowsResource::new();
