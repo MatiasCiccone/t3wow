@@ -678,31 +678,137 @@ local function layoutRow(r, compact, hasPr, hasMore)
     r.actions:SetShown(r.hovering)
 end
 
--- Settle and Snooze on a row, as in T3's sidebar. Snooze asks for how long; T3 takes a time,
--- which the companion works out, since the game's clock may not be the PC's. On a snoozed
--- thread the clock wakes it. A settled thread has only Unsettle. As in T3 0.18.0, a thread
--- waiting on a question can be snoozed (the question stays open; a newer one wakes it), but
--- one waiting on an approval, or on a turn still starting, has only Settle.
+-- Settle and Snooze on a row, as in T3's sidebar. Snooze offers T3's snooze presets and
+-- Custom… for a typed time; T3 takes a time, which the companion works out, since the game's
+-- clock may not be the PC's. On a snoozed thread the clock wakes it. A settled thread has
+-- only Unsettle. As in T3 0.18.0, a thread waiting on a question can be snoozed (the question
+-- stays open; a newer one wakes it), but one waiting on an approval, or on a turn still
+-- starting, has only Settle.
 do
     local Actions = {}
     UI.RowActions = Actions
+    -- What an older companion, which lists no presets (inbox.snz), is asked for.
     local SNOOZE_FOR = { { "1 hour", 60 }, { "4 hours", 240 }, { "1 day", 1440 }, { "1 week", 10080 } }
+    local CUSTOM = "custom"
     Actions.UNSNOOZABLE = { approval = true, preparing = true, queued = true, starting = true }
 
-    local function command(kind, t, minutes)
+    local function command(kind, t, extra)
         local blocked = blockedReason(kind)
         if blocked then return UI.Notice(blocked) end
-        ns.Link.Send({ t = kind, e = envIdOf(t.e), id = t.id, mn = minutes })
+        local sent = { t = kind, e = envIdOf(t.e), id = t.id }
+        for key, value in pairs(extra or {}) do sent[key] = value end
+        ns.Link.Send(sent)
     end
 
+    -- Custom…: a time typed into a small box over the list ("45m", "5pm", "fri 3pm"), which
+    -- the companion reads on the PC's clock. One it can't read, or one that has passed,
+    -- comes back saying why, and what was typed stays in the box.
+    local HINT = "45m, 2h, 3d, 5pm, tomorrow 9am or fri 3pm"
+    local box = CreateFrame("Frame", "T3WoWSnoozeBox", frame)
+    Actions.snoozeBox = box
+    box:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -SIZE.title - 40)
+    box:SetWidth(LIST_WIDTH - 16)
+    box:SetFrameStrata("DIALOG")
+    box:EnableMouse(true)
+    box:Hide()
+    Skin.Box(box, { shape = "panel", fill = "card", ring = "focus" })
+    box.title = box:CreateFontString(nil, "OVERLAY")
+    box.title:SetFontObject(Skin.fonts.text)
+    box.title:SetPoint("TOPLEFT", 10, -10)
+    box.title:SetPoint("RIGHT", -28, 0)
+    box.title:SetJustifyH("LEFT")
+    box.title:SetWordWrap(false)
+    Skin.CloseButton(box, function() box:Hide() end):SetPoint("TOPRIGHT", -4, -4)
+    -- Named: the message box is the window's only unnamed edit box.
+    local edit = CreateFrame("EditBox", "T3WoWSnoozeTime", box)
+    box.edit = edit
+    edit:SetPoint("TOPLEFT", 10, -32)
+    edit:SetPoint("RIGHT", -10, 0)
+    edit:SetHeight(24)
+    edit:SetAutoFocus(false)
+    edit:SetMaxLetters(60)
+    edit:SetFontObject(Skin.fonts.text)
+    edit:SetTextInsets(8, 8, 0, 0)
+    edit.box = Skin.Box(edit, { shape = "control", fill = "input", ring = "border" })
+    box.message = box:CreateFontString(nil, "OVERLAY")
+    box.message:SetFontObject(Skin.fonts.small)
+    box.message:SetPoint("TOPLEFT", edit, "BOTTOMLEFT", 0, -6)
+    box.message:SetPoint("RIGHT", -10, 0)
+    box.message:SetJustifyH("LEFT")
+    box.message:SetWordWrap(true)
+
+    local function say(text, refused)
+        box.message:SetText(refused and format("|cffff4040%s|r", text) or text)
+        box:SetHeight(32 + 24 + 6 + math.max(12, box.message:GetStringHeight() or 0) + 10)
+    end
+
+    box:SetScript("OnHide", function()
+        edit:ClearFocus()
+        box.waiting = nil
+    end)
+    popupTakesEscape(box)
+
+    function Actions.OpenSnoozeBox(t)
+        box.thread, box.waiting = t, nil
+        box.title:SetText(format("Snooze \"%s\" until", t.t or "this thread"))
+        edit:SetText("")
+        say(HINT)
+        box:Show()
+        edit:SetFocus()
+    end
+
+    local function submit()
+        local t = box.thread
+        if not t then return box:Hide() end
+        local text = edit:GetText():gsub("^%s+", ""):gsub("%s+$", "")
+        if text == "" then return say("Type when it comes back: " .. HINT, true) end
+        local blocked = blockedReason("snooze")
+        if blocked then return say(blocked, true) end
+        local s = ns.Link.Send({ t = "snooze", e = envIdOf(t.e), id = t.id, at = text })
+        awaiting[s] = { kind = "snoozeAt", at = GetTime() }
+        box.waiting = s
+        say("Snoozing…")
+    end
+    edit:SetScript("OnEnterPressed", submit)
+    edit:SetScript("OnEscapePressed", function() box:Hide() end)
+    edit:SetScript("OnEditFocusGained", function(self) self.box:SetColors(nil, "focus") end)
+    edit:SetScript("OnEditFocusLost", function(self) self.box:SetColors(nil, "border") end)
+
+    -- What the companion said about a typed time: through, the box closes (the bottom line
+    -- says until when); refused, it says why and keeps what was typed.
+    function Actions.SnoozeOutcome(o)
+        if o.s ~= box.waiting then return end
+        box.waiting = nil
+        if o.ok then return box:Hide() end
+        local why = tostring(o.x or "the companion couldn't snooze it")
+        say((why:gsub("^%l", string.upper)), true)
+        edit:SetFocus()
+    end
+
+    -- The presets the companion lists, on the PC's clock (label, then the time for one at a
+    -- fixed time), then Custom…; an older companion's are the game's own four.
     local snoozeMenu = { isSelected = function() return false end }
     function snoozeMenu.entries()
         local list = {}
-        for _, choice in ipairs(SNOOZE_FOR) do list[#list + 1] = { text = choice[1], value = choice[2] } end
+        if inbox and type(inbox.snz) == "table" then
+            for _, c in ipairs(inbox.snz) do
+                if type(c) == "table" and type(c.k) == "string" and type(c.l) == "string" then
+                    local text = c.w and format("%s  |cff%s%s|r", c.l, Skin.Hex("dim"), c.w) or c.l
+                    list[#list + 1] = { text = text, value = c.k }
+                end
+            end
+            list[#list + 1] = { text = "Custom…", value = CUSTOM }
+        else
+            for _, choice in ipairs(SNOOZE_FOR) do list[#list + 1] = { text = choice[1], value = choice[2] } end
+        end
         return list
     end
     -- The thread is the one clicked: its row may list another by the time one is picked.
-    function snoozeMenu.pick(minutes) command("snooze", snoozeMenu.thread, minutes) end
+    function snoozeMenu.pick(value)
+        local t = snoozeMenu.thread
+        if value == CUSTOM then return Actions.OpenSnoozeBox(t) end
+        command("snooze", t, type(value) == "string" and { k = value } or { mn = value })
+    end
 
     local function action(r, glyph, onClick)
         local b = CreateFrame("Button", nil, r.actions)
@@ -4861,7 +4967,9 @@ local function takeOutcomes(data)
         local sent = type(o) == "table" and awaiting[o.s]
         if sent then
             awaiting[o.s] = nil
-            if o.ok then
+            if sent.kind == "snoozeAt" then
+                UI.RowActions.SnoozeOutcome(o)
+            elseif o.ok then
                 if sent.kind == "new" and o.id and selected and selected.new then
                     selected = { env = o.env or selected.env, id = o.id }
                     UI.History.Visit(selected.env, selected.id)
@@ -4933,6 +5041,7 @@ function UI.ForgetLogin()
     inbox, selected, echo, notice, stopping = nil, nil, nil, nil, nil
     UI.History.list, UI.History.at, UI.History.pending = {}, 0, nil
     copyBox:Hide()
+    UI.RowActions.snoozeBox:Hide()
     awaiting = {}
     Paste.fresh = {}
     askState.k, askState.picks, askState.sent, askState.sentAt = nil, {}, nil, nil

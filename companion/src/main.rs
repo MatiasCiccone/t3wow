@@ -21,6 +21,7 @@ mod lua;
 mod made_for;
 mod render;
 mod slots;
+mod snooze;
 mod t3;
 #[cfg(windows)]
 mod tray;
