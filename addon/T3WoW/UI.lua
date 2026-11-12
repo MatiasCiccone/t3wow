@@ -2762,7 +2762,7 @@ local function drawnAsIs()
     local kept = {}
     for _, part in ipairs(inbox and type(inbox.same) == "table" and inbox.same or {}) do kept[part] = true end
     return kept.view and kept.threads and drawn.view ~= nil and drawn.view == inbox.view and drawn.listed == selectedThread()
-        and drawn.selected == selected and drawn.echo == echo and drawn.sent == askState.sent
+        and drawn.selected == selected and drawn.echo == echo and drawn.sent == askState.sent and drawn.trust == inbox.trust
 end
 
 function renderView()
@@ -2925,7 +2925,7 @@ function renderView()
     -- settle.
     if stickToBottom then scrollToEnd = false end
     fit(stickToBottom)
-    drawn = { view = view, listed = listed, selected = selected, echo = echo, sent = askState.sent }
+    drawn = { view = view, listed = listed, selected = selected, echo = echo, sent = askState.sent, trust = inbox.trust }
 end
 
 -- ---------------------------------------------------------------- composer

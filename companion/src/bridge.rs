@@ -2264,7 +2264,12 @@ impl Bridge {
             // latest counts, as a part in a later update may not have reached it. 0: a part
             // an update left out wasn't the one the game had, so send them all again.
             match frame["g"].as_u64() {
-                Some(0) => self.held.clear(),
+                Some(0) if !self.held.is_empty() => {
+                    self.held.clear();
+                    // Even if nothing else changed: what it holds needs replacing now.
+                    self.last_published_hash = None;
+                    self.last_urgent_hash = None;
+                }
                 Some(g) if g == u64::from(self.update_id) => self.held = self.update_parts.clone(),
                 _ => {}
             }
