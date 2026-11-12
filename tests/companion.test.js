@@ -21,6 +21,8 @@ function companionLines()
   return n
 end
 function hover() return table.concat(UI.StatusLines(), "~") end
+-- The pill says it in a few words; the tooltip's first line and chat say it in full.
+function companionPill() return showing("^|cffff8000Update the T3 WoW companion|r$") end
 Link.Init()
 UI.Toggle()
 ${script}`,
@@ -36,13 +38,16 @@ test("an older companion shows on the pill, in the tooltip, and once in chat", (
   assert.equal(
     run(`
 inbox("0.9.1")
-assert(showing("^|cffff8000T3 WoW companion 0%.9%.1 is older than this addon %(0%.9%.2%): update it from its tray menu|r$"), "the pill doesn't say it")
+assert(companionPill(), "the pill doesn't say it")
+assert(not showing("is older than this addon"), "the pill says it in full")
+assert(UI.StatusLines()[1] == "|cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): update it from its tray menu|r", hover())
+assert(printed[#printed]:find("T3 WoW companion 0.9.1 is older than this addon (0.9.2): update it from its tray menu", 1, true), printed[#printed])
 assert(companionLines() == 1, "chat lines: " .. companionLines())
 assert(printed[#printed]:find("Check for updates", 1, true), printed[#printed])
 assert(hover():find("Addon 0.9.2, companion 0.9.1~Right-click T3 WoW in the system tray", 1, true), hover())
 inbox("0.9.1")
 inbox("0.9.1")
-assert(showing("is older than this addon"), "the note went away")
+assert(companionPill(), "the note went away")
 assert(companionLines() == 1, "chat lines: " .. companionLines())
 -- Updated (it restarts on the new version): the pill is back to Connected.
 inbox("0.9.2")
@@ -59,7 +64,7 @@ test("with the companion note on the pill, the tooltip still shows the T3 Code u
     run(`
 UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = "0.9.1",
   t3u = "Update T3 Code: this T3 WoW is made for 0.19.0" })
-assert(showing("is older than this addon"), "the pill doesn't show the companion note")
+assert(companionPill(), "the pill doesn't show the companion note")
 assert(hover():find("~|cffffd100Update T3 Code: this T3 WoW is made for 0.19.0|r~", 1, true), hover())
 -- Once the companion is updated the T3 Code note has the pill, and the tooltip doesn't repeat it.
 UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = "0.9.2",
@@ -76,7 +81,9 @@ test("a companion from before it named its version is older too", () => {
   assert.equal(
     run(`
 inbox(nil)
-assert(showing("^|cffff8000The T3 WoW companion is older than this addon %(0%.9%.2%): update it from its tray menu|r$"), "the pill doesn't say it")
+assert(companionPill(), "the pill doesn't say it")
+assert(UI.StatusLines()[1] == "|cffff8000The T3 WoW companion is older than this addon (0.9.2): update it from its tray menu|r", hover())
+assert(printed[#printed]:find("The T3 WoW companion is older than this addon (0.9.2): update it from its tray menu", 1, true), printed[#printed])
 assert(companionLines() == 1, "chat lines: " .. companionLines())
 assert(hover():find("Addon 0.9.2, companion older (it doesn't say)", 1, true), hover())
 return "ok"
@@ -89,7 +96,8 @@ test("a companion from before it named the UI session (0.4.1) is older too", () 
   assert.equal(
     run(`
 UI.OnInbox({ k = "c1", ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time() })
-assert(showing("^|cffff8000The T3 WoW companion is older than this addon"), "the pill doesn't say it")
+assert(companionPill(), "the pill doesn't say it")
+assert(UI.StatusLines()[1]:find("The T3 WoW companion is older than this addon", 1, true), hover())
 assert(companionLines() == 1, "chat lines: " .. companionLines())
 return "ok"
 `),
@@ -113,8 +121,8 @@ return "ok"
 });
 
 test("versions compare as numbers, part by part, and a build label doesn't hide an older one", () => {
-  assert.equal(run(`inbox("0.9.10") return tostring(showing("is older than this addon"))`, "0.10.0"), "true");
-  assert.equal(run(`inbox("0.9.1-dev") return tostring(showing("is older than this addon"))`), "true");
+  assert.equal(run(`inbox("0.9.10") return tostring(companionPill())`, "0.10.0"), "true");
+  assert.equal(run(`inbox("0.9.1-dev") return tostring(companionPill())`), "true");
 });
 
 test("an update left from an earlier UI session doesn't count, nor an odd version", () => {
@@ -122,7 +130,7 @@ test("an update left from an earlier UI session doesn't count, nor an odd versio
     run(`
 inbox(nil, "an earlier session")
 inbox("next")
-assert(not showing("is older than this addon"), "a note")
+assert(not companionPill(), "a note")
 assert(companionLines() == 0, "chat lines: " .. companionLines())
 return "ok"
 `),
@@ -136,7 +144,7 @@ test("without its own version the addon says nothing", () => {
       `
 inbox("0.0.1")
 inbox(nil)
-assert(not showing("is older than this addon"), "a note")
+assert(not companionPill(), "a note")
 assert(companionLines() == 0, "chat lines: " .. companionLines())
 return "ok"
 `,
@@ -151,7 +159,7 @@ test("a newer addon on disk comes first: restart WoW, then update the companion"
     run(`
 UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), av = "0.9.3", cv = "0.9.1" })
 assert(showing("restart WoW to load it"), "no restart note")
-assert(not showing("is older than this addon"), "the companion note hides the restart one")
+assert(not companionPill(), "the companion note hides the restart one")
 return "ok"
 `),
     "ok",

@@ -4256,6 +4256,7 @@ end
 -- What to say then (nil otherwise). An update written for an earlier UI session doesn't
 -- count: one left in a slot may come from the companion that ran before an update. One
 -- that doesn't name its session (0.4.1 and before) does, as for its ack (Link.lua).
+-- The status pill says only "Update the T3 WoW companion"; the tooltip and chat say this.
 -- UI.companionSaid: said in chat this UI session.
 function UI.CompanionNote()
     local loaded = versionNumbers(LOADED_VERSION)
@@ -4315,7 +4316,9 @@ local function renderStatus()
     elseif restartNote() then
         connected = "|cffff8000" .. restartNote() .. "|r"
     elseif UI.CompanionNote() then
-        connected = "|cffff8000" .. UI.CompanionNote() .. "|r"
+        -- In a few words: the note's sentence goes to the tooltip and chat.
+        connected = "|cffff8000Update the T3 WoW companion|r"
+        full = "|cffff8000" .. UI.CompanionNote() .. "|r"
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
     elseif type(inbox.t3u) == "string" then
