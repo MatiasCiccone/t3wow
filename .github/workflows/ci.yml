@@ -21,6 +21,11 @@ concurrency:
 jobs:
   test-windows:
     runs-on: [self-hosted, t3wow]
+    # cmd, not the default: the PC has no PowerShell 7, and Windows PowerShell won't run the
+    # step's script under the default execution policy. Each step is a single command.
+    defaults:
+      run:
+        shell: cmd
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
