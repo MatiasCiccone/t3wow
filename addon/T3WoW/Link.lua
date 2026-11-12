@@ -214,7 +214,7 @@ function Link.Render()
         state.queueSince = state.queueSince or GetTime()
     end
     local header = { k = own.client, u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot,
-        p = (not signalling()) and 1 or nil, lid = db.login, im = state.images and 1 or nil, dc = 1, wk = 1 }
+        p = (not signalling()) and 1 or nil, lid = db.login, im = state.images and 1 or nil, dc = 1, wk = 1, g = state.inStep }
     -- An empty queue still sends a header-only sync frame.
     local commands = {}
     local payload = (#own.queue == 0) and Codec.Json(header) or nil
@@ -257,7 +257,7 @@ function Link.Fits(command)
     for key, value in pairs(command) do alone[key] = value end
     alone.s = (own and own.seq or 0) + 1
     local header = { k = own and own.client or "", u = state.uiSession, n = watchedSignal() or 0, l = state.nextSlot, p = 1,
-        lid = db and db.login, im = state.images and 1 or nil, dc = 1, wk = 1, q = { alone } }
+        lid = db and db.login, im = state.images and 1 or nil, dc = 1, wk = 1, g = state.inStep, q = { alone } }
     return #Codec.Json(header) <= Codec.MAX_PAYLOAD
 end
 
@@ -329,8 +329,44 @@ end
 
 -- ---------------------------------------------------------------- inbox
 
+-- An update leaves out the big parts we already hold (the open thread, the thread list,
+-- the projects, the models and their picks; KEPT_PARTS in companion/src/bridge.rs) and
+-- names them in same; hx hashes every part. We keep ours when its hash is the one named.
+-- Returns false when one isn't: ours stays on screen until the companion sends it again.
+local function keepParts(inbox, previous)
+    if type(inbox.same) ~= "table" then return true end
+    local held, hashes = previous and previous.hx, inbox.hx
+    local whole = true
+    for _, part in ipairs(inbox.same) do
+        local ours = type(held) == "table" and held[part] or nil
+        if ours == nil or type(hashes) ~= "table" or hashes[part] ~= ours then
+            whole = false
+            if type(hashes) == "table" then hashes[part] = ours end
+        end
+        inbox[part] = previous and previous[part]
+    end
+    return whole
+end
+
 local function receive(inbox)
     if not takeLogin(inbox) then return end
+    -- The update we're in step with (g in the strip's header): the companion leaves out of
+    -- later updates only the parts that one had. 0 when what we hold is another update's
+    -- (a slot from an earlier session) or a part left out wasn't ours: it sends them all.
+    local previous = state.inbox
+    local whole = keepParts(inbox, previous)
+    local inStep = whole and type(inbox.g) == "number" and inbox.u ~= nil and inbox.u == state.uiSession and inbox.g or 0
+    -- When we took a part anew, say so at once: until then every update carries it again.
+    local held, renewed = previous and type(previous.hx) == "table" and previous.hx or {}, false
+    for part, hash in pairs(type(inbox.hx) == "table" and inbox.hx or {}) do
+        renewed = renewed or held[part] ~= hash
+    end
+    local wasInStep = state.inStep or 0
+    state.inStep = inStep
+    if (inStep ~= 0 and renewed) or (inStep == 0 and wasInStep ~= 0) then
+        state.syncUntil = math.max(state.syncUntil, GetTime() + SYNC_SECONDS)
+        Link.Render()
+    end
     -- An update written for an earlier UI session (u) carries that session's ack, which
     -- can be past this session's command numbers after a crash: leave the queue alone.
     if inbox.k == own.client and type(inbox.ack) == "number" and (inbox.u == nil or inbox.u == state.uiSession) then
