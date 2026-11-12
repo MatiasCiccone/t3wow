@@ -29,6 +29,8 @@ env:
 
 jobs:
   release:
+    # GitHub-hosted, unlike CI: the steps need PowerShell 7 (pwsh, Invoke-RestMethod -Form)
+    # and Git's bash, which the self-hosted runners' PC doesn't have.
     runs-on: windows-latest
     env:
       # Authenticode signing (SSL.com eSigner) runs only once its secrets are set; see

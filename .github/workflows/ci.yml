@@ -1,12 +1,15 @@
-# Tests and builds every pull request and every push to main, on Windows (the companion
-# is a Windows program). The built t3wow.exe is attached to the run as an artifact.
+# Tests and builds every pull request on Windows (the companion is a Windows program). The
+# built t3wow.exe is attached to the run as an artifact. Not run again on the push to main: a
+# PR is merged (rebased) only once this passed on it.
+# It runs on the self-hosted Windows runners labelled t3wow (the owner's PC, set up as
+# services that run as the owner's account), so it uses that machine's Rust, which CI leaves
+# alone: update it there with rustup update. The checkout keeps target/ between runs (each
+# runner has its own), so a build recompiles only what changed, and nothing is cached on GitHub.
 # Actions are pinned to commit SHAs (Dependabot keeps them current).
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -16,24 +19,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: windows-latest
+  test-windows:
+    runs-on: [self-hosted, t3wow]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-
-      - name: Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: companion
 
       - run: npm ci
 
