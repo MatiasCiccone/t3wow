@@ -560,10 +560,16 @@ fn the_list_follows_t3s_sidebar() {
     rig.t3.threads.lock().unwrap().extend([
         json!({ "threadId": "child", "projectId": "p1", "title": "Review", "status": "completed", "parentThreadId": "t1", "updatedAt": "2026-11-06T10:00:00Z" }),
         json!({ "threadId": "launched", "projectId": "p1", "title": "Test it", "status": "completed", "createdBy": "agent", "sender": "t1", "updatedAt": "2026-11-06T10:00:00Z" }),
-        // A task from a linked machine: its first message names no sender, and T3's sidebar leaves it out.
-        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "opening": "Act as the research sub-agent for this task.\n\nLook.", "updatedAt": "2026-11-06T10:00:00Z" }),
-        // Launched over T3's tools with no thread behind it: T3 records an agent, and lists it.
-        json!({ "threadId": "tool", "projectId": "p1", "title": "Research it", "status": "completed", "createdBy": "agent", "opening": "Research only: figure it out", "updatedAt": "2026-11-06T10:00:00Z" }),
+        // Tasks from a linked machine: their first message names no sender, and T3's sidebar
+        // leaves them out. One given a role opens with it, however often it ran; one without
+        // opens with the brief.
+        json!({ "threadId": "delegated", "projectId": "p1", "title": "Review it", "status": "completed", "createdBy": "agent", "opening": "Act as the research sub-agent for this task.\n\nLook.", "runCount": 2, "updatedAt": "2026-11-06T10:00:00Z" }),
+        json!({ "threadId": "brief", "projectId": "p1", "title": "Sync it", "status": "completed", "createdBy": "agent", "opening": "Run the sync on this Mac, then report.", "updatedAt": "2026-11-06T10:00:00Z" }),
+        // Launched with a worktree: no sender either, but a branch, which a delegated task never
+        // has, and T3 lists it.
+        json!({ "threadId": "worktree", "projectId": "p1", "title": "Prepare a PR", "status": "completed", "createdBy": "agent", "opening": "Prepare a small PR.", "branch": "t3/abc", "updatedAt": "2026-11-06T10:00:00Z" }),
+        // Run again: someone talked to it, which T3 runs a delegated task for only once.
+        json!({ "threadId": "talked", "projectId": "p1", "title": "Research it", "status": "completed", "createdBy": "agent", "opening": "Research only: figure it out", "runCount": 3, "updatedAt": "2026-11-06T10:00:00Z" }),
         json!({ "threadId": "nap", "projectId": "p1", "title": "Later", "status": "completed", "snoozed": true, "updatedAt": "2026-11-06T10:00:00Z" }),
     ]);
     rig.bridge.tick();
@@ -580,7 +586,7 @@ fn the_list_follows_t3s_sidebar() {
     let row = |id: &str, sn: bool, par: &str, ag: bool| (id.to_string(), sn, par.to_string(), ag);
     assert_eq!(
         ids,
-        vec![row("t1", false, "", false), row("launched", false, "t1", true), row("delegated", false, "", true), row("tool", false, "", false), row("nap", true, "", false)]
+        vec![row("t1", false, "", false), row("launched", false, "t1", true), row("delegated", false, "", true), row("brief", false, "", true), row("worktree", false, "", false), row("talked", false, "", false), row("nap", true, "", false)]
     );
 
     // The launcher is read once, not on every poll.
@@ -588,6 +594,17 @@ fn the_list_follows_t3s_sidebar() {
     rig.advance(15_000);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_read").len(), reads);
+
+    // A thread taken for a delegated task is read again once it changes: run again, it's listed.
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        let brief = threads.iter_mut().find(|t| t["threadId"] == "brief").unwrap();
+        brief["runCount"] = json!(2);
+        brief["updatedAt"] = json!("2026-11-06T11:00:00Z");
+    }
+    rig.advance(15_000);
+    rig.bridge.tick();
+    assert!(!marked_agent_made(&rig, "brief"), "a delegated-looking thread that ran again stays taken for one");
     for args in rig.t3.calls_to("t3_thread_list").into_iter().filter(|a| a["statuses"].is_null()) {
         assert_eq!(args["includeSubagents"], false);
     }
