@@ -8,8 +8,8 @@ import { runGame } from "./game.js";
 
 // The game loaded the addon as `loaded` (nil: the client doesn't say). `inbox(cv, u)` hands
 // the window an update from the companion (`cv` left out when nil), written for this UI
-// session unless `u` says otherwise.
-const run = (script, loaded = "0.9.2") =>
+// session unless `u` says otherwise. `extra` runs before the addon loads, too.
+const run = (script, loaded = "0.9.2", extra = "") =>
   runGame(
     `
 function inbox(cv, u)
@@ -28,9 +28,10 @@ UI.Toggle()
 ${script}`,
     {
       ui: true,
-      before: loaded
-        ? `C_AddOns.GetAddOnMetadata = function(name, field) if name == "T3WoW" and field == "Version" then return "${loaded}" end end`
-        : "",
+      before:
+        (loaded
+          ? `C_AddOns.GetAddOnMetadata = function(name, field) if name == "T3WoW" and field == "Version" then return "${loaded}" end end`
+          : "") + `\n${extra}`,
     },
   );
 
@@ -55,6 +56,29 @@ assert(showing("^|cff40c040Connected|r$"), "not connected after the update")
 assert(not hover():find("Right-click", 1, true), hover())
 return "ok"
 `),
+    "ok",
+  );
+});
+
+// The Mac companion (`t3wow`, run in Terminal) has no tray menu, and releases carry only
+// the Windows one: a newer t3wow is put in place by hand.
+test("on a Mac an older companion says to put a newer t3wow in place, not to use a tray", () => {
+  assert.equal(
+    run(
+      `
+inbox("0.9.1")
+assert(companionPill(), "the pill doesn't say it")
+assert(UI.StatusLines()[1] == "|cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): put a newer t3wow in place|r", hover())
+assert(printed[#printed] == "|cff8f8fffT3 WoW|r |cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): put a newer t3wow in place.|r", printed[#printed])
+assert(hover():find("~Put a newer t3wow in place, then restart it (Ctrl+C where it runs, then start it again).", 1, true), hover())
+assert(not hover():find("tray", 1, true) and not printed[#printed]:find("tray", 1, true), "a tray is mentioned on a Mac")
+inbox(nil)
+assert(UI.StatusLines()[1] == "|cffff8000The T3 WoW companion is older than this addon (0.9.2): put a newer t3wow in place|r", hover())
+return "ok"
+`,
+      "0.9.2",
+      "function IsMacClient() return true end",
+    ),
     "ok",
   );
 });

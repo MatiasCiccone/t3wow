@@ -3321,7 +3321,11 @@ fn pastes_stop_at_eight_need_an_image_and_follow_the_tray_setting() {
     rig.advance(100);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 12, "t": "paste", "d": "mac:t1" }, { "s": 13, "t": "unpaste", "d": "new", "i": 1 }] }));
     rig.bridge.tick();
+    #[cfg(not(target_os = "macos"))]
     assert!(str_of(&outcome(&rig, 12)["x"]).starts_with("blocked by the T3 WoW tray setting"));
+    // No tray on a Mac: the reason names the setting in the config file instead.
+    #[cfg(target_os = "macos")]
+    assert!(str_of(&outcome(&rig, 12)["x"]).starts_with("blocked by T3 WoW's setting \"Commands from the game\" (gameCommands in its config.json)"));
     assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(MAX_PASTED - 1));
 }
 
@@ -4514,6 +4518,9 @@ fn a_read_only_sign_in_shows_on_the_game_s_top_line_until_one_can_change_threads
     rig.advance(2000);
     rig.bridge.tick();
     assert_eq!(rig.bridge.snapshot()["auth"], READ_ONLY_LINE);
+    // No tray menu on a Mac: the line says to run t3wow login instead.
+    #[cfg(target_os = "macos")]
+    assert_eq!(READ_ONLY_LINE, "Read-only T3 sign-in: run t3wow login again, pick Auto or Full access");
     assert!(rig.bridge.status().sign_in_read_only, "the tray's line says it too");
     assert!(latest(&rig).contains("Read-only T3 sign-in"), "{}", latest(&rig));
 

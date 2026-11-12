@@ -169,10 +169,29 @@ local BLOCKED_LEAD = {
     answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
     snooze = "Snooze is off", unsnooze = "Wake is off",
 }
+-- Where the companion's settings are, and how it's updated. The Mac companion (`t3wow`,
+-- run in Terminal) has no tray menu yet: "Commands from the game" is gameCommands in its
+-- config.json there, and a newer t3wow is put in place by hand (releases are Windows-only).
+-- On UI, not a local of its own: the file has all of Lua's 200 locals in one chunk.
+UI.Companion = (IsMacClient and IsMacClient()) and {
+    blocked = '%s: T3 WoW has "Commands from the game" set to %s (gameCommands in its config.json).',
+    trust = "%s: gameCommands in T3 WoW's config.json",
+    stalled = "Companion not answering: is T3 WoW (t3wow) running on this Mac?",
+    update = "put a newer t3wow in place",
+    howToUpdate = "Put a newer t3wow in place, then restart it (Ctrl+C where it runs, then start it again).",
+    updateHint = "",
+} or {
+    blocked = '%s: the T3 WoW tray menu has "Commands from the game" set to %s.',
+    trust = "%s: see Commands from the game in the T3 WoW tray menu",
+    stalled = "Companion not answering: is T3 WoW running in the system tray?",
+    update = "update it from its tray menu",
+    howToUpdate = "Right-click T3 WoW in the system tray, by the clock: Check for updates, then Update.",
+    updateHint = " (right-click T3 WoW in the system tray: Check for updates)",
+}
 local function blockedReason(kind)
     local trust = inbox and inbox.trust
     if (trust == "readonly" and CHANGES_T3[kind]) or (trust == "nonew" and kind == "new") then
-        return format('%s: the T3 WoW tray menu has "Commands from the game" set to %s.', BLOCKED_LEAD[kind], TRUST_NAME[trust])
+        return format(UI.Companion.blocked, BLOCKED_LEAD[kind], TRUST_NAME[trust])
     end
 end
 
@@ -3626,7 +3645,8 @@ copyBox:Hide()
 local copyHelp = copyBox:CreateFontString(nil, "OVERLAY")
 copyHelp:SetFontObject(Skin.fonts.small)
 copyHelp:SetPoint("TOPLEFT", 12, -12)
-copyHelp:SetText("Ctrl+C copies the highlighted text. Escape closes.")
+-- The Mac client copies with Cmd+C; Ctrl+C there copies nothing.
+copyHelp:SetText((IsMacClient and IsMacClient()) and "Cmd+C copies the highlighted text. Escape closes." or "Ctrl+C copies the highlighted text. Escape closes.")
 local copyClose = Skin.CloseButton(copyBox, function() copyBox:Hide() end)
 copyClose:SetPoint("TOPRIGHT", -4, -4)
 local copyScroll = CreateFrame("ScrollFrame", nil, copyBox, "UIPanelScrollFrameTemplate")
@@ -4265,12 +4285,12 @@ function UI.CompanionNote()
     local loaded = versionNumbers(LOADED_VERSION)
     if not loaded or not inbox or not ns.Link.IsMine(inbox) or (inbox.u ~= nil and inbox.u ~= ns.Link.Session()) then return nil end
     if inbox.cv == nil then
-        return format("The T3 WoW companion is older than this addon (%s): update it from its tray menu", LOADED_VERSION)
+        return format("The T3 WoW companion is older than this addon (%s): %s", LOADED_VERSION, UI.Companion.update)
     end
     -- A test build's label (0.9.2-dev+57ee2ec) doesn't make it older: versionNumbers.
     local numbers = versionNumbers(inbox.cv)
     if not numbers or UI.CompareVersions(numbers, loaded) >= 0 then return nil end
-    return format("T3 WoW companion %s is older than this addon (%s): update it from its tray menu", inbox.cv, LOADED_VERSION)
+    return format("T3 WoW companion %s is older than this addon (%s): %s", inbox.cv, LOADED_VERSION, UI.Companion.update)
 end
 
 -- The pill's tooltip: its status in full (the pill can cut it short), then the rest worth
@@ -4297,7 +4317,7 @@ function UI.StatusLines()
         lines[#lines + 1] = "|cffffd100" .. inbox.t3u .. "|r"
     end
     if UI.CompanionNote() then
-        lines[#lines + 1] = "Right-click T3 WoW in the system tray, by the clock: Check for updates, then Update."
+        lines[#lines + 1] = UI.Companion.howToUpdate
     end
     if connectionPill.hit.reloads then lines[#lines + 1] = "Click to Reload UI" end
     return lines
@@ -4311,7 +4331,7 @@ local function renderStatus()
     elseif link.loadError then
         connected = "|cffff4040Slot addons blocked (" .. tostring(link.loadError) .. "): enable T3 WoW slots in AddOns at character select|r"
     elseif ns.Link.Stalled() then
-        connected = "|cffff4040Companion not answering: is T3 WoW running in the system tray?|r"
+        connected = "|cffff4040" .. UI.Companion.stalled .. "|r"
     elseif not inbox then
         connected = "|cffa0a0a0Waiting for the companion…|r"
     elseif inbox.auth then
@@ -4328,7 +4348,7 @@ local function renderStatus()
         connected = "|cffffd100" .. (type(inbox.t3s) == "string" and inbox.t3s or inbox.t3u) .. "|r"
         full = "|cffffd100" .. inbox.t3u .. "|r"
     elseif inbox.trust and TRUST_NAME[inbox.trust] then
-        connected = format("|cff40c040Connected|r |cffa0a0a0(%s: see Commands from the game in the T3 WoW tray menu)|r", TRUST_NAME[inbox.trust])
+        connected = "|cff40c040Connected|r |cffa0a0a0(" .. format(UI.Companion.trust, TRUST_NAME[inbox.trust]) .. ")|r"
     else
         connected = "|cff40c040Connected|r"
     end
@@ -5044,7 +5064,7 @@ function UI.OnInbox(data)
     end
     if not UI.companionSaid and UI.CompanionNote() then
         UI.companionSaid = true
-        print("|cff8f8fffT3 WoW|r |cffff8000" .. UI.CompanionNote() .. " (right-click T3 WoW in the system tray: Check for updates).|r")
+        print("|cff8f8fffT3 WoW|r |cffff8000" .. UI.CompanionNote() .. UI.Companion.updateHint .. ".|r")
     end
     notice = takeOutcomes(data)
     -- The run ended (or the thread dropped off the list's working states): Stop is done.

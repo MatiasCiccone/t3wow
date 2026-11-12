@@ -138,10 +138,15 @@ pub fn unencrypted_over_network(origin: &str) -> bool {
     !(host == "localhost" || host == "[::1]" || host.starts_with("127."))
 }
 
+#[cfg(not(target_os = "macos"))]
+const THIS_MACHINE: &str = "this PC";
+#[cfg(target_os = "macos")]
+const THIS_MACHINE: &str = "this Mac";
+
 /// The T3 in use, as the tray names it: this PC, or the other machine's origin.
 pub fn server_label(origin: Option<&str>) -> String {
     match origin {
-        None => "this PC".into(),
+        None => THIS_MACHINE.into(),
         Some(origin) => canonical_origin(origin),
     }
 }
@@ -754,7 +759,10 @@ mod tests {
         assert!(!unencrypted_over_network("http://localhost:3773"));
         assert!(!unencrypted_over_network("http://[::1]:3773"));
         assert!(unencrypted_over_network("http://[fe80::1]:3773"));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(server_label(None), "this PC");
+        #[cfg(target_os = "macos")]
+        assert_eq!(server_label(None), "this Mac");
         assert_eq!(server_label(Some("HTTP://Box:3773/")), "http://box:3773");
     }
 

@@ -306,7 +306,12 @@ local function welcome()
     if not seen then
         print(tag .. " " .. version .. " is installed: T3 Code inside the game.")
         print(tag .. " Type |cffffd100/t3|r or click the minimap button to open it. Right-click the button (or |cffffd100/t3 settings|r) for notifications and other settings.")
-        print(tag .. " It needs the T3 WoW companion (t3wow.exe) running in the system tray on this PC. |cffffd100/t3 status|r shows the connection.")
+        -- The Mac companion is `t3wow`, run in Terminal: it has no tray icon (yet).
+        if IsMacClient and IsMacClient() then
+            print(tag .. " It needs the T3 WoW companion (t3wow) running on this Mac. |cffffd100/t3 status|r shows the connection.")
+        else
+            print(tag .. " It needs the T3 WoW companion (t3wow.exe) running in the system tray on this PC. |cffffd100/t3 status|r shows the connection.")
+        end
     elseif seen ~= version then
         print(tag .. " updated to " .. version .. ". Type |cffffd100/t3|r to open it.")
     else

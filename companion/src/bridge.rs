@@ -47,7 +47,27 @@ const UNLISTED_VIEW_TTL_MS: i64 = 20_000;
 const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart WoW for updates within a second";
 /// Why, when the signal files are gone from the addon folder (something replaced or
 /// cleaned it): the game can't be told an update is ready until they're back.
+#[cfg(not(target_os = "macos"))]
 const SIGNALS_LOST: &str = "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or choose Repair addon files in its tray menu)";
+// The Mac companion has no tray menu yet: `t3wow install` puts the files back.
+#[cfg(target_os = "macos")]
+const SIGNALS_LOST: &str = "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or run t3wow install)";
+/// Where "Commands from the game" is set: the tray menu, or on a Mac (no tray yet) the
+/// config file.
+#[cfg(not(target_os = "macos"))]
+const TRUST_SETTING: &str = "the T3 WoW tray setting \"Commands from the game\"";
+#[cfg(target_os = "macos")]
+const TRUST_SETTING: &str = "T3 WoW's setting \"Commands from the game\" (gameCommands in its config.json)";
+/// The name the game gives this machine when the system doesn't say.
+#[cfg(not(target_os = "macos"))]
+const THIS_MACHINE: &str = "This PC";
+#[cfg(target_os = "macos")]
+const THIS_MACHINE: &str = "This Mac";
+/// Why a page T3 drew can't be shown when its file is on the network or another machine.
+#[cfg(not(target_os = "macos"))]
+const FILE_NOT_HERE: &str = "its file isn't on this PC";
+#[cfg(target_os = "macos")]
+const FILE_NOT_HERE: &str = "its file isn't on this Mac";
 
 /// Failed reads in a row before an active thread off the lists stops being watched.
 const UNLISTED_MISSES: u32 = 5;
@@ -279,7 +299,7 @@ fn page_html(text: &str, attachments: Option<&std::path::Path>) -> Result<String
     let network = file.starts_with("\\\\") || file.starts_with("//");
     let file = std::path::Path::new(file);
     if network || !file.is_absolute() {
-        return Err("its file isn't on this PC".into());
+        return Err(FILE_NOT_HERE.into());
     }
     let html_named = |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
     // The real file, so a link named .html can't reach another one.
@@ -541,7 +561,7 @@ fn str_of(value: &Value) -> &str {
 }
 
 fn hostname() -> String {
-    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "This PC".into())
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| THIS_MACHINE.into())
 }
 
 /// The project T3 keeps scratch threads in. New Thread has its own "No project" for those,
@@ -741,7 +761,11 @@ struct ViewCache {
 }
 
 /// The game's top line while the sign-in in use can only read.
+#[cfg(not(target_os = "macos"))]
 const READ_ONLY_LINE: &str = "Read-only T3 sign-in: sign in again from the tray menu, pick Auto or Full access";
+// No tray menu on a Mac (yet): `t3wow login` signs in again.
+#[cfg(target_os = "macos")]
+const READ_ONLY_LINE: &str = "Read-only T3 sign-in: run t3wow login again, pick Auto or Full access";
 
 /// What the tray shows.
 #[derive(Clone, Debug, Default)]
@@ -2396,7 +2420,7 @@ impl Bridge {
         }
         // Any addon can draw commands, so the tray setting decides what the game may do.
         if !self.trust.allows(&kind) {
-            let reason = format!("blocked by the T3 WoW tray setting \"Commands from the game\" ({})", self.trust.label());
+            let reason = format!("blocked by {TRUST_SETTING} ({})", self.trust.label());
             self.log(&format!("{kind} from the game {reason}"));
             self.note(&format!("{kind}: {reason}"));
             return Some(json!({ "s": command["s"], "ok": false, "x": reason }));

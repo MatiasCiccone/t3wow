@@ -599,8 +599,9 @@ local function updateCapability(now)
         trace(format("font check passed (attempt %d, %.1fs)", state.capabilityAttempts, now - c.at))
     elseif now - c.at > CAPABILITY_TIMEOUT and state.capabilityAttempts >= CAPABILITY_TRIES then
         state.signals = "off"
-        state.signalCheck = format("the test font never loaded in %d tries (Reinstall addon from the T3 WoW tray menu, then restart WoW)",
-            state.capabilityAttempts)
+        -- The Mac companion has no tray menu: its own command reinstalls.
+        local reinstall = (IsMacClient and IsMacClient()) and "run t3wow install in Terminal" or "Reinstall addon from the T3 WoW tray menu"
+        state.signalCheck = format("the test font never loaded in %d tries (%s, then restart WoW)", state.capabilityAttempts, reinstall)
         trace("font check: the test font never loaded, signals off")
     elseif now - c.at > CAPABILITY_TIMEOUT then
         trace(format("font check attempt %d: test font not loaded after %ds, retrying",

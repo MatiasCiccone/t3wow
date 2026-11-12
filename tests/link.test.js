@@ -137,6 +137,22 @@ return "ok"
 `);
 });
 
+test("on a Mac a test font that never loads says to reinstall with t3wow, not from a tray", () => {
+  runGame(`
+Link.Init()
+tick(120)
+assert(Link.Status().signalCheck:find("run t3wow install in Terminal, then restart WoW", 1, true), Link.Status().signalCheck)
+assert(not Link.Status().signalCheck:find("tray"), Link.Status().signalCheck)
+return "ok"
+`, { before: "function IsMacClient() return true end" });
+  runGame(`
+Link.Init()
+tick(120)
+assert(Link.Status().signalCheck:find("Reinstall addon from the T3 WoW tray menu, then restart WoW", 1, true), Link.Status().signalCheck)
+return "ok"
+`);
+});
+
 test("past the font check budget, signals give way to the timer", () => {
   runGame(`
 real[PROBE_VALID] = true
