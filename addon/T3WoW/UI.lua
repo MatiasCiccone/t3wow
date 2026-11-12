@@ -4089,8 +4089,11 @@ local LOADED_VERSION = getMetadata and getMetadata(addonName, "Version")
 local restartSaid = false -- said in chat this UI session
 -- The companion's suggestion to update T3 Code (inbox.t3u, when the T3 it talks to runs an
 -- older one than the companion is made for; older companions leave it out), and the one
--- chat said this UI session.
+-- chat said this UI session. inbox.t3s says it in a few words, for the status pill (older
+-- companions send only t3u).
 local t3UpdateSaid
+-- The pill's status in full, for its tooltip: the pill itself may say it in fewer words.
+local statusInFull
 
 -- A test build's label ("0.9.1-dev+57ee2ec") doesn't count here: it is 0.9.1.
 local function versionNumbers(v)
@@ -4150,7 +4153,7 @@ end
 -- The pill's tooltip: its status in full (the pill can cut it short), then the rest worth
 -- knowing about the link, one short line each.
 function UI.StatusLines()
-    local lines = { connection:GetText() }
+    local lines = { statusInFull or connection:GetText() }
     local link = ns.Link.Status()
     local used, total = ns.Link.SlotsUsed()
     local left = total - used
@@ -4179,7 +4182,7 @@ end
 
 local function renderStatus()
     local link = ns.Link.Status()
-    local connected
+    local connected, full
     if ns.Link.Exhausted() then
         connected = "|cffff8000All 200 updates of this session used: Reload UI|r"
     elseif link.loadError then
@@ -4197,12 +4200,14 @@ local function renderStatus()
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
     elseif type(inbox.t3u) == "string" then
-        connected = "|cffffd100" .. inbox.t3u .. "|r"
+        connected = "|cffffd100" .. (type(inbox.t3s) == "string" and inbox.t3s or inbox.t3u) .. "|r"
+        full = "|cffffd100" .. inbox.t3u .. "|r"
     elseif inbox.trust and TRUST_NAME[inbox.trust] then
         connected = format("|cff40c040Connected|r |cffa0a0a0(%s: see Commands from the game in the T3 WoW tray menu)|r", TRUST_NAME[inbox.trust])
     else
         connected = "|cff40c040Connected|r"
     end
+    statusInFull = full or connected
     connection:SetWidth(0)
     connection:SetText(connected)
     -- The pill fits the text, up to the room the title bar has; the dot takes its color.

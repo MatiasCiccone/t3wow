@@ -14,7 +14,7 @@ The Flat and Classic themes and the compact thread list are in [`assets/screensh
 
 - Windows, with WoW: Forever in **windowed** or **borderless windowed** mode (exclusive fullscreen blocks screen capture).
 - T3 Code desktop 0.19.0 running on the same PC, or on another machine this PC can reach over the network (see [T3 on another machine](#t3-on-another-machine)). Threads on other machines also show up when they are linked to T3 under **Settings → Environments → Linked environments**.
-- **Made for T3 Code 0.19.0.** When the T3 the companion talks to runs an older version, the companion says to update it: a tray notification, the menu's T3 line, `t3wow.exe status` and `login`, and the game window's top line and chat. Update it in T3 Code under **Help → Check for Updates...** (on a Mac, in the T3 Code menu). The companion can't start the update itself: T3 Code has no way to start one from outside.
+- **Made for T3 Code 0.19.0.** When the T3 the companion talks to runs an older version, the companion says to update it: a tray notification, the menu's T3 line, `t3wow.exe status` and `login`, and the game window's top line and chat. The top line only names the version to update to; its tooltip and the chat line add the version T3 runs and where to update. Update it in T3 Code under **Settings → About → Check for Updates**, which also shows the version it runs. The companion can't start the update itself: T3 Code has no way to start one from outside.
 
 ## Set up
 

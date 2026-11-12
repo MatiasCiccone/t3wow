@@ -6,7 +6,7 @@
 use crate::bridge::{Bridge, CaptureMessage};
 use crate::config::{config_dir, now_ms, server_label, unencrypted_over_network, update_check_due, Config, Trust, UpdateChecks};
 use crate::log;
-use crate::made_for::{self, OlderT3};
+use crate::made_for::OlderT3;
 use crate::slots::{Slots, SLOT_COUNT};
 
 use crate::t3::{self, McpClient, T3};
@@ -356,7 +356,7 @@ fn older_t3_notice(older: Option<&OlderT3>, said: &mut Option<String>) -> Option
         return None;
     }
     *said = Some(older.running.clone());
-    Some(Notice::new(Level::Warning, format!("Update T3 Code to {}", made_for::T3_CODE), older.note()))
+    Some(Notice::new(Level::Warning, older.title(), older.note()))
 }
 
 fn browser_open_text() -> String {
@@ -865,16 +865,16 @@ mod tests {
 
     #[test]
     fn an_older_t3_code_is_announced_once_per_version_it_runs() {
-        let older = crate::made_for::older_t3("0.1.7", "windows").unwrap();
+        let older = crate::made_for::older_t3("0.1.7").unwrap();
         let mut said = None;
         let notice = older_t3_notice(Some(&older), &mut said).expect("the first time");
         assert_eq!(notice.level, Level::Warning);
-        assert_eq!(notice.title, format!("Update T3 Code to {}", made_for::T3_CODE));
-        assert!(notice.text.contains("T3 Code 0.17.0") && notice.text.contains("Help > Check for Updates..."), "{}", notice.text);
+        assert_eq!(notice.title, format!("Update T3 Code to {}", crate::made_for::T3_CODE));
+        assert!(notice.text.contains("T3 Code 0.17.0") && notice.text.contains("Settings > About > Check for Updates"), "{}", notice.text);
         assert!(fits_a_toast(&notice.text), "{}", notice.text);
         assert_eq!(older_t3_notice(Some(&older), &mut said), None, "not with every poll");
         assert_eq!(older_t3_notice(None, &mut said), None);
-        let older_still = crate::made_for::older_t3("0.1.8", "windows").unwrap();
+        let older_still = crate::made_for::older_t3("0.1.8").unwrap();
         assert!(older_t3_notice(Some(&older_still), &mut said).is_some(), "another older version is said again");
     }
 

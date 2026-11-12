@@ -121,6 +121,6 @@ Each UI session has 200 updates, and the companion only spends one when somethin
 - If you see "Waiting for the companion…", check that T3 WoW is running in the tray, that the game is windowed, and that nothing covers the top-left corner. **Open log** in the tray menu shows what the companion sees.
 - If you see "Slot addons blocked", enable the T3 WoW slot addons in the AddOns list. If a game patch changed the interface version, choose Match WoW's interface version in the companion's tray menu, then restart WoW.
 - If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu.
-- If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.19.0. When T3 Code is older, the companion's tray and the window's top line say to update it (Help > Check for Updates... in T3 Code).
+- If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.19.0. When T3 Code is older, the companion's tray and the window's top line say to update it (in T3 Code, Settings > About > Check for Updates).
 
 T3 WoW is MIT licensed.
