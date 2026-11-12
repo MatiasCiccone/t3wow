@@ -207,7 +207,7 @@ Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against ano
 
 Without one it builds unsigned, and Windows SmartScreen warns on first run. This code signing is separate from the release key below, which the updater checks; [docs/release-signing.md](docs/release-signing.md) compares the two and the certificate options.
 
-**CI** (`.github/workflows/ci.yml`) runs the tests, clippy and a release build on Windows for every pull request and every push to `main`, and attaches the built `t3wow.exe` to the run. Every action in the workflows is pinned to a commit SHA, and Dependabot keeps the pins current.
+**CI** (`.github/workflows/ci.yml`) runs the tests, clippy and a release build on Windows for every pull request, and attaches the built `t3wow.exe` to the run. It runs on the owner's self-hosted Windows runners (label `t3wow`), with that machine's Rust; releases (`release.yml`) run on GitHub's. Every action in the workflows is pinned to a commit SHA, and Dependabot keeps the pins current.
 
 **Repository rules:** pull requests merge by rebase only (linear history), branches are deleted after merging, and Dependabot opens security fixes and weekly updates. `.github/rulesets/main.json` protects `main`: no force pushes or deletion, linear history, changes only through pull requests that pass CI (`test-windows`) and get the code owner's review (`.github/CODEOWNERS`); repository admins can bypass. GitHub enforces rulesets on public repositories, or on private ones with GitHub Pro; apply it with `gh api repos/MatiasCiccone/t3wow/rulesets --input .github/rulesets/main.json`.
 
