@@ -20,6 +20,10 @@ pub const MAX_HEIGHT: u32 = 2048;
 const PAGE_HEIGHTS: (u32, u32) = (80, 2000);
 /// A picture file larger than this isn't read.
 const MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
+#[cfg(not(target_os = "macos"))]
+const NOT_HERE: &str = "the file isn't on this PC";
+#[cfg(target_os = "macos")]
+const NOT_HERE: &str = "the file isn't on this Mac";
 /// Edge gets this long to draw a page (scripts get a few seconds of their own clock).
 const DRAW_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long the launcher may be gone with no browser on the profile and no picture
@@ -172,9 +176,15 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// Edge where Windows says it is, else Chrome; None without either.
+    /// Edge where Windows says it is, else Chrome; None without either. On a Mac: Chrome,
+    /// Edge or Chromium in Applications.
     pub fn find(work: PathBuf) -> Option<Edge> {
         browser_exe().map(|exe| Edge { exe, work })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn exe(&self) -> &Path {
+        &self.exe
     }
 
     fn draw(&self, html: &str, width: u32, height: u32) -> Result<Bitmap, String> {
@@ -218,6 +228,17 @@ impl Edge {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
+        // Without it Chrome asks the Keychain for its "Safe Storage" key, and macOS may show
+        // a prompt for it; this profile keeps nothing worth encrypting.
+        #[cfg(target_os = "macos")]
+        command.arg("--use-mock-keychain");
+        // Chrome hard-links its own executable into a temp folder on every launch, to keep its
+        // signature valid through an update. macOS counts that as modifying another app and,
+        // started from Terminal, blocks it and says "Terminal was prevented from modifying
+        // apps". A one-off headless render doesn't need it. Chrome reads only the last
+        // --disable-features, so another disabled feature has to join this one.
+        #[cfg(target_os = "macos")]
+        command.arg("--disable-features=MacAppCodeSignClone");
         let mut child = command.spawn().map_err(|e| format!("couldn't start {}: {e}", self.exe.display()))?;
         // Started from Explorer (the tray app), Edge's launcher hands the page to a browser
         // of its own and quits at once, before anything is drawn. The picture is done when
@@ -254,7 +275,7 @@ impl Painter for Edge {
     }
 
     fn picture(&self, path: &Path) -> Result<Bitmap, String> {
-        let size = std::fs::metadata(path).map_err(|_| "the file isn't on this PC".to_string())?.len();
+        let size = std::fs::metadata(path).map_err(|_| NOT_HERE.to_string())?.len();
         if size > MAX_FILE_BYTES {
             return Err("the file is too large".into());
         }
@@ -272,11 +293,48 @@ impl Painter for Edge {
 /// Whether no browser is running on the profile. A running Edge holds `lockfile` there open
 /// without letting it be deleted, and deletes it when it quits; one left by a browser that
 /// crashed is deleted here.
+#[cfg(not(target_os = "macos"))]
 fn profile_free(profile: &Path) -> bool {
     match std::fs::remove_file(profile.join("lockfile")) {
         Ok(()) => true,
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     }
+}
+
+/// Whether no browser is running on the profile. On a Mac, Chromium (Chrome, Edge) marks a
+/// profile it runs on with `SingletonLock`, a symlink to "<host>-<pid>", and removes it when
+/// it quits. One whose process is gone was left by a browser that crashed: it is removed here.
+/// The profile is T3 WoW's own (`render/profile` in its folder), never the user's browser's.
+#[cfg(target_os = "macos")]
+fn profile_free(profile: &Path) -> bool {
+    let lock = profile.join("SingletonLock");
+    let target = match std::fs::read_link(&lock) {
+        Ok(target) => target,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        // Something else by that name: not a browser's lock, but it would stop one starting.
+        Err(_) => return std::fs::remove_file(&lock).is_ok(),
+    };
+    if lock_owner(&target.to_string_lossy()).is_some_and(process_alive) {
+        return false;
+    }
+    match std::fs::remove_file(&lock) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// The browser's process id in a `SingletonLock` target, "<host>-<pid>" (the host name may
+/// have dashes of its own).
+#[cfg(target_os = "macos")]
+fn lock_owner(target: &str) -> Option<i32> {
+    let (_, pid) = target.rsplit_once('-')?;
+    pid.parse().ok().filter(|&pid| pid > 0)
+}
+
+#[cfg(target_os = "macos")]
+fn process_alive(pid: i32) -> bool {
+    // Signal 0 only asks whether the process exists; EPERM means it does, as someone else's.
+    unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
 }
 
 fn file_url(path: &Path) -> String {
@@ -307,9 +365,26 @@ fn browser_exe() -> Option<PathBuf> {
         .or_else(|| app_path("chrome.exe"))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn browser_exe() -> Option<PathBuf> {
     ["/usr/bin/microsoft-edge", "/usr/bin/google-chrome", "/usr/bin/chromium"].iter().map(PathBuf::from).find(|p| p.exists())
+}
+
+#[cfg(target_os = "macos")]
+fn browser_exe() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    mac_browsers(&home).into_iter().find(|p| p.is_file())
+}
+
+/// Where a Mac keeps the browsers that can draw pages headless, in the order they're tried:
+/// Chrome, Edge, then Chromium, each in /Applications and then in the user's ~/Applications.
+#[cfg(target_os = "macos")]
+fn mac_browsers(home: &Path) -> Vec<PathBuf> {
+    const APPS: [(&str, &str); 3] = [("Google Chrome", "Google Chrome"), ("Microsoft Edge", "Microsoft Edge"), ("Chromium", "Chromium")];
+    let roots = [PathBuf::from("/Applications"), home.join("Applications")];
+    APPS.iter()
+        .flat_map(|(app, binary)| roots.iter().map(move |root| root.join(format!("{app}.app")).join("Contents").join("MacOS").join(binary)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -419,6 +494,57 @@ mod tests {
         assert!(profile_free(&profile), "left by a browser that crashed");
         assert!(!profile.join("lockfile").exists());
         let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_looks_for_chrome_edge_and_chromium_in_both_applications_folders() {
+        let found = mac_browsers(Path::new("/Users/me"));
+        let expected = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Users/me/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Users/me/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Users/me/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ];
+        assert_eq!(found, expected.iter().map(PathBuf::from).collect::<Vec<_>>());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_profile_is_busy_while_its_browser_holds_singleton_lock() {
+        use std::os::unix::fs::symlink;
+        let profile = std::env::temp_dir().join(format!("t3wow-singleton-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&profile);
+        std::fs::create_dir_all(&profile).unwrap();
+        let lock = profile.join("SingletonLock");
+        assert!(profile_free(&profile), "no lock");
+        // A running browser: this test's own process stands in for it.
+        symlink(format!("my-mac.local-{}", std::process::id()), &lock).unwrap();
+        assert!(!profile_free(&profile), "a running browser holds it");
+        assert!(std::fs::symlink_metadata(&lock).is_ok(), "a live browser's lock stays");
+        // One that crashed: no such process.
+        std::fs::remove_file(&lock).unwrap();
+        let mut gone = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        symlink(format!("my-mac.local-{dead}"), &lock).unwrap();
+        assert!(profile_free(&profile), "left by a browser that crashed");
+        assert!(std::fs::symlink_metadata(&lock).is_err(), "the stale lock is removed");
+        // Not a lock a browser wrote: removed too.
+        symlink("garbage", &lock).unwrap();
+        assert!(profile_free(&profile));
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_singleton_lock_names_its_browser_after_the_last_dash() {
+        assert_eq!(lock_owner("my-mac.local-4242"), Some(4242));
+        assert_eq!(lock_owner("host-0"), None);
+        assert_eq!(lock_owner("no pid"), None);
+        assert_eq!(lock_owner("host-12ab"), None);
     }
 
     #[test]

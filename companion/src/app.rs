@@ -604,6 +604,10 @@ const SIGN_IN_NEEDED: &str = "T3: sign-in needed (approve it in your browser, or
 const NO_LOCAL_T3: &str = "T3 Code isn't running on this PC: start it, or choose T3 server > Connect to T3 on another machine…";
 #[cfg(target_os = "macos")]
 const NO_LOCAL_T3: &str = "T3 Code isn't running on this Mac: start it, or connect to T3 on another machine with t3wow login --origin http://<host>:<port>";
+#[cfg(not(target_os = "macos"))]
+const NO_BROWSER: &str = "No Microsoft Edge (or Chrome) to draw pictures with: pages and images show as text in the game";
+#[cfg(target_os = "macos")]
+const NO_BROWSER: &str = "No Google Chrome, Microsoft Edge or Chromium in Applications to draw pictures with: pages and images show as text in the game";
 
 /// The worker loop. Never returns.
 pub fn run(app: Arc<App>) {
@@ -713,10 +717,15 @@ pub fn run(app: Arc<App>) {
     // companion was off): the game drops the previous one's threads.
     bridge.set_login(&key);
     log::line(&format!("T3 WoW companion {}: T3 at {origin}, WoW at {}", crate::VERSION, wow_dir.display()));
-    // Pages and images go to the game as pictures, drawn with the browser Windows has.
+    // Pages and images go to the game as pictures, drawn with the browser Windows has (on a
+    // Mac, Chrome, Edge or Chromium if one is installed).
     match crate::render::Edge::find(config_dir().join("render")) {
-        Some(edge) => bridge.set_painter(Some(Box::new(edge))),
-        None => log::line("No Microsoft Edge (or Chrome) to draw pictures with: pages and images show as text in the game"),
+        Some(edge) => {
+            #[cfg(target_os = "macos")]
+            log::line(&format!("Pictures are drawn with {}", edge.exe().display()));
+            bridge.set_painter(Some(Box::new(edge)));
+        }
+        None => log::line(NO_BROWSER),
     }
     let (capture_tx, capture_rx) = channel::<CaptureMessage>();
     #[cfg(any(windows, target_os = "macos"))]
