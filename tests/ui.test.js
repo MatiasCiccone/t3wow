@@ -55,6 +55,7 @@ function inboxWith(envs, extra)
   data.more = extra and extra.more
   data.att, data.pi = extra and extra.att, extra and extra.pi
   data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
+  data.snz = extra and extra.snz
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -2859,6 +2860,70 @@ thread.set = false
 inboxWith(ENVS, { threads = { thread } })
 row = hoverRow("t1")
 assert(not row.snoozeAction.glyph.shown and not row.snoozeAction.short.hidden, "no fallback")
+return "ok"
+`);
+});
+
+test("Snooze offers the companion's presets and Custom…, a typed time it reads on the PC's clock", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local SNZ = { { k = "after:60", l = "In 1 hour" }, { k = "at:today:18:00", l = "This evening", w = "6:00 PM" } }
+inboxWith(ENVS, { threads = { thread }, snz = SNZ })
+local row = hoverRow("t1")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+local list = T3WoWDropdownList
+local names = {}
+for _, r in ipairs(list.rows) do if r.shown then names[#names + 1] = r.text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "") end end
+assert(table.concat(names, "|") == "In 1 hour|This evening  6:00 PM|Custom…", table.concat(names, "|"))
+-- A preset goes by its name: the companion works out when, on the PC's clock.
+list.rows[2].scripts.OnClick(list.rows[2], "LeftButton")
+assert(sent().t == "snooze" and sent().id == "t1" and sent().k == "at:today:18:00" and sent().mn == nil, "bad preset")
+
+-- Custom… opens a box over the list for a typed time.
+inboxWith(ENVS, { threads = { thread }, snz = SNZ })
+row = hoverRow("t1")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+list.rows[3].scripts.OnClick(list.rows[3], "LeftButton")
+local box, edit = T3WoWSnoozeBox, T3WoWSnoozeTime
+assert(box.shown and box.title.text == 'Snooze "Thread" until', tostring(box.title.text))
+assert(box.message.text:find("fri 3pm", 1, true), "no hint")
+-- Nothing typed: nothing sent.
+edit.scripts.OnEnterPressed(edit)
+assert(#queue() == 0 and box.message.text:find("Type when", 1, true), box.message.text)
+edit:SetText("  soon ")
+edit.scripts.OnEnterPressed(edit)
+local s = sent().s
+assert(sent().t == "snooze" and sent().at == "soon" and sent().id == "t1" and sent().e == "local", "bad typed snooze")
+assert(box.message.text == "Snoozing…", box.message.text)
+-- Refused: why, in the box, with what was typed still there (and nothing in the composer).
+inboxWith(ENVS, { threads = { thread }, snz = SNZ, out = { { s = s, ok = false, x = [[couldn't read "soon" as a time: try 45m, 2h, 3d, 5pm, tomorrow 9am or fri 3pm]] } } })
+assert(box.shown and edit.text == "  soon ", edit.text)
+assert(box.message.text:find([[Couldn't read "soon" as a time]], 1, true) and box.message.text:find("ff4040", 1, true), box.message.text)
+assert(typed() == "", "the typed time went to the message box")
+-- The same outcome again (outcomes stay a minute) changes nothing.
+edit:SetText("fri 3pm")
+inboxWith(ENVS, { threads = { thread }, snz = SNZ, out = { { s = s, ok = false, x = "again" } } })
+assert(not box.message.text:find("again", 1, true), "an outcome taken twice")
+edit.scripts.OnEnterPressed(edit)
+s = sent().s
+assert(sent().at == "fri 3pm", "bad second try")
+-- Through: the box closes.
+inboxWith(ENVS, { threads = { thread }, snz = SNZ, out = { { s = s, ok = true } } })
+assert(not box.shown, "the box stayed after the snooze went through")
+
+-- Escape closes it; Read-only refuses in the box.
+row = hoverRow("t1")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+list.rows[3].scripts.OnClick(list.rows[3], "LeftButton")
+assert(box.shown and edit.text == "", "a fresh box keeps the last time")
+edit.scripts.OnEscapePressed(edit)
+assert(not box.shown, "Escape didn't close it")
+row.snoozeAction.scripts.OnClick(row.snoozeAction, "LeftButton")
+list.rows[3].scripts.OnClick(list.rows[3], "LeftButton")
+inboxWith(ENVS, { threads = { thread }, snz = SNZ, trust = "readonly" })
+edit:SetText("5pm")
+edit.scripts.OnEnterPressed(edit)
+assert(#queue() == 0 and box.message.text:find("Snooze is off", 1, true), box.message.text)
 return "ok"
 `);
 });

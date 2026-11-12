@@ -9,6 +9,7 @@ use crate::made_for::{self, older_t3, OlderT3};
 use crate::lua::{name_model_refs, name_thread_links, plain, to_lua, wow_segments, wow_text, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
+use crate::snooze::{civil_from_days, days_from_civil};
 use crate::t3::{T3Error, T3};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -541,16 +542,7 @@ const MAX_SNOOZE_MINUTES: i64 = 525_600;
 /// Epoch seconds to ISO 8601 in UTC ("2026-11-07T00:22:41.000Z"), as T3 writes its times.
 fn iso_from_seconds(seconds: i64) -> String {
     let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
-    // Civil from days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(mo <= 2);
+    let (y, mo, d) = civil_from_days(days);
     format!("{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rest / 3600, rest % 3600 / 60, rest % 60)
 }
 
@@ -562,14 +554,7 @@ pub fn iso_seconds(iso: &str) -> i64 {
     let parse = || -> Option<i64> {
         let (y, mo, d) = (num(iso, 0..4)?, num(iso, 5..7)?, num(iso, 8..10)?);
         let (h, mi, s) = (num(iso, 11..13)?, num(iso, 14..16)?, num(iso, 17..19)?);
-        // Days from civil (Howard Hinnant's algorithm).
-        let y = if mo <= 2 { y - 1 } else { y };
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        let days = era * 146_097 + doe - 719_468;
-        let mut total = days * 86_400 + h * 3600 + mi * 60 + s;
+        let mut total = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s;
         let rest = iso.get(19..)?;
         let zone = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
         if let Some(sign) = zone.chars().next().filter(|c| *c == '+' || *c == '-') {
@@ -751,6 +736,9 @@ pub struct Bridge {
     now: Box<dyn Fn() -> i64 + Send>,
     /// Opens a link with Windows (T3's t3code:// links); replaced in tests.
     pub opener: Box<dyn Fn(&str) + Send>,
+    /// This PC's offset from UTC at an instant, for snooze times on its clock; replaced in
+    /// tests.
+    pub zone: Box<dyn Fn(i64) -> i64 + Send>,
     pub link: LinkState,
     window_open: bool,
     view: Option<View>,
@@ -775,8 +763,10 @@ pub struct Bridge {
     provider_caches: Option<PathBuf>,
     /// T3's settings file, while the T3 in use is the one on this PC.
     t3_settings: Option<PathBuf>,
-    /// What it last said about scripts (`read_script_settings`).
+    /// What it last said about scripts (`read_t3_settings`).
     script_settings: Option<Value>,
+    /// And its snooze presets (Settings > Snooze options), if it lists any.
+    snooze_presets: Option<Vec<Value>>,
     settled_totals: BTreeMap<String, u64>,
     /// Per machine: which of its three lists have more threads than were listed.
     list_more: BTreeMap<String, [bool; LIST_COUNT]>,
@@ -1871,6 +1861,7 @@ impl Bridge {
             log,
             now,
             opener: Box::new(crate::t3::open_browser),
+            zone: Box::new(crate::snooze::system_offset),
             link,
             window_open: false,
             view: None,
@@ -1885,6 +1876,7 @@ impl Bridge {
             provider_caches: None,
             t3_settings: None,
             script_settings: None,
+            snooze_presets: None,
             settled_totals: BTreeMap::new(),
             list_more: BTreeMap::new(),
             list_limits: LIST_LIMITS,
@@ -1961,6 +1953,7 @@ impl Bridge {
     pub fn set_t3_settings(&mut self, file: Option<PathBuf>) {
         self.t3_settings = file;
         self.script_settings = None;
+        self.snooze_presets = None;
     }
 
     pub fn set_trust(&mut self, trust: Trust) {
@@ -2307,7 +2300,8 @@ impl Bridge {
         let with_images = matches!(kind.as_str(), "send" | "new") && self.drafts.get(&draft).is_some_and(|d| !d.is_empty());
         let mut started: Option<String> = None;
         let mut stop_state: Option<&str> = None;
-        let mut pasted = false;
+        // A command the game hears the outcome of even when it went through.
+        let mut acked = false;
         let result: Result<(), T3Error> = (|| {
             match kind.as_str() {
                 "hello" | "ui" => {
@@ -2436,7 +2430,24 @@ impl Bridge {
                     self.client.call("t3_thread_organize", with_args(json!({ "action": kind, "threadId": id }), &env_arg))?;
                     self.note(if kind == "settle" { "Settled." } else { "Moved back to open." });
                 }
-                // The game says for how long; T3 takes the time it ends.
+                // A time typed in the game ("at": "fri 3pm"), or one of the presets it was
+                // offered ("k": "at:today:18:00"), read on this PC's clock. The game hears
+                // either way, so a typed time it couldn't read stays in its box.
+                "snooze" if !id.is_empty() && (command["at"].is_string() || command["k"].is_string()) => {
+                    let now = self.now_seconds();
+                    let until = match command["at"].as_str() {
+                        Some(typed) => crate::snooze::resolve_typed(typed, now, &*self.zone, MAX_SNOOZE_MINUTES).map_err(|e| T3Error::Other(e.message(typed)))?,
+                        None => crate::snooze::preset_from_key(str_of(&command["k"]))
+                            .and_then(|preset| crate::snooze::preset_choice(&preset, now, &*self.zone))
+                            .map(|choice| choice.until)
+                            .filter(|until| until - now <= MAX_SNOOZE_MINUTES * 60)
+                            .ok_or_else(|| T3Error::Other("that snooze time has passed: pick another".into()))?,
+                    };
+                    self.client.call("t3_thread_organize", with_args(json!({ "action": "snooze", "threadId": id, "snoozedUntil": iso_from_seconds(until) }), &env_arg))?;
+                    self.note(&format!("Snoozed until {}.", crate::snooze::describe(until, now, &*self.zone)));
+                    acked = true;
+                }
+                // An older addon says for how long; T3 takes the time it ends.
                 "snooze" if !id.is_empty() && command["mn"].as_i64().is_some_and(|m| (1..=MAX_SNOOZE_MINUTES).contains(&m)) => {
                     let until = iso_from_seconds(self.now_seconds() + command["mn"].as_i64().unwrap_or(0) * 60);
                     self.client.call("t3_thread_organize", with_args(json!({ "action": "snooze", "threadId": id, "snoozedUntil": until }), &env_arg))?;
@@ -2520,7 +2531,7 @@ impl Bridge {
                     let clipped = (self.clipboard)().map_err(T3Error::Other)?.ok_or_else(|| T3Error::Other(NO_IMAGE.into()))?;
                     self.stage(draft, clipped);
                     self.note("Image pasted.");
-                    pasted = true;
+                    acked = true;
                 }
                 "unpaste" => {
                     let n = command["i"].as_u64().unwrap_or(0);
@@ -2571,7 +2582,7 @@ impl Bridge {
             Ok(()) => started
                 .map(|id| json!({ "s": command["s"], "ok": true, "env": env, "id": id }))
                 .or_else(|| stop_state.map(|st| json!({ "s": command["s"], "ok": true, "st": st })))
-                .or_else(|| pasted.then(|| json!({ "s": command["s"], "ok": true }))),
+                .or_else(|| acked.then(|| json!({ "s": command["s"], "ok": true }))),
         }
     }
 
@@ -3392,7 +3403,7 @@ impl Bridge {
             return;
         }
         if self.env_arg(env).is_empty() {
-            self.read_script_settings();
+            self.read_t3_settings();
         }
         let args = with_args(json!({ "limit": 100 }), &self.env_arg(env));
         match self.client.call("t3_project_list", args) {
@@ -3424,13 +3435,25 @@ impl Bridge {
         Some(resolved_scripts(self.script_settings.as_ref().unwrap_or(&NO_SETTINGS), project, own))
     }
 
-    /// The part of T3's settings that says which scripts this PC's projects have. Settings that
-    /// can't be read just now (T3 may be rewriting them) keep what they last said.
-    fn read_script_settings(&mut self) {
+    /// The parts of T3's settings that say which scripts this PC's projects have, and which
+    /// snooze presets T3 offers (T3 writes them only once changed). Settings that can't be
+    /// read just now (T3 may be rewriting them) keep what they last said.
+    fn read_t3_settings(&mut self) {
         let Some(file) = &self.t3_settings else { return };
         let Some(Value::Object(mut settings)) = std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok()) else { return };
+        self.snooze_presets = settings.get("snoozePresets").and_then(Value::as_array).cloned();
         settings.retain(|key, _| SCRIPT_SETTINGS.contains(&key.as_str()));
         self.script_settings = Some(Value::Object(settings));
+    }
+
+    /// The snooze presets the game offers: T3's, from its settings when this PC can read
+    /// them (T3's defaults when they list none), else the four the game always had.
+    fn snooze_choices(&self) -> Vec<crate::snooze::Choice> {
+        let presets = match &self.t3_settings {
+            None => crate::snooze::fixed_presets(),
+            Some(_) => self.snooze_presets.clone().unwrap_or_else(crate::snooze::t3_default_presets),
+        };
+        crate::snooze::choices(&presets, self.now_seconds(), &*self.zone)
     }
 
     /// What a machine offers. A failed read keeps the last one, and waits as long as a good
@@ -4653,6 +4676,20 @@ impl Bridge {
             out.insert("more".into(), Value::Object(more));
         }
         out.insert("projects".into(), json!(projects));
+        // The snooze presets to offer, on this PC's clock; listing them says this companion
+        // also takes a typed time.
+        let snooze: Vec<Value> = self
+            .snooze_choices()
+            .into_iter()
+            .map(|c| {
+                let mut entry = json!({ "k": c.key, "l": c.label });
+                if let Some(when) = c.when {
+                    entry["w"] = json!(when);
+                }
+                entry
+            })
+            .collect();
+        out.insert("snz".into(), json!(snooze));
         // This companion takes a model, effort and permissions from the game, and what each
         // machine offers.
         out.insert("sel".into(), json!(true));

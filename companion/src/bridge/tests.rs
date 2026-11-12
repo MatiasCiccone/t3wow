@@ -2144,6 +2144,85 @@ fn snooze_asks_t3_for_a_time_and_wake_undoes_it() {
     assert!(rig.t3.calls_to("t3_thread_organize").is_empty());
 }
 
+/// Epoch seconds of a local time in November 2026 on a clock five hours behind UTC.
+fn eastern(day: i64, hour: i64, minute: i64) -> i64 {
+    days_from_civil(2026, 11, day) * 86_400 + hour * 3600 + minute * 60 + 5 * 3600
+}
+
+/// A rig at Tuesday 2026-11-10, 14:30 on that clock.
+fn rig_on_tuesday_afternoon() -> Rig {
+    let mut rig = Rig::new(eastern(10, 14, 30) * 1000);
+    rig.bridge.zone = Box::new(|_| -5 * 3600);
+    rig
+}
+
+#[test]
+fn a_typed_snooze_is_read_on_this_pcs_clock_and_one_it_cant_read_goes_back_to_the_game() {
+    let mut rig = rig_on_tuesday_afternoon();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [
+        { "s": 1, "t": "snooze", "e": "local", "id": "t1", "at": "fri 3pm" },
+        { "s": 2, "t": "snooze", "e": "local", "id": "t1", "at": "soon" },
+        { "s": 3, "t": "snooze", "e": "local", "id": "t1", "at": "today 1pm" },
+        { "s": 4, "t": "snooze", "e": "local", "id": "t1", "at": "400d" },
+        { "s": 5, "t": "snooze", "e": "local", "id": "t1", "k": "at:today:18:00" },
+        { "s": 6, "t": "snooze", "e": "local", "id": "t1", "k": "at:today:09:00" },
+        { "s": 7, "t": "snooze", "e": "local", "id": "t1", "k": "after:90" },
+    ] }));
+    rig.bridge.tick();
+    let calls = rig.t3.calls_to("t3_thread_organize");
+    let until: Vec<i64> = calls.iter().map(|c| iso_seconds(str_of(&c["snoozedUntil"]))).collect();
+    assert_eq!(until, vec![eastern(13, 15, 0), eastern(10, 18, 0), eastern(10, 16, 0)], "{calls:?}");
+    assert!(calls.iter().all(|c| c["action"] == "snooze" && c["threadId"] == "t1"));
+    let snapshot = rig.bridge.snapshot();
+    let out = |s: i64| snapshot["out"].as_array().unwrap().iter().find(|o| o["s"] == s).cloned().unwrap_or_else(|| panic!("no outcome for {s}: {snapshot}"));
+    for s in [1, 5, 7] {
+        assert_eq!(out(s)["ok"], true, "{}", out(s));
+    }
+    let refused = |s: i64| {
+        assert_eq!(out(s)["ok"], false);
+        str_of(&out(s)["x"]).to_string()
+    };
+    assert!(refused(2).starts_with("couldn't read \"soon\" as a time: try 45m"), "{}", refused(2));
+    assert!(refused(3).contains("already passed"), "{}", refused(3));
+    assert!(refused(4).contains("more than a year away"), "{}", refused(4));
+    assert_eq!(refused(6), "that snooze time has passed: pick another");
+    // The newest notes: the bottom line says when each snooze ends.
+    assert!(snapshot["notes"].to_string().contains("Snoozed until 6:00 PM."), "{}", snapshot["notes"]);
+    assert!(snapshot["notes"].to_string().contains("is more than a year away"), "{}", snapshot["notes"]);
+}
+
+#[test]
+fn the_game_offers_t3s_snooze_presets_when_this_pc_can_read_them() {
+    let presets = |settings: Option<Value>| {
+        let mut rig = rig_on_tuesday_afternoon();
+        if let Some(settings) = settings {
+            let file = std::env::temp_dir().join(format!("t3wow-snooze-{}-{}.json", std::process::id(), hash_of(&settings)));
+            std::fs::write(&file, settings.to_string()).unwrap();
+            rig.bridge.set_t3_settings(Some(file));
+        }
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+        rig.bridge.tick();
+        rig.bridge.snapshot()["snz"].clone()
+    };
+    // A T3 whose settings aren't on this PC: the four the game always offered.
+    let keys: Vec<Value> = presets(None).as_array().unwrap().iter().map(|c| c["k"].clone()).collect();
+    assert_eq!(keys, vec!["after:60", "after:240", "after:1440", "after:10080"]);
+    // This PC's T3, its presets as they came: T3's defaults, labelled as in its menu.
+    assert_eq!(presets(Some(json!({ "defaultAutoPull": true }))), json!([
+        { "k": "after:60", "l": "In 1 hour" },
+        { "k": "after:180", "l": "In 3 hours" },
+        { "k": "at:today:18:00", "l": "This evening", "w": "6:00 PM" },
+        { "k": "at:tomorrow:09:00", "l": "Tomorrow", "w": "9:00 AM" },
+        { "k": "at:monday:09:00", "l": "Next week", "w": "Mon 9:00 AM" },
+    ]));
+    // Changed in T3's Settings > Snooze options.
+    let changed = json!({ "snoozePresets": [{ "kind": "at", "day": "friday", "time": "15:00" }, { "kind": "after", "minutes": 45 }] });
+    assert_eq!(presets(Some(changed)), json!([
+        { "k": "after:45", "l": "In 45 minutes" },
+        { "k": "at:friday:15:00", "l": "Friday", "w": "3:00 PM" },
+    ]));
+}
+
 #[test]
 fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     let changes = ["t3_thread_send", "t3_thread_launch", "t3_thread_organize", "t3_thread_interrupt"];
