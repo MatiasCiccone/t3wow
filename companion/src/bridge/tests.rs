@@ -4474,4 +4474,115 @@ fn a_read_only_sign_in_shows_on_the_game_s_top_line_until_one_can_change_threads
     assert!(!latest(&rig).contains("Read-only T3 sign-in"), "{}", latest(&rig));
 }
 
+/// The update number (g) in slot `n`.
+fn update_in(rig: &Rig, n: u32) -> u64 {
+    let lua = rig.slot(n);
+    let at = lua.find(",g=").unwrap_or_else(|| panic!("no g in slot {n}: {lua}")) + 3;
+    lua[at..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap()
+}
+
+/// Whether slot `n` carries the open thread and the thread list, and what it says it left out.
+fn parts_in(rig: &Rig, n: u32) -> (bool, bool, String) {
+    let lua = rig.slot(n);
+    let same = lua.find("same={").map(|at| lua[at + 5..].chars().take_while(|&c| c != '}').collect::<String>() + "}").unwrap_or_default();
+    (lua.contains(",view={"), lua.contains(",threads={"), same)
+}
+
+/// A change that answers a command but leaves the parts alone: the window losing focus.
+fn ack_only(rig: &mut Rig, s: u64, l: u32, g: Option<u64>) {
+    let mut frame = json!({ "k": "c1", "u": "ui1", "n": 0, "l": l, "q": [{ "s": s, "t": "ui", "o": true, "f": false }] });
+    if let Some(g) = g {
+        frame["g"] = json!(g);
+    }
+    rig.frame(frame);
+    rig.advance(2_000);
+    rig.bridge.tick();
+}
+
+#[test]
+fn an_update_leaves_out_what_the_game_holds_but_the_first_slots_carry_everything() {
+    let mut rig = Rig::new(5_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let first = update_in(&rig, 1);
+    assert_eq!(parts_in(&rig, 1), (true, true, String::new()));
+    assert!(rig.slot(1).contains(",hx={"), "{}", rig.slot(1));
+
+    // Until the game says it holds them, every slot carries the parts.
+    ack_only(&mut rig, 3, 4, None);
+    assert_eq!(parts_in(&rig, 4), (true, true, String::new()));
+
+    // The game says it is in step with the latest update: the next one leaves them out of
+    // the slots past the first three, and names them.
+    let latest = update_in(&rig, 4);
+    assert!(latest > first);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "g": latest, "q": [] }));
+    ack_only(&mut rig, 4, 2, Some(latest));
+    let (view, threads, same) = parts_in(&rig, 4);
+    assert!(!view && !threads, "{}", rig.slot(4));
+    assert!(same.contains("\"view\"") && same.contains("\"threads\""), "{same}");
+    assert!(rig.slot(4).len() < rig.slot(2).len(), "{} vs {} bytes", rig.slot(4).len(), rig.slot(2).len());
+    // Slots 2 and 3 have the same update in full: a Reload UI starts from slot 1 on.
+    assert_eq!(update_in(&rig, 2), update_in(&rig, 4));
+    assert_eq!(parts_in(&rig, 2), (true, true, String::new()));
+    assert_eq!(parts_in(&rig, 3), (true, true, String::new()));
+}
+
+#[test]
+fn a_part_that_changes_is_sent_until_the_game_is_in_step_and_changing_back_doesnt_skip_it() {
+    let mut rig = Rig::new(6_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let held = update_in(&rig, 4);
+    ack_only(&mut rig, 3, 4, Some(held));
+    assert!(!parts_in(&rig, 4).0, "not left out once in step");
+
+    // The thread finishes: the list and the open thread change and go out in full, then
+    // again with the next update, as the game hasn't said it took them.
+    rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [] }));
+    rig.advance(11_000);
+    rig.bridge.tick();
+    let changed = update_in(&rig, 4);
+    assert_eq!(parts_in(&rig, 4), (true, true, "{\"projects\"}".to_string()));
+    // A frame still on screen from before it doesn't count.
+    ack_only(&mut rig, 4, 4, Some(held));
+    assert_eq!(parts_in(&rig, 4), (true, true, "{\"projects\"}".to_string()));
+
+    // Back as it was, which the game held before: still sent, as it may hold the change.
+    rig.t3.set("running", "2026-11-06T10:00:00Z");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [] }));
+    rig.advance(11_000);
+    rig.bridge.tick();
+    assert_ne!(update_in(&rig, 4), changed);
+    assert_eq!(parts_in(&rig, 4), (true, true, "{\"projects\"}".to_string()));
+
+    // In step again: left out again.
+    let latest = update_in(&rig, 4);
+    ack_only(&mut rig, 5, 4, Some(latest));
+    assert!(!parts_in(&rig, 4).0);
+
+    // The game didn't hold a part an update left out (g=0): all of them go again.
+    ack_only(&mut rig, 6, 4, Some(0));
+    assert_eq!(parts_in(&rig, 4), (true, true, String::new()));
+}
+
+#[test]
+fn a_new_ui_session_gets_every_part() {
+    let mut rig = Rig::new(7_000_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.bridge.tick();
+    let latest = update_in(&rig, 4);
+    ack_only(&mut rig, 3, 4, Some(latest));
+    assert!(!parts_in(&rig, 4).0);
+
+    // A Reload UI: the new session's frame names the update it loaded from slot 1, the
+    // latest one, but it holds nothing of this session's yet.
+    let latest = update_in(&rig, 4);
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 4, "g": latest, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.advance(2_000);
+    rig.bridge.tick();
+    assert_eq!(parts_in(&rig, 4), (true, true, String::new()), "{}", rig.slot(4));
+}
+
 mod live;

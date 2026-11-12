@@ -24,6 +24,15 @@ const MIN_PUBLISH_GAP_MS: i64 = 1500;
 /// Routine changes while the window is open: one update at most this often (200 slots
 /// then last about 35 minutes of watching a busy thread, not 15).
 const ROUTINE_GAP_MS: i64 = 10_000;
+/// The parts of an update the game keeps from the one before while they stay the same:
+/// the open thread's transcript runs to about 50 KB, the thread list to 25 KB, the model
+/// picks to 20 KB. An update leaves out the ones the game holds (`Bridge::held`) and
+/// names them in `same`; `hx` hashes every part, so the game can check it holds that one.
+/// Keep in step with addon/T3WoW/Link.lua.
+const KEPT_PARTS: [&str; 5] = ["view", "threads", "projects", "models", "picks"];
+/// Slots up to this one carry every part: after a Reload UI the game starts again from
+/// slot 1, holding nothing.
+const WHOLE_SLOTS: u32 = 3;
 /// While waiting, the game moves to the next signal file every SIGNAL_PERIOD seconds.
 /// Same clock, same arithmetic: keep in step with addon/T3WoW/Link.lua.
 pub const SIGNAL_PERIOD: i64 = 25;
@@ -813,6 +822,14 @@ pub struct Bridge {
     last_publish_at: i64,
     last_published_hash: Option<u64>,
     last_urgent_hash: Option<u64>,
+    /// The parts the game holds, by hash (see KEPT_PARTS): all of the latest update's once
+    /// a frame says the game is in step with it (g), and a part goes as soon as an update
+    /// carries another one, until the game is in step again. So a part the game had can
+    /// be sent again, but one it didn't have is never left out.
+    held: BTreeMap<&'static str, String>,
+    /// The latest update's number (g in it) and the hashes of its parts.
+    update_id: u32,
+    update_parts: BTreeMap<&'static str, String>,
     /// When the next poll starts, and the one under way (if any).
     poll_at: i64,
     poll_run: Option<PollRun>,
@@ -1902,6 +1919,11 @@ impl Bridge {
             last_publish_at: 0,
             last_published_hash: None,
             last_urgent_hash: None,
+            held: BTreeMap::new(),
+            // From the clock, so a restarted companion doesn't reuse the numbers the game
+            // last saw. The game's JSON writes numbers as C ints: keep well under 2^31.
+            update_id: (started_ms.div_euclid(1000).rem_euclid(1_000_000) * 1000) as u32,
+            update_parts: BTreeMap::new(),
             poll_at: 0,
             poll_run: None,
             repoll: false,
@@ -2219,6 +2241,7 @@ impl Bridge {
             self.link.signal_time = now_s;
             self.last_published_hash = None;
             self.last_urgent_hash = None;
+            self.held.clear();
             self.link.polling = None;
             // The game's command numbers live in its saved variables, which a crash rolls
             // back: start counting from what this session sends. A command run twice this
@@ -2231,10 +2254,20 @@ impl Bridge {
             // Show more lasts for the UI session it was asked in.
             self.list_limits = LIST_LIMITS;
             self.log(&format!("Game UI connected (session {u}, next slot {})", self.link.slot));
-        } else if l > 0 {
-            // The game draws a frame with its current slot count, so it is the authority on
-            // where it loads next (it may have loaded extra slots on its own).
-            self.link.slot = l;
+        } else {
+            if l > 0 {
+                // The game draws a frame with its current slot count, so it is the authority on
+                // where it loads next (it may have loaded extra slots on its own).
+                self.link.slot = l;
+            }
+            // The update the game is in step with: it holds that update's parts. Only the
+            // latest counts, as a part in a later update may not have reached it. 0: a part
+            // an update left out wasn't the one the game had, so send them all again.
+            match frame["g"].as_u64() {
+                Some(0) => self.held.clear(),
+                Some(g) if g == u64::from(self.update_id) => self.held = self.update_parts.clone(),
+                _ => {}
+            }
         }
         if Some(polling) != self.link.polling {
             if !polling {
@@ -4848,15 +4881,32 @@ impl Bridge {
         if let Some(reason) = &self.signals_out {
             inbox["sigoff"] = json!(reason);
         }
+        // The same update without the parts the game holds, for the slots past the first
+        // few. A part it carries anew isn't counted as held until the game says it took it.
+        self.update_id = self.update_id.wrapping_add(1).max(1);
+        let parts: BTreeMap<&'static str, String> = KEPT_PARTS.iter().map(|&part| (part, format!("{:012x}", hash_of(&inbox[part]) >> 16))).collect();
+        self.held.retain(|part, hash| parts.get(part) == Some(hash));
+        inbox["g"] = json!(self.update_id);
+        inbox["hx"] = json!(parts);
+        let mut slim = inbox.clone();
+        let same: Vec<&str> = KEPT_PARTS.iter().copied().filter(|part| !inbox[*part].is_null() && self.held.contains_key(part)).collect();
+        if let Some(fields) = slim.as_object_mut().filter(|_| !same.is_empty()) {
+            for part in &same {
+                fields.remove(*part);
+            }
+            fields.insert("same".into(), json!(same));
+        }
+        self.update_parts = parts;
         // Write a few slots ahead so a missed count on either side still finds fresh data,
         // and only then raise the signals that send the game to read them. Nothing counts
         // as published unless every write worked.
         let mut written = Ok(());
         for slot in self.link.slot..(self.link.slot + 3).min(SLOT_COUNT + 1) {
-            inbox["slot"] = json!(slot);
-            inbox["ns"] = json!(wait.0);
-            inbox["nt"] = json!(wait.1);
-            written = written.and_then(|_| self.slots.write_slot(slot, &format!("T3WoW_Inbox = {}\n", to_lua(&inbox))));
+            let update = if slot <= WHOLE_SLOTS { &mut inbox } else { &mut slim };
+            update["slot"] = json!(slot);
+            update["ns"] = json!(wait.0);
+            update["nt"] = json!(wait.1);
+            written = written.and_then(|_| self.slots.write_slot(slot, &format!("T3WoW_Inbox = {}\n", to_lua(update))));
         }
         let slots_written = written.is_ok();
         for n in raise {
@@ -4915,6 +4965,7 @@ impl Bridge {
         self.view_changed();
         self.last_published_hash = None;
         self.last_urgent_hash = None;
+        self.held.clear();
         self.last_publish_at = 0;
     }
 

@@ -181,3 +181,77 @@ assert(Link.Pending() == 0, "the client key didn't carry over: " .. Link.Pending
 return "ok"
 `, { db: saved });
 });
+
+// Loads `inbox` as the next slot right away; the frames the strip draws are kept in `drawn`.
+const KEEPING = `
+drawn = {}
+local json = ns.Codec.Json
+ns.Codec.Json = function(value)
+  local out = json(value)
+  drawn[#drawn + 1] = out
+  return out
+end
+function load(inbox)
+  Link.state.pollAt = 0
+  inboxes[string.format("T3WoW_S%03d", Link.state.nextSlot)] = inbox
+  tick(0.5)
+end
+function lastFrame() return drawn[#drawn] or "" end
+`;
+
+test("an update that leaves out parts keeps ours when they're the ones named, and the strip says which update we're in step with", () => {
+  runGame(`${KEEPING}
+Link.Init()
+local u = Link.Session()
+load({ k = "c1", u = u, ack = 1, now = time(), g = 7, hx = { view = "v1", threads = "l1" },
+  view = { id = "t1", items = { { x = "hi" } } }, threads = { { id = "t1", s = "running" } }, events = {} })
+assert(Link.state.inStep == 7, tostring(Link.state.inStep))
+assert(lastFrame():find('"g":7', 1, true), lastFrame())
+
+-- Left out, and ours is the one named: kept.
+load({ k = "c1", u = u, ack = 1, now = time(), g = 8, hx = { view = "v1", threads = "l1" }, same = { "view", "threads" } })
+local inbox = Link.state.inbox
+assert(inbox.view and inbox.view.items[1].x == "hi", "the open thread wasn't kept")
+assert(inbox.threads[1].s == "running", "the list wasn't kept")
+assert(Link.state.inStep == 8, tostring(Link.state.inStep))
+
+-- One sent, one left out.
+load({ k = "c1", u = u, ack = 1, now = time(), g = 9, hx = { view = "v1", threads = "l2" },
+  threads = { { id = "t1", s = "completed" } }, same = { "view" } })
+assert(Link.state.inbox.view.items[1].x == "hi" and Link.state.inbox.threads[1].s == "completed")
+assert(Link.state.inStep == 9 and lastFrame():find('"g":9', 1, true), lastFrame())
+
+-- Left out, but ours isn't the one named: ours stays on screen, and the strip says 0 so
+-- the companion sends them all again.
+load({ k = "c1", u = u, ack = 1, now = time(), g = 10, hx = { view = "v2", threads = "l2" }, same = { "view", "threads" } })
+assert(Link.state.inbox.view.items[1].x == "hi", "the open thread went")
+assert(Link.state.inbox.hx.view == "v1", "claims " .. tostring(Link.state.inbox.hx.view))
+assert(Link.state.inStep == 0, tostring(Link.state.inStep))
+assert(lastFrame():find('"g":0', 1, true), lastFrame())
+load({ k = "c1", u = u, ack = 1, now = time(), g = 11, hx = { view = "v2", threads = "l2" },
+  view = { id = "t1", items = { { x = "new" } } }, threads = { { id = "t1", s = "completed" } } })
+assert(Link.state.inbox.view.items[1].x == "new" and Link.state.inStep == 11)
+
+-- An earlier session's slot: shown (its parts kept if they're ours), but not in step.
+load({ k = "c1", u = "an earlier session", ack = 1, now = time(), g = 12, hx = { view = "v2", threads = "l2" }, same = { "view", "threads" } })
+assert(Link.state.inbox.view.items[1].x == "new")
+assert(Link.state.inStep == 0, tostring(Link.state.inStep))
+return "ok"
+`);
+});
+
+test("after a Reload UI the first slot has everything, and a slot left out of it is filled from it", () => {
+  runGame(`${KEEPING}
+Link.Init()
+-- Slot 1 always carries every part; slot 4 left them out for the session before.
+inboxes.T3WoW_S001 = { k = "c1", u = "the session before", ack = 1, now = time(), g = 20, hx = { view = "v1", threads = "l1" },
+  view = { id = "t1", items = { { x = "hi" } } }, threads = { { id = "t1" } } }
+tick(1)
+assert(Link.state.inbox.view.items[1].x == "hi", "slot 1 didn't bring the open thread")
+assert(Link.state.inStep == 0, tostring(Link.state.inStep))
+Link.state.nextSlot = 4
+load({ k = "c1", u = "the session before", ack = 1, now = time(), g = 21, hx = { view = "v1", threads = "l1" }, same = { "view", "threads" } })
+assert(Link.state.inbox.view.items[1].x == "hi" and #Link.state.inbox.threads == 1)
+return "ok"
+`);
+});
