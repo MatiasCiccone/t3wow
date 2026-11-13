@@ -39,6 +39,14 @@ pub const NOT_A_CLIENT: &str = "doesn't look like a WoW client folder (no World 
 const SCREEN_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const SCREEN_ITEM: &str = "Open Screen Recording settings…";
 
+/// Asked before an update of the app: macOS ties the Keychain's Always Allow and Screen
+/// Recording to the app's exact code, so the updated app must be allowed again. The menu's
+/// permission items and the Keychain's own prompt take it from there.
+pub const UPDATE_REGRANT: &str = "T3 WoW restarts by itself once it's updated. macOS then treats it as a new app and asks again:\n\n\
+    • Keychain: type your Mac login password and choose Always Allow, so T3 WoW can read your saved T3 sign-in.\n\
+    • Screen Recording: turn T3 WoW on in System Settings (if it shows as on already, turn it off and on again). The menu offers the settings while it's needed.\n\n\
+    If WoW is in fullscreen, leave fullscreen first so you can see these prompts.";
+
 /// The menu bar icon: "T3" in black on clear, 44x44 pixels with the glyph 36 pixels tall,
 /// which tray-icon shows at 22 points (its cap), so the glyph stands 18 points tall at 2x.
 /// A template image: macOS draws it from the alpha alone, in the menu bar's own colour.
@@ -212,32 +220,44 @@ enum Route {
     /// osascript's `display notification`: works for a bare binary, needs no permission
     /// (it targets no app, so Automation isn't involved), and shows as Script Editor's.
     Script,
+    /// UNUserNotificationCenter, as T3 WoW's own: the app has a bundle identifier, which it
+    /// needs (it throws without one). macOS asks the user once whether to allow them.
+    Center,
 }
 
-/// The route for this process. The app bundle (the next phase) adds the
-/// UNUserNotificationCenter route here, for when `bundle_id` is Some.
-fn route(_bundle_id: Option<&str>) -> Route {
-    Route::Script
+/// The route for this process: the app's own notifications in the app, osascript for a bare
+/// binary.
+fn route(bundle_id: Option<&str>) -> Route {
+    match bundle_id {
+        Some(_) => Route::Center,
+        None => Route::Script,
+    }
+}
+
+/// The notification's title: a warning or an error marked.
+fn notification_title(notice: &Notice) -> String {
+    match notice.level {
+        Level::Info => notice.title.clone(),
+        Level::Warning | Level::Error => format!("⚠️ {}", notice.title),
+    }
 }
 
 /// osascript's arguments: the title and text go in as the script's arguments, never into
 /// its source, so no quote or backslash in them can change what runs.
 fn notification_args(notice: &Notice) -> Vec<String> {
-    let title = match notice.level {
-        Level::Info => notice.title.clone(),
-        Level::Warning | Level::Error => format!("⚠️ {}", notice.title),
-    };
     ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run"]
         .into_iter()
         .map(str::to_string)
-        .chain([title, notice.text.clone()])
+        .chain([notification_title(notice), notice.text.clone()])
         .collect()
 }
 
 /// Shows a notification (App::notify has logged it already). Never waits on the main thread:
-/// osascript runs, and is waited for, on a thread of its own.
+/// osascript runs, and is waited for, on a thread of its own; Notification Center answers on
+/// a queue of its own.
 pub fn notify(_tray: &TrayIcon, notice: &Notice) {
     match route(bundle_id().as_deref()) {
+        Route::Center => center::notify(notice),
         Route::Script => {
             let args = notification_args(notice);
             let _ = std::thread::Builder::new().name("notification".into()).spawn(move || {
@@ -248,6 +268,103 @@ pub fn notify(_tray: &TrayIcon, notice: &Notice) {
                 }
             });
         }
+    }
+}
+
+/// Whether notifications may be posted yet: macOS's question is asked once, at the first
+/// notice, and notices that come while it's up wait for the answer. After that each one is
+/// posted; one the user turned off is dropped by macOS (the menu's notice line has it).
+#[derive(Debug, PartialEq)]
+enum Asking<T> {
+    NotYet,
+    Waiting(Vec<T>),
+    Answered,
+}
+
+impl<T> Asking<T> {
+    /// A notice to show: what to do with it.
+    fn notice(&mut self, item: T) -> Step<T> {
+        match self {
+            Asking::Answered => Step::Post(item),
+            Asking::Waiting(queue) => {
+                queue.push(item);
+                Step::Wait
+            }
+            Asking::NotYet => {
+                *self = Asking::Waiting(vec![item]);
+                Step::Ask
+            }
+        }
+    }
+
+    /// macOS answered: the notices that waited, to post.
+    fn answered(&mut self) -> Vec<T> {
+        match std::mem::replace(self, Asking::Answered) {
+            Asking::Waiting(queue) => queue,
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Step<T> {
+    Post(T),
+    Wait,
+    Ask,
+}
+
+/// The app's notifications, through UNUserNotificationCenter.
+mod center {
+    use super::{notification_title, Asking, Step};
+    use crate::app::Notice;
+    use crate::log;
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_user_notifications::{UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter};
+    use std::sync::Mutex;
+
+    static ASKING: Mutex<Asking<(String, String)>> = Mutex::new(Asking::NotYet);
+
+    pub fn notify(notice: &Notice) {
+        let item = (notification_title(notice), notice.text.clone());
+        let step = ASKING.lock().unwrap().notice(item);
+        match step {
+            Step::Post((title, text)) => post(&title, &text),
+            Step::Wait => {}
+            Step::Ask => ask(),
+        }
+    }
+
+    /// Asks macOS (and so the user, the first time ever) to allow alerts and sounds, then
+    /// posts what waited for the answer.
+    fn ask() {
+        let block = RcBlock::new(|granted: Bool, error: *mut NSError| {
+            if !granted.as_bool() {
+                // SAFETY: the error macOS passes, or null.
+                let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string()).unwrap_or_else(|| "turned off for T3 WoW".into());
+                log::line(&format!("Notifications aren't allowed ({why}): notices show in the menu only."));
+            }
+            for (title, text) in ASKING.lock().unwrap().answered() {
+                post(&title, &text);
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter().requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound, &block);
+    }
+
+    fn post(title: &str, text: &str) {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(text));
+        let id = NSString::from_str(&format!("t3wow-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
+        let done = RcBlock::new(|error: *mut NSError| {
+            // SAFETY: the error macOS passes, or null.
+            if let Some(error) = unsafe { error.as_ref() } {
+                log::line(&format!("Couldn't show the notification: {}", error.localizedDescription()));
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, Some(&done));
     }
 }
 
@@ -292,8 +409,8 @@ fn notice_current(shown_at: Instant, now: Instant) -> bool {
 
 /// The latest notice as a greyed line above the T3 line, for NOTICE_KEPT or until a newer
 /// one. Notification Center doesn't show a bare binary's notifications (osascript's go to
-/// Script Editor, which macOS may never have allowed): this line is where a notice can
-/// always be read. The app bundle, with notifications of its own, comes later.
+/// Script Editor, which macOS may never have allowed), and the app's only once the user has
+/// allowed them: this line is where a notice can always be read.
 pub struct NoticeLine {
     item: MenuItem,
     shown_at: Option<Instant>,
@@ -587,6 +704,29 @@ mod tests {
         let warning = notification_args(&Notice::new(Level::Error, "Update failed", "x"));
         assert_eq!(warning[6], "⚠️ Update failed");
         assert_eq!(route(None), Route::Script, "a bare binary has no bundle for UNUserNotificationCenter");
+        assert_eq!(route(Some("com.t3wow.companion")), Route::Center);
+        // Tests run as a bare binary.
+        assert_eq!(bundle_id(), None);
+    }
+
+    #[test]
+    fn macos_is_asked_once_and_notices_wait_for_its_answer() {
+        let mut asking = Asking::NotYet;
+        assert_eq!(asking.notice(1), Step::Ask);
+        assert_eq!(asking.notice(2), Step::Wait);
+        assert_eq!(asking.notice(3), Step::Wait);
+        assert_eq!(asking.answered(), [1, 2, 3]);
+        assert_eq!(asking, Asking::Answered);
+        assert_eq!(asking.notice(4), Step::Post(4), "asked once: later notices go straight out");
+        assert_eq!(asking.answered(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn an_update_says_what_macos_will_ask_again() {
+        for words in ["Keychain", "Always Allow", "Screen Recording", "fullscreen", "restarts by itself"] {
+            assert!(UPDATE_REGRANT.contains(words), "{words}");
+        }
+        assert!(!UPDATE_REGRANT.contains("  "), "{UPDATE_REGRANT}");
     }
 
     #[test]

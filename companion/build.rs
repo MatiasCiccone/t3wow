@@ -6,6 +6,11 @@ fn main() {
     println!("cargo:rerun-if-changed=assets");
     let version = build_version();
     println!("cargo:rustc-env=T3WOW_VERSION={version}");
+    // For scripts/build-app.mjs, which writes it into the Mac app's Info.plist: it finds this
+    // folder in cargo's build-script-executed message.
+    if let Some(out) = std::env::var_os("OUT_DIR") {
+        let _ = std::fs::write(std::path::Path::new(&out).join("t3wow-version.txt"), &version);
+    }
     made_for_t3();
     // ScreenCaptureKit (macOS 12.3 and later) is linked weakly, so the companion still starts
     // on an older Mac; the capture checks for it at run time and uses screencapture without it.

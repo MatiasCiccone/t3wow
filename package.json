@@ -14,6 +14,7 @@
     "test:addon": "node --test tests/*.test.js",
     "test:live": "cargo test --manifest-path companion/Cargo.toml bridge::tests::live:: -- --ignored --test-threads=1 && node --test tests/live-replay.js",
     "build:exe": "node scripts/build-exe.mjs",
+    "build:app": "node scripts/build-app.mjs",
     "screenshots": "node scripts/screenshots/render.mjs"
   },
   "devDependencies": {

@@ -174,7 +174,7 @@ const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
   t3wow login          [--origin http://<host>:<port> | local]          sign in to T3 again (local: the T3 on this Mac)
   t3wow status         [--origin http://<host>:<port> | local]          check the addon install and the T3 connection
   t3wow uninstall      remove the addon
-  t3wow update         say whether a newer release is out (on a Mac, put it in place by hand)";
+  t3wow update         install the newest release, if there is one (in the T3 WoW app; elsewhere, say whether one is out)";
 
 #[cfg(windows)]
 const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
@@ -208,7 +208,7 @@ const NO_LOCAL_T3: &str = "T3: not running on this Mac";
 #[cfg(not(target_os = "macos"))]
 const UPDATED: &str = "Updated. Restart T3 WoW (Quit from its tray menu, then start it again), then restart WoW if it is running: /reload does not load new addon files.";
 #[cfg(target_os = "macos")]
-const UPDATED: &str = "Updated. Restart T3 WoW (Ctrl+C where t3wow runs, then start it again), then restart WoW if it is running: /reload does not load new addon files.";
+const UPDATED: &str = "Updated. Restart T3 WoW (Quit T3 WoW from its menu bar icon, then open it again); macOS asks again for the Keychain (your login password, then Always Allow) and Screen Recording. Then restart WoW if it is running: /reload does not load new addon files.";
 
 fn wow_dir(args: &Args, config: &Config) -> Result<PathBuf, String> {
     let dir = match &args.wow {
@@ -324,8 +324,8 @@ fn command(args: Args) -> Result<(), String> {
         }
         "update" => match updater::check()? {
             None => println!("Up to date ({}), or no release is visible yet.", updater::current_version()),
-            // Off Windows there's nothing to install it from yet: say it's out, not "Updating…".
-            Some(release) if !cfg!(windows) => println!("{} is out (this is {}). {}", release.version, updater::current_version(), updater::WINDOWS_ONLY),
+            // Where it can't be installed (a bare t3wow on a Mac): say it's out, not "Updating…".
+            Some(release) if !updater::can_install() => println!("{} is out (this is {}). {}", release.version, updater::current_version(), updater::NOT_INSTALLABLE),
             Some(release) => {
                 println!("Updating {} to {}…", updater::current_version(), release.version);
                 updater::install(&release, &|step| match step {
