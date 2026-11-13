@@ -314,15 +314,58 @@ enum Step<T> {
 }
 
 /// The app's notifications, through UNUserNotificationCenter.
+///
+/// macOS mutes every app's notifications while the display is shared, unless the user turns
+/// on "Allow notifications when mirroring or sharing the display" (System Settings >
+/// Notifications, off by default). A ScreenCaptureKit stream counts as sharing, and T3 WoW's
+/// own stream on the game runs whenever it can see WoW: while it does, notices reach
+/// Notification Center (its log: "muted by display state (displayShared)") but show no
+/// banner and make no sound. No app can opt out of that; the menu's notice line still has
+/// each one.
 mod center {
     use super::{notification_title, Asking, Step};
     use crate::app::Notice;
     use crate::log;
-    use block2::RcBlock;
-    use objc2::runtime::Bool;
+    use block2::{DynBlock, RcBlock};
+    use objc2::rc::Retained;
+    use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{define_class, msg_send, AllocAnyThread};
     use objc2_foundation::{NSError, NSString};
-    use objc2_user_notifications::{UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions, UNNotificationRequest, UNUserNotificationCenter,
+        UNUserNotificationCenterDelegate,
+    };
     use std::sync::Mutex;
+
+    define_class!(
+        /// Shows a notice as a banner, and keeps it in Notification Center, even while T3 WoW
+        /// is the active app (an alert or the address box is up): without a delegate macOS
+        /// silences it, as if this answered with no options (Apple's willPresent docs).
+        #[unsafe(super(NSObject))]
+        #[name = "T3WowNotificationDelegate"]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(&self, _center: &UNUserNotificationCenter, _notification: &UNNotification, done: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>) {
+                done.call((UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List,));
+            }
+        }
+    );
+
+    fn new_delegate() -> Retained<Delegate> {
+        unsafe { msg_send![Delegate::alloc(), init] }
+    }
+
+    /// Sets the delegate, once, before the first notification. The center holds it weakly:
+    /// it is kept for the life of the process.
+    fn set_delegate(center: &UNUserNotificationCenter) {
+        let delegate = new_delegate();
+        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        std::mem::forget(delegate);
+    }
 
     static ASKING: Mutex<Asking<(String, String)>> = Mutex::new(Asking::NotYet);
 
@@ -349,7 +392,9 @@ mod center {
                 post(&title, &text);
             }
         });
-        UNUserNotificationCenter::currentNotificationCenter().requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound, &block);
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        set_delegate(&center);
+        center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound, &block);
     }
 
     fn post(title: &str, text: &str) {
@@ -365,6 +410,21 @@ mod center {
             }
         });
         UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, Some(&done));
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::new_delegate;
+        use objc2::runtime::NSObjectProtocol;
+        use objc2::sel;
+
+        /// The class registers (a debug build checks its method against the protocol's) and
+        /// answers the one call macOS makes. The center itself needs the app's bundle.
+        #[test]
+        fn the_delegate_answers_will_present() {
+            let delegate = new_delegate();
+            assert!(delegate.respondsToSelector(sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:)));
+        }
     }
 }
 
@@ -409,8 +469,9 @@ fn notice_current(shown_at: Instant, now: Instant) -> bool {
 
 /// The latest notice as a greyed line above the T3 line, for NOTICE_KEPT or until a newer
 /// one. Notification Center doesn't show a bare binary's notifications (osascript's go to
-/// Script Editor, which macOS may never have allowed), and the app's only once the user has
-/// allowed them: this line is where a notice can always be read.
+/// Script Editor, which macOS may never have allowed), the app's only once the user has
+/// allowed them, and neither as a banner while the game's screen capture runs (see `center`):
+/// this line is where a notice can always be read.
 pub struct NoticeLine {
     item: MenuItem,
     shown_at: Option<Instant>,
