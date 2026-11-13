@@ -52,10 +52,9 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
-# The login-keychain item holding the key that encrypts saved sign-ins (src/keychain.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
+# CFData, CFDictionary and friends (src/capture.rs, src/capture/stream.rs, src/wow.rs).
 core-foundation = "0.10"
-security-framework = { version = "3", default-features = false }
 # libproc, to find the running client (src/capture.rs).
 libc = "0.2"
 # One ScreenCaptureKit stream on the game's window (src/capture/stream.rs): generated

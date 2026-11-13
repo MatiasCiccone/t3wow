@@ -1,14 +1,12 @@
 //! The menu bar on a Mac: the run loop on the main thread (NSApplication, as an accessory
 //! app: a menu bar icon, no Dock icon), notifications, Start at login (a LaunchAgent),
-//! alerts, the address box, and the texts that name the Mac. Also the two items the Mac's
-//! permissions call for, which appear only while they apply: Screen Recording settings when
-//! macOS won't let the companion see the game, and another try at the Keychain after it
-//! refused.
+//! alerts, the address box, and the texts that name the Mac. Also the item the Mac's
+//! Screen Recording permission calls for, which appears only while macOS won't let the
+//! companion see the game.
 
 use super::{Tick, Tray};
 use crate::app::{App, Level, Notice};
 use crate::config::parse_origin_input;
-use crate::keychain::Problem;
 use crate::log;
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -23,7 +21,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tray_icon::menu::{ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
@@ -41,7 +38,6 @@ pub const NOT_A_CLIENT: &str = "doesn't look like a WoW client folder (no World 
 /// The Screen Recording pane of System Settings (Privacy & Security).
 const SCREEN_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const SCREEN_ITEM: &str = "Open Screen Recording settings…";
-const KEYCHAIN_ITEM: &str = crate::keychain::RETRY_ITEM;
 
 /// The menu bar icon: "T3" in black on clear, 44x44 pixels with the glyph 36 pixels tall,
 /// which tray-icon shows at 22 points (its cap), so the glyph stands 18 points tall at 2x.
@@ -513,70 +509,36 @@ pub fn set_autostart(on: bool) -> io::Result<()> {
 
 // ---- Permission help ----
 
-/// Which permission items the menu shows: Screen Recording settings while macOS refuses the
-/// capture, and another try at the Keychain after it refused (not while its prompt may still
-/// be up, nor while a retry runs). An item that doesn't apply is left out, not greyed.
-fn help_shown(screen_refused: bool, keychain: Option<Problem>, retrying: bool) -> (bool, bool) {
-    let keychain_refused = matches!(keychain, Some(Problem::Denied | Problem::Locked | Problem::Malformed | Problem::Failed(_)));
-    (screen_refused, keychain_refused && !retrying)
-}
-
-/// What a retry of the Keychain says when it is done.
-fn keychain_retry_notice(problem: Option<Problem>) -> Notice {
-    match problem {
-        None => Notice::new(Level::Info, "Keychain", "T3 WoW can read its saved sign-ins again."),
-        Some(problem) => Notice::new(Level::Warning, "The Keychain still says no", format!("Saved T3 sign-ins can't be read: {problem}")),
-    }
-}
-
-/// The permission items, below the WoW line while they apply.
+/// The Screen Recording item, below the WoW line while macOS refuses the capture. Left out,
+/// not greyed, while it doesn't apply.
 pub struct Help {
     screen: MenuItem,
-    keychain: MenuItem,
-    retrying: Arc<AtomicBool>,
-    shown: (bool, bool),
+    shown: bool,
 }
 
 impl Help {
     pub fn new() -> Help {
-        Help { screen: MenuItem::new(SCREEN_ITEM, true, None), keychain: MenuItem::new(KEYCHAIN_ITEM, true, None), retrying: Arc::new(AtomicBool::new(false)), shown: (false, false) }
+        Help { screen: MenuItem::new(SCREEN_ITEM, true, None), shown: false }
     }
 
-    /// Shows the items that apply now, right after `after` (the WoW line).
+    /// Shows the item while it applies, right after `after` (the WoW line).
     pub fn refresh(&mut self, menu: &Menu, after: &MenuItem) {
-        let now = help_shown(crate::capture::screen_refused(), crate::keychain::blocked(), self.retrying.load(Ordering::Relaxed));
+        let now = crate::capture::screen_refused();
         if now == self.shown {
             return;
         }
         let _ = menu.remove(&self.screen);
-        let _ = menu.remove(&self.keychain);
         let Some(at) = menu.items().iter().position(|item| item.id() == after.id()).map(|i| i + 1) else { return };
-        // Inserted last first, each at the same place.
-        if now.1 {
-            let _ = menu.insert(&self.keychain, at);
-        }
-        if now.0 {
+        if now {
             let _ = menu.insert(&self.screen, at);
         }
         self.shown = now;
     }
 
-    /// Does what the item `id` stands for; false when it isn't one of these.
-    pub fn choose(&self, id: &MenuId, app: &Arc<App>) -> bool {
+    /// Does what the item `id` stands for; false when it isn't this one.
+    pub fn choose(&self, id: &MenuId) -> bool {
         if id == self.screen.id() {
             open_url(SCREEN_SETTINGS);
-            true
-        } else if id == self.keychain.id() {
-            // The Keychain's prompt blocks until it is answered: not on the main thread.
-            if !self.retrying.swap(true, Ordering::Relaxed) {
-                log::line("Asking the macOS Keychain again, from the menu.");
-                let (app, retrying) = (app.clone(), self.retrying.clone());
-                let _ = std::thread::Builder::new().name("keychain".into()).spawn(move || {
-                    crate::keychain::retry();
-                    retrying.store(false, Ordering::Relaxed);
-                    app.notify(keychain_retry_notice(crate::keychain::blocked()));
-                });
-            }
             true
         } else {
             false
@@ -725,24 +687,5 @@ mod tests {
         assert!(!path.exists() && !agent_enabled_at(&path, exe));
         set_agent_at(&path, exe, false).expect("off twice is still off");
         let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn permission_items_show_only_while_they_apply() {
-        assert_eq!(help_shown(false, None, false), (false, false));
-        assert_eq!(help_shown(true, None, false), (true, false));
-        assert_eq!(help_shown(false, Some(Problem::NotRead), false), (false, false), "the prompt may still be up");
-        for problem in [Problem::Denied, Problem::Locked, Problem::Malformed, Problem::Failed(-1)] {
-            assert_eq!(help_shown(false, Some(problem), false), (false, true), "{problem:?}");
-            assert_eq!(help_shown(true, Some(problem), true), (true, false), "hidden while a retry runs");
-        }
-    }
-
-    #[test]
-    fn a_keychain_retry_says_how_it_went() {
-        assert_eq!(keychain_retry_notice(None).level, Level::Info);
-        let refused = keychain_retry_notice(Some(Problem::Denied));
-        assert_eq!(refused.level, Level::Warning);
-        assert!(refused.text.contains("denied"), "{}", refused.text);
     }
 }

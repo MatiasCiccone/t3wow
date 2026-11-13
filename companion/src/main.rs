@@ -21,8 +21,6 @@ mod codec;
 mod config;
 #[cfg(windows)]
 mod dialog;
-#[cfg(target_os = "macos")]
-mod keychain;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
 mod log;
@@ -32,6 +30,8 @@ mod render;
 mod slots;
 mod snooze;
 mod t3;
+#[cfg(target_os = "macos")]
+mod token_key;
 #[cfg(any(windows, target_os = "macos"))]
 mod tray;
 mod updater;
@@ -242,11 +242,6 @@ fn older_t3_note(client: &t3::McpClient) -> Option<String> {
 }
 
 fn command(args: Args) -> Result<(), String> {
-    // Only the commands that use the sign-in: `help` or `install` shouldn't bring up a prompt.
-    #[cfg(target_os = "macos")]
-    if matches!(args.command.as_deref(), Some("login" | "status")) {
-        keychain::read_at_startup();
-    }
     let config = Config::load();
     let command = args.command.as_deref().unwrap_or("help");
     // Some(None) is the T3 on this PC.
@@ -305,9 +300,10 @@ fn command(args: Args) -> Result<(), String> {
             #[cfg(any(windows, target_os = "macos"))]
             println!("WoW client: {}", if capture::find_wow(&dir).is_some() { "running" } else { "not running" });
             let t3::Target { origin, token, key } = target(&origin).ok_or(NO_LOCAL_T3)?;
-            // The sign-in is saved but out of reach: "not signed in" would be wrong.
+            // The key file is there but unusable: "not signed in" would be wrong, and
+            // `login` couldn't save a sign-in either.
             #[cfg(target_os = "macos")]
-            if let Some(problem) = keychain::blocked().filter(|_| token.is_none()) {
+            if let Some(problem) = token_key::problem().filter(|_| token.is_none()) {
                 return Err(format!("T3 ({origin}): {problem}"));
             }
             let token = token.ok_or(format!("T3 ({origin}): not signed in: run {BIN} login"))?;
