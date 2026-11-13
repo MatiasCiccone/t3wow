@@ -10,7 +10,7 @@
 //! (`THIS_MACHINE`, `AUTOSTART`, `AUTOSTART_ON`, `AUTOSTART_OFF`, `NOT_A_CLIENT`). A module
 //! rather than a trait: there is one shell per build, so nothing would ever choose between
 //! two, and the texts can stay plain constants. A Mac's shell also draws the menu bar icon
-//! (`icon`, a template image), adds the permission items (`Help`) below the WoW line, and
+//! (`icon`, a template image), adds the Screen Recording item (`Help`) below the WoW line, and
 //! keeps the latest notice above the T3 line (`NoticeLine`).
 
 use crate::app::{self, App, Control, Level, Notice, Status, Update};
@@ -367,7 +367,7 @@ impl Tray {
     fn choose(&mut self, id: MenuId) -> Tick {
         let app = &self.app;
         #[cfg(target_os = "macos")]
-        if self.help.choose(&id, app) {
+        if self.help.choose(&id) {
             return Tick::Stay;
         }
         if id == *self.quit.id() {

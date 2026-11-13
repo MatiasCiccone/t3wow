@@ -258,7 +258,7 @@ pub fn connect(
     use crate::config::{canonical_origin, server_label, unencrypted_over_network, Config};
     // Before the browser: a new sign-in couldn't be saved anyway.
     #[cfg(target_os = "macos")]
-    if let Some(problem) = crate::keychain::blocked() {
+    if let Some(problem) = crate::token_key::problem() {
         return Err(format!("Can't sign in: {problem}."));
     }
     let mut config = Config::load();

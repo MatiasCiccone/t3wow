@@ -680,9 +680,6 @@ const NO_BROWSER: &str = "No Google Chrome, Microsoft Edge or Chromium in Applic
 pub fn run(app: Arc<App>) {
     let (control_tx, control_rx) = channel::<Control>();
     *app.control.lock().unwrap() = Some(control_tx);
-    // Here and not in the loop below: it blocks until the prompt is answered.
-    #[cfg(target_os = "macos")]
-    crate::keychain::read_at_startup();
     // Early, so it is up before the game is.
     #[cfg(target_os = "macos")]
     crate::capture::request_screen_access();
@@ -696,12 +693,6 @@ pub fn run(app: Arc<App>) {
                 Config::update(|c| c.wow_dir = Some(dir.to_string_lossy().into_owned()));
             }
             break dir;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(problem) = crate::keychain::blocked() {
-            app.set(format!("T3: {problem}"), "WoW: Forever folder not found: choose it from this menu", true, false);
-            wait(&app, &control_rx, 5, None);
-            continue;
         }
         app.set("T3: waiting", "WoW: Forever folder not found: choose it from this menu", true, Config::load().token().is_some());
         wait(&app, &control_rx, 5, None);
@@ -745,9 +736,10 @@ pub fn run(app: Arc<App>) {
     //    terminal `login` or the tray's T3 server menu is picked up too.
     let mut asked = false;
     let (mut key, origin, token) = loop {
-        // The sign-in is saved but out of reach: it says so, and the browser stays shut.
+        // The key file is there but unusable: it says so, and the browser stays shut, since
+        // a new sign-in couldn't be saved either.
         #[cfg(target_os = "macos")]
-        if let Some(problem) = crate::keychain::blocked() {
+        if let Some(problem) = crate::token_key::problem() {
             app.set(format!("T3: {problem}"), "WoW: waiting for the sign-in", true, false);
             wait(&app, &control_rx, 5, Some(&slots));
             continue;

@@ -323,8 +323,8 @@ pub fn update_check_due(every: UpdateInterval, last: i64, now: i64) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct ServerAuth {
     /// The bearer token as stored: `dpapi:<base64>` on Windows (only this Windows user can
-    /// read it back), encrypted with a key from the Keychain on macOS (see `keychain`), plain
-    /// text elsewhere.
+    /// read it back), encrypted on macOS with a key in a file only this user can read (see
+    /// `token_key`), plain text elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
     /// Epoch milliseconds; none means the token doesn't expire.
@@ -610,14 +610,18 @@ const PROTECTED: &str = "dpapi:";
 
 /// A token as stored: on Windows, encrypted for this Windows user (DPAPI), or None when
 /// that fails, so a token is never written there in plain text; on macOS, encrypted with
-/// the key from the Keychain, or None while there is none; elsewhere, as it is.
+/// the key from `token_key`, or None when its file can't be used; elsewhere, as it is.
 fn protect(token: &str) -> Option<String> {
     #[cfg(windows)]
     return dpapi::protect(token.as_bytes()).map(|blob| format!("{PROTECTED}{}", STANDARD.encode(blob)));
-    // `migrate` calls this on every load, so it only uses a key already read (no prompt) and
-    // hands back what is already encrypted as it is.
+    // `migrate` calls this on every load, so what is already encrypted comes back as it is,
+    // a test build's Keychain-sealed token included (it reads as signed out).
     #[cfg(target_os = "macos")]
-    return if token.starts_with(crate::keychain::SEALED) { Some(token.to_string()) } else { crate::keychain::seal(token) };
+    return if token.starts_with(crate::token_key::SEALED) || token.starts_with(crate::token_key::KEYCHAIN_SEALED) {
+        Some(token.to_string())
+    } else {
+        crate::token_key::seal(token)
+    };
     #[cfg(not(any(windows, target_os = "macos")))]
     Some(token.to_string())
 }
@@ -625,8 +629,7 @@ fn protect(token: &str) -> Option<String> {
 /// A new sign-in as stored on macOS. Never in plain text: without the key it isn't saved.
 #[cfg(target_os = "macos")]
 fn seal_new_token(token: &str) -> Result<String, String> {
-    crate::keychain::ensure();
-    crate::keychain::seal(token).ok_or_else(|| match crate::keychain::problem() {
+    crate::token_key::seal(token).ok_or_else(|| match crate::token_key::problem() {
         Some(problem) => format!("Signed in, but the sign-in wasn't saved: {problem}."),
         None => "Signed in, but the sign-in couldn't be encrypted, so it wasn't saved. Try again.".to_string(),
     })
@@ -646,8 +649,13 @@ fn write_private(file: &Path, text: &str) -> io::Result<()> {
 /// A stored token back as text; none if it can't be decrypted (another user or PC).
 fn unprotect(stored: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
-    if let Some(sealed) = stored.strip_prefix(crate::keychain::SEALED) {
-        return crate::keychain::open(sealed);
+    if let Some(sealed) = stored.strip_prefix(crate::token_key::SEALED) {
+        return crate::token_key::open(sealed);
+    }
+    #[cfg(target_os = "macos")]
+    if stored.starts_with(crate::token_key::KEYCHAIN_SEALED) {
+        crate::token_key::note_keychain_token();
+        return None;
     }
     let Some(encoded) = stored.strip_prefix(PROTECTED) else {
         return Some(stored.to_string());
@@ -973,7 +981,7 @@ mod tests {
         #[cfg(windows)]
         assert!(stored.starts_with(PROTECTED));
         #[cfg(target_os = "macos")]
-        assert!(stored.starts_with(crate::keychain::SEALED));
+        assert!(stored.starts_with(crate::token_key::SEALED));
         assert_eq!(unprotect(&stored).as_deref(), Some("secret"));
         assert_eq!(unprotect("plain").as_deref(), Some("plain"));
         assert_eq!(unprotect("dpapi:AAAA"), None);
@@ -1002,26 +1010,21 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod macos {
         use super::*;
-        use crate::keychain::test_support::{use_keyring, MemoryStore};
-        use crate::keychain::{self, Keyring, Problem, SEALED};
-        use std::sync::{Arc, Mutex};
+        use crate::token_key::test_support::{temp_key_path, use_keyring};
+        use crate::token_key::{Keyring, Problem, KEYCHAIN_SEALED, SEALED};
+        use std::sync::Arc;
 
-        /// `T3WOW_TOKEN` is read by the whole process: the tests that depend on it take turns.
-        static ENV: Mutex<()> = Mutex::new(());
-
-        /// A keyring for this test that has already had its one answer from `store`.
-        fn answered(store: &MemoryStore) -> Arc<Keyring> {
-            let keyring = Arc::new(Keyring::new(Box::new(store.clone())));
-            keyring.ensure();
+        /// A keyring for this test, on a key file of its own.
+        fn keyring(name: &str) -> (Arc<Keyring>, PathBuf) {
+            let path = temp_key_path(name);
+            let keyring = Arc::new(Keyring::new(path.clone()));
             use_keyring(keyring.clone());
-            keyring
+            (keyring, path)
         }
 
         /// A config file with one token sealed under another key, and one still in plain text.
         fn file_with_tokens(name: &str) -> (PathBuf, String) {
-            let writer = Keyring::new(Box::new(MemoryStore::default()));
-            writer.ensure();
-            let sealed = writer.seal("sealed-secret").unwrap();
+            let sealed = Keyring::new(temp_key_path("writer")).seal("sealed-secret").unwrap();
             let file = temp_file(name);
             fs::write(&file, format!(r#"{{"servers":{{"local":{{"token":"{sealed}"}},"http://a:1":{{"token":"plain-secret"}}}}}}"#)).unwrap();
             (file, sealed)
@@ -1034,8 +1037,8 @@ mod tests {
         }
 
         #[test]
-        fn the_config_file_holds_no_readable_token() {
-            answered(&MemoryStore::default());
+        fn the_config_file_holds_no_readable_token_and_no_key() {
+            let (_, key_file) = keyring("no-readable-token");
             let file = temp_file("no-readable-token");
             Config::update_at(&file, |c| {
                 c.set_sign_in(LOCAL, "first-secret", None, OPERATE).unwrap();
@@ -1044,6 +1047,8 @@ mod tests {
             let text = fs::read_to_string(&file).unwrap();
             assert!(!text.contains("secret"), "{text}");
             assert_eq!(text.matches(SEALED).count(), 2, "{text}");
+            let key = fs::read_to_string(&key_file).unwrap();
+            assert!(!text.contains(key.trim()), "the key isn't in config.json");
             let (config, changed) = Config::read(&file).unwrap();
             assert!(!changed, "nothing to convert");
             assert_eq!(config.saved_token(LOCAL).as_deref(), Some("first-secret"));
@@ -1051,35 +1056,10 @@ mod tests {
         }
 
         #[test]
-        fn several_servers_read_back_on_one_key_lookup() {
-            let store = MemoryStore::default();
-            answered(&store);
-            let file = temp_file("one-lookup");
-            Config::update_at(&file, |c| {
-                for n in 0..4 {
-                    c.set_sign_in(&format!("http://box{n}:1"), "t", None, OPERATE).unwrap();
-                }
-            });
-            for _ in 0..3 {
-                let (config, _) = Config::read(&file).unwrap();
-                assert_eq!(config.saved_token("http://box3:1").as_deref(), Some("t"));
-            }
-            assert_eq!(store.reads(), 1);
-        }
-
-        #[test]
-        fn a_plain_token_left_behind_is_encrypted_once_a_key_is_there() {
-            let store = MemoryStore::default();
+        fn a_plain_token_left_behind_is_encrypted_once() {
+            keyring("converts");
             let file = temp_file("converts");
             fs::write(&file, r#"{"servers":{"local":{"token":"plain-secret"}}}"#).unwrap();
-
-            let unread = Arc::new(Keyring::new(Box::new(store.clone())));
-            use_keyring(unread.clone());
-            let (_, changed) = Config::read(&file).unwrap();
-            assert!(!changed, "no key yet: left for later, without asking");
-            assert_eq!(store.reads(), 0);
-
-            unread.ensure();
             let (config, changed) = Config::read(&file).unwrap();
             assert!(changed);
             assert_eq!(config.saved_token(LOCAL).as_deref(), Some("plain-secret"));
@@ -1094,66 +1074,43 @@ mod tests {
         }
 
         #[test]
-        fn migrating_never_asks_the_keychain_or_changes_tokens_when_denied() {
-            let store = MemoryStore::failing(Problem::Denied);
-            answered(&store);
-            assert_eq!(store.reads(), 1);
-            let (file, sealed) = file_with_tokens("migrate-denied");
-            for _ in 0..3 {
+        fn a_token_from_a_keychain_test_build_reads_as_signed_out_and_is_left_alone() {
+            let (_, key_file) = keyring("keychain-token");
+            let old = format!("{KEYCHAIN_SEALED}c29tZXRoaW5nIHNlYWxlZCBpbiB0aGUgS2V5Y2hhaW4=");
+            let file = temp_file("keychain-token");
+            fs::write(&file, format!(r#"{{"servers":{{"local":{{"token":"{old}"}}}}}}"#)).unwrap();
+            for _ in 0..2 {
                 let (config, changed) = Config::read(&file).unwrap();
-                assert!(!changed);
+                assert!(!changed, "not sealed again as if it were plain text");
+                assert_eq!(config.saved_token(LOCAL), None, "signed out");
+                assert_eq!(config.servers["local"].token.as_deref(), Some(old.as_str()));
+            }
+            let mut config = Config::update_at(&file, |_| {});
+            config.set_sign_in(LOCAL, "new-secret", None, OPERATE).unwrap();
+            assert_eq!(config.saved_token(LOCAL).as_deref(), Some("new-secret"), "signing in again replaces it");
+            assert!(key_file.exists());
+        }
+
+        #[test]
+        fn a_broken_key_file_keeps_the_tokens_and_a_new_sign_in_says_why_it_wasnt_saved() {
+            let (_, key_file) = keyring("broken");
+            fs::create_dir_all(key_file.parent().unwrap()).unwrap();
+            fs::write(&key_file, "not a key").unwrap();
+            let (file, sealed) = file_with_tokens("broken");
+            for _ in 0..2 {
+                let (config, changed) = Config::read(&file).unwrap();
+                assert!(!changed, "nothing to encrypt with");
+                assert_eq!(config.saved_token(LOCAL), None);
                 assert_eq!(config.servers["local"].token.as_deref(), Some(sealed.as_str()), "never downgraded");
                 assert_eq!(config.servers["http://a:1"].token.as_deref(), Some("plain-secret"));
                 Config::update_at(&file, |_| {});
             }
-            assert_eq!((store.reads(), store.creates()), (1, 0));
-        }
-
-        #[test]
-        fn a_denied_keychain_does_not_read_as_signed_out_and_keeps_the_tokens() {
-            let _env = ENV.lock().unwrap();
-            let store = MemoryStore::failing(Problem::Denied);
-            answered(&store);
-            let (file, sealed) = file_with_tokens("denied");
-            let (config, _) = Config::read(&file).unwrap();
-            assert_eq!(config.saved_token(LOCAL), None, "no key: nothing to send to T3");
-            assert_eq!(keychain::blocked(), Some(Problem::Denied), "and that isn't \"signed out\"");
-
             let mut config = Config::update_at(&file, |_| {});
             let error = config.set_sign_in("http://new:1", "new-secret", None, OPERATE).unwrap_err();
-            assert!(error.contains("Keychain") && error.contains("denied"), "{error}");
+            assert!(error.contains("wasn't saved") && error.contains("token.key"), "{error}");
             assert!(config.saved_token("http://new:1").is_none(), "never kept in plain text");
-
-            let text = fs::read_to_string(&file).unwrap();
-            assert!(text.contains(&sealed) && !text.contains("new-secret"), "{text}");
-            assert_eq!(store.reads(), 1, "denied once for the whole run");
-        }
-
-        #[test]
-        fn a_sign_in_after_a_retry_is_saved_with_the_key_that_was_already_there() {
-            let _env = ENV.lock().unwrap();
-            let store = MemoryStore::failing(Problem::Denied);
-            answered(&store);
-            store.set_read_error(None);
-            keychain::retry();
-            assert_eq!(keychain::blocked(), None);
-            let mut config = Config::default();
-            config.set_sign_in(LOCAL, "t", None, OPERATE).unwrap();
-            assert_eq!(config.saved_token(LOCAL).as_deref(), Some("t"));
-        }
-
-        #[test]
-        fn the_token_in_the_environment_needs_no_keychain() {
-            let _env = ENV.lock().unwrap();
-            let store = MemoryStore::failing(Problem::Denied);
-            use_keyring(Arc::new(Keyring::new(Box::new(store.clone()))));
-            std::env::set_var("T3WOW_TOKEN", "from-the-environment");
-            keychain::read_at_startup();
-            let (token, blocked) = (Config::default().token(), keychain::blocked());
-            std::env::remove_var("T3WOW_TOKEN");
-            assert_eq!(token.as_deref(), Some("from-the-environment"));
-            assert_eq!(blocked, None);
-            assert_eq!(store.reads(), 0, "no prompt for a token that doesn't need one");
+            assert_eq!(crate::token_key::problem(), Some(Problem::Malformed(key_file.clone())));
+            assert_eq!(fs::read_to_string(&key_file).unwrap(), "not a key", "the key file is left as it was");
         }
     }
 }
