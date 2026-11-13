@@ -21,8 +21,10 @@ import { APP_NAME, checksumFile, codesignArgs, EXECUTABLE, ICONSET, infoPlist, o
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = process.env.T3WOW_DIST ?? join(ROOT, "dist");
 const IDENTITY = process.env.T3WOW_CODESIGN_IDENTITY || "-";
-// One picture for every size: the addon's logo, the same artwork as t3wow.ico, at 512 pixels.
-const ICON_SOURCE = join(ROOT, "assets", "logo.png");
+// One picture for every size: the logo on a full square of deep blue, 1024 pixels. macOS 26 draws
+// every app icon as a rounded square and puts a round one like the logo on a light tile, so the
+// icon brings its own background.
+const ICON_SOURCE = join(ROOT, "assets", "app-icon.png");
 
 if (process.platform !== "darwin") {
   console.error("T3 WoW.app is a Mac app: build it on a Mac.");
@@ -52,7 +54,7 @@ writeFileSync(join(contents, "Info.plist"), infoPlist(version));
 writeFileSync(join(contents, "PkgInfo"), "APPL????");
 run("/usr/bin/plutil", ["-lint", "-s", join(contents, "Info.plist")]);
 
-// AppIcon.icns, made here from the logo rather than kept as a second copy of the artwork.
+// AppIcon.icns, made here from app-icon.png rather than kept as a second copy of it.
 const work = mkdtempSync(join(tmpdir(), "t3wow-icon-"));
 try {
   const iconset = join(work, "AppIcon.iconset");
