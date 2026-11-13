@@ -84,6 +84,16 @@ objc2-core-foundation = { version = "=0.3.2", default-features = false, features
 objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMBase", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSBundle", "NSDate", "NSEnumerator", "NSError", "NSGeometry", "NSRunLoop", "NSString", "NSThread", "NSTimer"] }
+# The app's own notifications (src/tray/macos.rs), once it runs as T3 WoW.app.
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "bitflags",
+  "block2",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
 objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
   "std",
   "SCShareableContent",

@@ -1,10 +1,11 @@
-//! Updates from the project's GitHub releases. Each release carries t3wow.exe, its
-//! SHA-256 (t3wow.exe.sha256) and, once release signing is set up, an Ed25519 signature of
-//! that checksum file (t3wow.exe.sha256.sig), made in CI with the release key (see
-//! .github/workflows/release.yml and scripts/sign-release.mjs). An update installs only
-//! when the exe matches the checksum and, once the real key is built in, the signature verifies.
-//! The addon is embedded in the exe, so updating the companion also updates the addon on
-//! its next start.
+//! Updates from the project's GitHub releases. Each release carries the program for each
+//! system (t3wow.exe for Windows, the zipped T3 WoW app for a Mac, see `Assets`), the
+//! program's SHA-256 (`<name>.sha256`) and, once release signing is set up, an Ed25519
+//! signature of that checksum file (`<name>.sha256.sig`), made in CI with the release key
+//! (see .github/workflows/release.yml and scripts/sign-release.mjs). An update installs only
+//! when the download matches the checksum and, once the real key is built in, the signature
+//! verifies. The addon is embedded in the program, so updating the companion also updates
+//! the addon on its next start. On a Mac, an update replaces the whole app (updater/bundle.rs).
 
 use crate::slots::compare_versions;
 use base64::engine::general_purpose::STANDARD;
@@ -19,11 +20,44 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Releases live in their own public repository while the source stays private.
 const REPO: &str = "MatiasCiccone/t3wow-releases";
-const MAX_EXE_BYTES: u64 = 64 * 1024 * 1024;
+/// The most a program download may be: t3wow.exe, or the zipped app (the same program,
+/// compressed, plus a few kilobytes of Info.plist, icon and signature), both about 10 MB.
+const MAX_PROGRAM_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SMALL_FILE_BYTES: u64 = 4096;
-const EXE: &str = "t3wow.exe";
-const SHA: &str = "t3wow.exe.sha256";
-const SIG: &str = "t3wow.exe.sha256.sig";
+
+/// What a release's program is, which says how a download is checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    WindowsExe,
+    ZippedApp,
+}
+
+/// A release's files for one system: the program, its SHA-256 and the SHA-256's signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Assets {
+    program: &'static str,
+    sha: &'static str,
+    sig: &'static str,
+    kind: Kind,
+}
+
+/// Windows companions out there read exactly these names: never change them.
+const WINDOWS_ASSETS: Assets = Assets { program: "t3wow.exe", sha: "t3wow.exe.sha256", sig: "t3wow.exe.sha256.sig", kind: Kind::WindowsExe };
+/// The Mac app, zipped by scripts/build-app.mjs. Releases carry an Apple silicon build; an
+/// Intel Mac looks for its own name, finds none, and says the release can't be installed
+/// rather than putting in a program it can't run.
+const MAC_ASSETS: Assets = if cfg!(target_arch = "aarch64") {
+    Assets { program: "t3wow-macos-arm64.zip", sha: "t3wow-macos-arm64.zip.sha256", sig: "t3wow-macos-arm64.zip.sha256.sig", kind: Kind::ZippedApp }
+} else {
+    Assets { program: "t3wow-macos-x86_64.zip", sha: "t3wow-macos-x86_64.zip.sha256", sig: "t3wow-macos-x86_64.zip.sha256.sig", kind: Kind::ZippedApp }
+};
+/// This system's files. Anywhere but a Mac, Windows' (elsewhere `install` refuses anyway).
+const ASSETS: Assets = if cfg!(target_os = "macos") { MAC_ASSETS } else { WINDOWS_ASSETS };
+
+#[cfg(target_os = "macos")]
+mod bundle;
+#[cfg(target_os = "macos")]
+pub use bundle::running_app;
 
 // The public half of the release key, in its own file (all zeros until signing is set up).
 mod release_key;
@@ -39,6 +73,7 @@ fn release_key() -> Option<&'static [u8; 32]> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: String,
+    /// The program: t3wow.exe, or on a Mac the zipped app.
     pub exe_url: String,
     pub sha_url: String,
     /// Required once release signing is set up.
@@ -141,7 +176,11 @@ fn tag_in(location: &str) -> Option<&str> {
 /// A release as the API would describe it, from its tag alone: its files are where every
 /// release keeps them. One missing (say, a signature) shows when the update downloads it.
 fn release_at(repo: &str, tag: &str) -> Value {
-    let assets: Vec<Value> = [EXE, SHA, SIG]
+    release_at_for(repo, tag, ASSETS)
+}
+
+fn release_at_for(repo: &str, tag: &str, files: Assets) -> Value {
+    let assets: Vec<Value> = [files.program, files.sha, files.sig]
         .iter()
         .map(|name| serde_json::json!({ "name": name, "browser_download_url": format!("https://github.com/{repo}/releases/download/{tag}/{name}") }))
         .collect();
@@ -151,6 +190,10 @@ fn release_at(repo: &str, tag: &str) -> Value {
 /// The release if it is newer than `current`. A newer release without its checksum (or,
 /// when `signed`, its signature) is an error, not a quiet "up to date": it can't be installed.
 fn newer_release(release: &Value, current: &str, signed: bool) -> Result<Option<Release>, String> {
+    newer_release_for(release, current, signed, ASSETS)
+}
+
+fn newer_release_for(release: &Value, current: &str, signed: bool, files: Assets) -> Result<Option<Release>, String> {
     let Some(version) = release["tag_name"].as_str().map(|tag| tag.trim_start_matches('v').to_string()) else {
         return Ok(None);
     };
@@ -166,8 +209,8 @@ fn newer_release(release: &Value, current: &str, signed: bool) -> Result<Option<
             .map(str::to_string)
             .ok_or_else(|| format!("release {version} has no {name}, so it can't be installed"))
     };
-    let sig_url = if signed { Some(url(SIG)?) } else { url(SIG).ok() };
-    Ok(Some(Release { exe_url: url(EXE)?, sha_url: url(SHA)?, sig_url, version }))
+    let sig_url = if signed { Some(url(files.sig)?) } else { url(files.sig).ok() };
+    Ok(Some(Release { exe_url: url(files.program)?, sha_url: url(files.sha)?, sig_url, version }))
 }
 
 /// How far an update has got, for the tray.
@@ -230,13 +273,15 @@ fn check_signature(data: &[u8], sig_file: &[u8], public_key: &[u8; 32]) -> Resul
         .map_err(|_| "the release isn't signed with the T3 WoW release key".to_string())
 }
 
-/// The SHA-256 in a checksum file ("<64 hex digits>  t3wow.exe"), lowercase.
-fn parse_checksum(sha_file: &[u8]) -> Result<String, String> {
+/// The SHA-256 in a checksum file ("<64 hex digits>  t3wow.exe"), lowercase. The name, when
+/// there is one, must be the program's (`program`).
+fn parse_checksum(sha_file: &[u8], program: &str) -> Result<String, String> {
     let malformed = || "the release's checksum file is malformed".to_string();
     let text = std::str::from_utf8(sha_file).map_err(|_| malformed())?;
     let mut words = text.split_whitespace();
+    let names_it = |name: &str| name == program || name.strip_prefix('*') == Some(program);
     match (words.next(), words.next(), words.next()) {
-        (Some(hash), None | Some(EXE) | Some("*t3wow.exe"), None) if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+        (Some(hash), name, None) if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) && name.is_none_or(names_it) => {
             Ok(hash.to_ascii_lowercase())
         }
         _ => Err(malformed()),
@@ -244,71 +289,89 @@ fn parse_checksum(sha_file: &[u8]) -> Result<String, String> {
 }
 
 /// Checks the checksum file's signature first, then returns the SHA-256 it vouches for.
-fn signed_checksum(sha_file: &[u8], sig_file: &[u8], public_key: &[u8; 32]) -> Result<String, String> {
+fn signed_checksum(sha_file: &[u8], sig_file: &[u8], public_key: &[u8; 32], program: &str) -> Result<String, String> {
     check_signature(sha_file, sig_file, public_key)?;
-    parse_checksum(sha_file)
+    parse_checksum(sha_file, program)
 }
 
 /// The SHA-256 a release vouches for: from its signed checksum file when the companion has
 /// a release key, else from the checksum file alone.
-fn trusted_checksum(sha_file: &[u8], sig_file: Option<&[u8]>, key: Option<&[u8; 32]>) -> Result<String, String> {
+fn trusted_checksum(sha_file: &[u8], sig_file: Option<&[u8]>, key: Option<&[u8; 32]>, program: &str) -> Result<String, String> {
     match key {
-        Some(key) => signed_checksum(sha_file, sig_file.ok_or("the release isn't signed, so it can't be installed")?, key),
-        None => parse_checksum(sha_file),
+        Some(key) => signed_checksum(sha_file, sig_file.ok_or("the release isn't signed, so it can't be installed")?, key, program),
+        None => parse_checksum(sha_file, program),
     }
 }
 
-/// Checks a downloaded exe: a Windows program with the release's SHA-256.
-fn check_exe(exe: &[u8], expected_sha: &str) -> Result<(), String> {
-    if exe.len() < 64 * 1024 || !exe.starts_with(b"MZ") {
-        return Err("the download is not a Windows program".into());
+/// Checks a downloaded program: what this system's releases carry (a Windows program, or a
+/// zip) with the release's SHA-256.
+fn check_download(data: &[u8], expected_sha: &str, kind: Kind) -> Result<(), String> {
+    let (magic, not_it): (&[u8], &str) = match kind {
+        Kind::WindowsExe => (b"MZ", "the download is not a Windows program"),
+        Kind::ZippedApp => (b"PK\x03\x04", "the download is not the zipped T3 WoW app"),
+    };
+    if data.len() < 64 * 1024 || !data.starts_with(magic) {
+        return Err(not_it.into());
     }
-    if hex(&Sha256::digest(exe)) != expected_sha {
+    if hex(&Sha256::digest(data)) != expected_sha {
         return Err("the download doesn't match the release's checksum".into());
     }
     Ok(())
 }
 
-/// Where a Mac's menu bar sends you for a new release, which `install` can't put in place:
-/// the newest listed release's page, in the public releases repository (the source
-/// repository is private).
+/// Where a Mac's menu bar sends you for a new release when `install` can't put it in place
+/// (a bare t3wow, not the app): the newest listed release's page, in the public releases
+/// repository (the source repository is private).
 #[cfg(target_os = "macos")]
 pub fn releases_page() -> String {
     format!("https://github.com/{}/releases/latest", repo())
 }
 
-/// Why `install` refuses off Windows.
-pub const WINDOWS_ONLY: &str = "Updates install only on Windows for now: releases carry the Windows program alone. Put a newer t3wow in place by hand.";
+/// Why `install` refuses: anywhere but Windows' t3wow.exe and a Mac's T3 WoW app.
+pub const NOT_INSTALLABLE: &str =
+    "Updates install only in the T3 WoW app (t3wow.exe on Windows, T3 WoW.app on a Mac). Download the app from the releases page, or put a newer t3wow in place by hand.";
 
-/// Downloads the release, checks it, and swaps it in for the running exe (Windows lets a
-/// running exe be renamed, not overwritten). The caller restarts the companion. `step`
-/// hears how far it has got.
+/// Whether `install` can put a release in place here: on Windows, and on a Mac in the app.
+pub fn can_install() -> bool {
+    #[cfg(target_os = "macos")]
+    if bundle::running_app().is_some() {
+        return true;
+    }
+    cfg!(windows)
+}
+
+/// Downloads the release, checks it, and swaps it in for the running program: on Windows the
+/// exe (Windows lets a running exe be renamed, not overwritten), on a Mac the whole app. The
+/// caller restarts the companion. `step` hears how far it has got.
 pub fn install(release: &Release, step: &dyn Fn(Step)) -> Result<(), String> {
-    // A release holds only t3wow.exe, and it passes check_exe: anywhere else it would
-    // replace this program with one the system can't run.
+    #[cfg(target_os = "macos")]
+    if let Some(app) = bundle::running_app() {
+        return bundle::install(&app, &release.version, || fetch_checked(release, step));
+    }
+    // A release holds t3wow.exe for Windows, and it passes check_download: anywhere else it
+    // would replace this program with one the system can't run.
     if !cfg!(windows) {
-        return Err(WINDOWS_ONLY.into());
+        return Err(NOT_INSTALLABLE.into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    update_exe(
-        &exe,
-        &release.version,
-        || {
-            let key = release_key();
-            let sha_file = download(&release.sha_url, MAX_SMALL_FILE_BYTES)?;
-            let sig_file = match (key, &release.sig_url) {
-                (Some(_), Some(url)) => Some(download(url, MAX_SMALL_FILE_BYTES)?),
-                _ => None,
-            };
-            let expected = trusted_checksum(&sha_file, sig_file.as_deref(), key)?;
-            let exe_bytes = download_with_progress(&release.exe_url, MAX_EXE_BYTES, &|percent| step(Step::Downloading(percent)))?;
-            step(Step::Checking);
-            check_exe(&exe_bytes, &expected)?;
-            step(Step::Installing);
-            Ok(exe_bytes)
-        },
-        |from, to| fs::rename(from, to),
-    )
+    update_exe(&exe, &release.version, || fetch_checked(release, step), |from, to| fs::rename(from, to))
+}
+
+/// Downloads this system's program from the release and checks it against the release's
+/// checksum and, once signing is set up, the checksum's signature.
+fn fetch_checked(release: &Release, step: &dyn Fn(Step)) -> Result<Vec<u8>, String> {
+    let key = release_key();
+    let sha_file = download(&release.sha_url, MAX_SMALL_FILE_BYTES)?;
+    let sig_file = match (key, &release.sig_url) {
+        (Some(_), Some(url)) => Some(download(url, MAX_SMALL_FILE_BYTES)?),
+        _ => None,
+    };
+    let expected = trusted_checksum(&sha_file, sig_file.as_deref(), key, ASSETS.program)?;
+    let bytes = download_with_progress(&release.exe_url, MAX_PROGRAM_BYTES, &|percent| step(Step::Downloading(percent)))?;
+    step(Step::Checking);
+    check_download(&bytes, &expected, ASSETS.kind)?;
+    step(Step::Installing);
+    Ok(bytes)
 }
 
 /// One whole update under the update lock, from download to swap: a second update (the
@@ -355,12 +418,17 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
 
 /// The update lock: held by whoever is swapping exes (the tray, or `t3wow.exe update`).
 fn try_lock(exe: &Path) -> Result<File, String> {
+    try_lock_at(&sibling(exe, "update-lock"), "next to the exe")
+}
+
+/// The update lock in the file `path`; `place` says where that is, for the error.
+fn try_lock_at(path: &Path, place: &str) -> Result<File, String> {
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(sibling(exe, "update-lock"))
-        .map_err(|e| format!("can't create the update lock next to the exe: {e}"))?;
+        .open(path)
+        .map_err(|e| format!("can't create the update lock {place}: {e}"))?;
     match lock.try_lock() {
         Ok(()) => Ok(lock),
         Err(TryLockError::WouldBlock) => Err("another update is already running".into()),
@@ -409,8 +477,15 @@ fn make_executable(file: &Path) -> io::Result<()> {
     fs::set_permissions(file, fs::Permissions::from_mode(0o755))
 }
 
-/// Removes the previous exes and unfinished downloads earlier updates left behind.
+/// Removes the previous exes and unfinished downloads earlier updates left behind (on a Mac
+/// in the app, the previous apps; nothing is ever written inside the app, which would break
+/// its signature).
 pub fn clean_up() {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = bundle::running_app() {
+        bundle::clean_up_at(&app, &bundle::lock_path());
+        return;
+    }
     if let Ok(exe) = std::env::current_exe() {
         clean_up_at(&exe);
     }
@@ -449,6 +524,71 @@ mod tests {
         })
     }
 
+    /// Windows companions already out there look for exactly these names.
+    #[test]
+    fn windows_releases_keep_their_file_names() {
+        assert_eq!(WINDOWS_ASSETS.program, "t3wow.exe");
+        assert_eq!(WINDOWS_ASSETS.sha, "t3wow.exe.sha256");
+        assert_eq!(WINDOWS_ASSETS.sig, "t3wow.exe.sha256.sig");
+        assert_eq!(WINDOWS_ASSETS.kind, Kind::WindowsExe);
+        #[cfg(windows)]
+        assert_eq!(ASSETS, WINDOWS_ASSETS);
+    }
+
+    #[test]
+    fn a_mac_reads_the_zipped_app_for_its_processor() {
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(
+            (MAC_ASSETS.program, MAC_ASSETS.sha, MAC_ASSETS.sig),
+            ("t3wow-macos-arm64.zip", "t3wow-macos-arm64.zip.sha256", "t3wow-macos-arm64.zip.sha256.sig")
+        );
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(MAC_ASSETS.program, "t3wow-macos-x86_64.zip");
+        assert_eq!(MAC_ASSETS.kind, Kind::ZippedApp);
+        assert_eq!(ASSETS, if cfg!(target_os = "macos") { MAC_ASSETS } else { WINDOWS_ASSETS });
+    }
+
+    /// One release carries both systems' files; each picks its own.
+    #[test]
+    fn each_system_picks_its_own_files_from_a_release() {
+        let mut both = release("v0.11.0");
+        for name in [MAC_ASSETS.program, MAC_ASSETS.sha, MAC_ASSETS.sig] {
+            both["assets"].as_array_mut().unwrap().push(json!({ "name": name, "browser_download_url": format!("https://x/{name}") }));
+        }
+        let windows = newer_release_for(&both, "0.10.0", true, WINDOWS_ASSETS).unwrap().unwrap();
+        assert_eq!((windows.exe_url.as_str(), windows.sha_url.as_str(), windows.sig_url.as_deref()), ("https://x/exe", "https://x/sha", Some("https://x/sig")));
+        let mac = newer_release_for(&both, "0.10.0", true, MAC_ASSETS).unwrap().unwrap();
+        assert_eq!(mac.exe_url, format!("https://x/{}", MAC_ASSETS.program));
+        assert_eq!(mac.sha_url, format!("https://x/{}", MAC_ASSETS.sha));
+        assert_eq!(mac.sig_url, Some(format!("https://x/{}", MAC_ASSETS.sig)));
+        // A release from before the Mac app (Windows files only) can't be installed on a Mac.
+        assert_eq!(newer_release_for(&release("v0.11.0"), "0.10.0", false, MAC_ASSETS), Err(format!("release 0.11.0 has no {}, so it can't be installed", MAC_ASSETS.program)));
+        // The release page fallback names each system's files.
+        let page = release_at_for("o/r", "v0.11.0", MAC_ASSETS);
+        let mac = newer_release_for(&page, "0.10.0", true, MAC_ASSETS).unwrap().unwrap();
+        assert_eq!(mac.exe_url, format!("https://github.com/o/r/releases/download/v0.11.0/{}", MAC_ASSETS.program));
+        assert_eq!(release_at("o/r", "v1"), release_at_for("o/r", "v1", ASSETS));
+    }
+
+    #[test]
+    fn a_zipped_app_is_checked_like_the_exe() {
+        let mut zip = b"PK\x03\x04".to_vec();
+        zip.resize(70_000, 1);
+        let sha = format!("{}  {}", hex(&Sha256::digest(&zip)), MAC_ASSETS.program).into_bytes();
+        let expected = parse_checksum(&sha, MAC_ASSETS.program).unwrap();
+        assert!(check_download(&zip, &expected, Kind::ZippedApp).is_ok());
+        assert_eq!(check_download(&exe(), &expected, Kind::ZippedApp), Err("the download is not the zipped T3 WoW app".into()));
+        assert_eq!(check_download(&zip, &expected, Kind::WindowsExe), Err("the download is not a Windows program".into()));
+        let mut other = zip.clone();
+        other[100] = 2;
+        assert!(check_download(&other, &expected, Kind::ZippedApp).is_err());
+        // The checksum file names the zip; the exe's name, or another, doesn't do.
+        assert!(parse_checksum(&sha, WINDOWS_ASSETS.program).is_err());
+        let star = format!("{}  *{}", hex(&Sha256::digest(&zip)), MAC_ASSETS.program).into_bytes();
+        assert_eq!(parse_checksum(&star, MAC_ASSETS.program), Ok(expected.clone()));
+        assert_eq!(parse_checksum(hex(&Sha256::digest(&zip)).as_bytes(), MAC_ASSETS.program), Ok(expected));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_mac_is_sent_to_the_public_releases_page() {
@@ -460,7 +600,7 @@ mod tests {
     #[test]
     fn only_a_newer_signed_release_counts() {
         assert_eq!(
-            newer_release(&release("v0.4.0"), "0.3.0", true),
+            newer_release_for(&release("v0.4.0"), "0.3.0", true, WINDOWS_ASSETS),
             Ok(Some(Release {
                 version: "0.4.0".into(),
                 exe_url: "https://x/exe".into(),
@@ -468,24 +608,24 @@ mod tests {
                 sig_url: Some("https://x/sig".into()),
             }))
         );
-        assert_eq!(newer_release(&release("v0.3.0"), "0.3.0", true), Ok(None));
-        assert_eq!(newer_release(&release("v0.2.9"), "0.3.0", true), Ok(None));
+        assert_eq!(newer_release_for(&release("v0.3.0"), "0.3.0", true, WINDOWS_ASSETS), Ok(None));
+        assert_eq!(newer_release_for(&release("v0.2.9"), "0.3.0", true, WINDOWS_ASSETS), Ok(None));
         let mut pre = release("v1.0.0");
         pre["prerelease"] = json!(true);
-        assert_eq!(newer_release(&pre, "0.3.0", true), Ok(None));
+        assert_eq!(newer_release_for(&pre, "0.3.0", true, WINDOWS_ASSETS), Ok(None));
         // A newer release missing any of its files can't be installed, and says so.
-        for missing in [EXE, SHA, SIG] {
+        for missing in [WINDOWS_ASSETS.program, WINDOWS_ASSETS.sha, WINDOWS_ASSETS.sig] {
             let mut partial = release("v1.0.0");
             partial["assets"].as_array_mut().unwrap().retain(|a| a["name"] != missing);
-            assert_eq!(newer_release(&partial, "0.3.0", true), Err(format!("release 1.0.0 has no {missing}, so it can't be installed")));
+            assert_eq!(newer_release_for(&partial, "0.3.0", true, WINDOWS_ASSETS), Err(format!("release 1.0.0 has no {missing}, so it can't be installed")));
         }
     }
 
     #[test]
     fn a_test_build_compares_as_the_release_it_was_built_from() {
-        assert_eq!(newer_release(&release("v0.9.1"), "0.9.1-dev+57ee2ec", true), Ok(None));
-        assert_eq!(newer_release(&release("v0.9.1"), "0.9.1-dev+57ee2ec.dirty", true), Ok(None));
-        assert_eq!(newer_release(&release("v0.9.2"), "0.9.1-dev+57ee2ec", true).unwrap().unwrap().version, "0.9.2");
+        assert_eq!(newer_release_for(&release("v0.9.1"), "0.9.1-dev+57ee2ec", true, WINDOWS_ASSETS), Ok(None));
+        assert_eq!(newer_release_for(&release("v0.9.1"), "0.9.1-dev+57ee2ec.dirty", true, WINDOWS_ASSETS), Ok(None));
+        assert_eq!(newer_release_for(&release("v0.9.2"), "0.9.1-dev+57ee2ec", true, WINDOWS_ASSETS).unwrap().unwrap().version, "0.9.2");
         assert_eq!(up_to_date_for("0.9.1"), "You have 0.9.1, the newest release.");
         assert_eq!(up_to_date_for("0.9.1-dev+57ee2ec"), "You have 0.9.1-dev+57ee2ec, a test build: no release is newer than 0.9.1.");
     }
@@ -497,7 +637,7 @@ mod tests {
         assert_eq!(tag_in("https://github.com/o/r/releases"), None);
         assert_eq!(tag_in(""), None);
         assert_eq!(
-            newer_release(&release_at("o/r", "v1.0.0"), "0.9.1", true),
+            newer_release_for(&release_at_for("o/r", "v1.0.0", WINDOWS_ASSETS), "0.9.1", true, WINDOWS_ASSETS),
             Ok(Some(Release {
                 version: "1.0.0".into(),
                 exe_url: "https://github.com/o/r/releases/download/v1.0.0/t3wow.exe".into(),
@@ -505,8 +645,8 @@ mod tests {
                 sig_url: Some("https://github.com/o/r/releases/download/v1.0.0/t3wow.exe.sha256.sig".into()),
             }))
         );
-        assert_eq!(newer_release(&release_at("o/r", "v0.9.1"), "0.9.1", true), Ok(None));
-        assert_eq!(newer_release(&Value::Null, "0.9.1", true), Ok(None));
+        assert_eq!(newer_release_for(&release_at_for("o/r", "v0.9.1", WINDOWS_ASSETS), "0.9.1", true, WINDOWS_ASSETS), Ok(None));
+        assert_eq!(newer_release_for(&Value::Null, "0.9.1", true, WINDOWS_ASSETS), Ok(None));
     }
 
     /// The real release page, as the fallback reads it, against the API. Needs the network:
@@ -521,35 +661,35 @@ mod tests {
         assert_eq!(page["tag_name"], api["tag_name"]);
         for asset in page["assets"].as_array().unwrap() {
             let listed = api["assets"].as_array().unwrap().iter().any(|a| a["browser_download_url"] == asset["browser_download_url"]);
-            assert!(listed || asset["name"] == SIG, "{asset} isn't in the release");
+            assert!(listed || asset["name"] == ASSETS.sig, "{asset} isn't in the release");
         }
     }
 
     #[test]
     fn before_signing_is_set_up_a_release_needs_its_checksum_but_no_signature() {
         let mut unsigned = release("v1.0.0");
-        unsigned["assets"].as_array_mut().unwrap().retain(|a| a["name"] != SIG);
-        let found = newer_release(&unsigned, "0.3.0", false).unwrap().unwrap();
+        unsigned["assets"].as_array_mut().unwrap().retain(|a| a["name"] != WINDOWS_ASSETS.sig);
+        let found = newer_release_for(&unsigned, "0.3.0", false, WINDOWS_ASSETS).unwrap().unwrap();
         assert_eq!(found.sig_url, None);
-        assert_eq!(newer_release(&release("v1.0.0"), "0.3.0", false).unwrap().unwrap().sig_url, Some("https://x/sig".into()));
-        for missing in [EXE, SHA] {
+        assert_eq!(newer_release_for(&release("v1.0.0"), "0.3.0", false, WINDOWS_ASSETS).unwrap().unwrap().sig_url, Some("https://x/sig".into()));
+        for missing in [WINDOWS_ASSETS.program, WINDOWS_ASSETS.sha] {
             let mut partial = release("v1.0.0");
             partial["assets"].as_array_mut().unwrap().retain(|a| a["name"] != missing);
-            assert!(newer_release(&partial, "0.3.0", false).is_err(), "{missing}");
+            assert!(newer_release_for(&partial, "0.3.0", false, WINDOWS_ASSETS).is_err(), "{missing}");
         }
 
         let exe = exe();
         let sha = format!("{}  t3wow.exe", hex(&Sha256::digest(&exe))).into_bytes();
         // No key: the checksum file alone, which still has to be well formed and match.
-        let expected = trusted_checksum(&sha, None, None).unwrap();
-        assert!(check_exe(&exe, &expected).is_ok());
-        assert!(trusted_checksum(b"not a checksum", None, None).is_err());
+        let expected = trusted_checksum(&sha, None, None, "t3wow.exe").unwrap();
+        assert!(check_download(&exe, &expected, Kind::WindowsExe).is_ok());
+        assert!(trusted_checksum(b"not a checksum", None, None, "t3wow.exe").is_err());
         // With a key: a signature is required, and must verify.
         let (pair, public) = key_pair();
-        assert!(trusted_checksum(&sha, None, Some(&public)).is_err());
-        assert_eq!(trusted_checksum(&sha, Some(&sig_file(&pair, &sha)), Some(&public)), Ok(expected));
+        assert!(trusted_checksum(&sha, None, Some(&public), "t3wow.exe").is_err());
+        assert_eq!(trusted_checksum(&sha, Some(&sig_file(&pair, &sha)), Some(&public), "t3wow.exe"), Ok(expected));
         let (stranger, _) = key_pair();
-        assert!(trusted_checksum(&sha, Some(&sig_file(&stranger, &sha)), Some(&public)).is_err());
+        assert!(trusted_checksum(&sha, Some(&sig_file(&stranger, &sha)), Some(&public), "t3wow.exe").is_err());
     }
 
     fn exe() -> Vec<u8> {
@@ -575,34 +715,34 @@ mod tests {
         let exe = exe();
         let sha = format!("{}  t3wow.exe", hex(&Sha256::digest(&exe))).into_bytes();
         let sig = sig_file(&pair, &sha);
-        let expected = signed_checksum(&sha, &sig, &public).unwrap();
-        assert!(check_exe(&exe, &expected).is_ok());
+        let expected = signed_checksum(&sha, &sig, &public, "t3wow.exe").unwrap();
+        assert!(check_download(&exe, &expected, Kind::WindowsExe).is_ok());
 
         // Another exe, or anything that isn't a program, doesn't match.
         let mut other = exe.clone();
         other[100] = 1;
-        assert!(check_exe(&other, &expected).is_err());
-        assert!(check_exe(b"<html>not found</html>", &expected).is_err());
+        assert!(check_download(&other, &expected, Kind::WindowsExe).is_err());
+        assert!(check_download(b"<html>not found</html>", &expected, Kind::WindowsExe).is_err());
 
         // Signed with another key, or the checksum changed after signing.
         let (stranger, _) = key_pair();
-        assert!(signed_checksum(&sha, &sig_file(&stranger, &sha), &public).is_err());
+        assert!(signed_checksum(&sha, &sig_file(&stranger, &sha), &public, "t3wow.exe").is_err());
         let mut forged = sha.clone();
         forged[0] = if forged[0] == b'0' { b'1' } else { b'0' };
-        assert!(signed_checksum(&forged, &sig, &public).is_err());
+        assert!(signed_checksum(&forged, &sig, &public, "t3wow.exe").is_err());
 
         // Missing or malformed signature files.
-        assert!(signed_checksum(&sha, b"", &public).is_err());
-        assert!(signed_checksum(&sha, b"not base64!", &public).is_err());
-        assert!(signed_checksum(&sha, STANDARD.encode([7u8; 63]).as_bytes(), &public).is_err());
-        assert!(signed_checksum(&sha, &sig, &[0; 32]).is_err());
+        assert!(signed_checksum(&sha, b"", &public, "t3wow.exe").is_err());
+        assert!(signed_checksum(&sha, b"not base64!", &public, "t3wow.exe").is_err());
+        assert!(signed_checksum(&sha, STANDARD.encode([7u8; 63]).as_bytes(), &public, "t3wow.exe").is_err());
+        assert!(signed_checksum(&sha, &sig, &[0; 32], "t3wow.exe").is_err());
 
         // A validly signed but malformed checksum file still fails.
         for bad in [&b""[..], b"deadbeef  t3wow.exe", b"<html>", &sha[..63]] {
-            assert!(signed_checksum(bad, &sig_file(&pair, bad), &public).is_err(), "{}", String::from_utf8_lossy(bad));
+            assert!(signed_checksum(bad, &sig_file(&pair, bad), &public, "t3wow.exe").is_err(), "{}", String::from_utf8_lossy(bad));
         }
         let other_name = format!("{}  other.exe", hex(&Sha256::digest(&exe))).into_bytes();
-        assert!(signed_checksum(&other_name, &sig_file(&pair, &other_name), &public).is_err());
+        assert!(signed_checksum(&other_name, &sig_file(&pair, &other_name), &public, "t3wow.exe").is_err());
     }
 
     /// The release workflow signs with Node (scripts/sign-release.mjs); this fixture, signed
@@ -614,8 +754,8 @@ mod tests {
         let public: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&hex_key[i * 2..i * 2 + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
         let sha = fixture["checksum"].as_str().unwrap().as_bytes();
         let sig = fixture["signature"].as_str().unwrap().as_bytes();
-        let expected = signed_checksum(sha, sig, &public).unwrap();
-        assert!(check_exe(&exe(), &expected).is_ok());
+        let expected = signed_checksum(sha, sig, &public, "t3wow.exe").unwrap();
+        assert!(check_download(&exe(), &expected, Kind::WindowsExe).is_ok());
     }
 
     fn exe_dir(name: &str) -> (PathBuf, PathBuf) {
@@ -652,11 +792,11 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn off_windows_an_update_is_refused_before_anything_is_downloaded() {
+    fn off_windows_and_outside_the_app_an_update_is_refused_before_anything_is_downloaded() {
         let unreachable = "http://127.0.0.1:9/t3wow.exe".to_string();
         let release = Release { version: "99.0.0".into(), exe_url: unreachable.clone(), sha_url: unreachable, sig_url: None };
         let steps = std::cell::Cell::new(0);
-        assert_eq!(install(&release, &|_| steps.set(steps.get() + 1)), Err(WINDOWS_ONLY.to_string()));
+        assert_eq!(install(&release, &|_| steps.set(steps.get() + 1)), Err(NOT_INSTALLABLE.to_string()));
         assert_eq!(steps.get(), 0);
     }
 
