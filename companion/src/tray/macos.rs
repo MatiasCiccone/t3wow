@@ -610,8 +610,12 @@ fn unescape(text: &str) -> String {
 /// The LaunchAgent that starts `exe` when the user logs in (Aqua: a login to the desktop,
 /// not over SSH). AbandonProcessGroup, because the companion restarts itself (after an
 /// update of the WoW folder or the interface version) by starting a new copy and exiting,
-/// and launchd would otherwise end the new copy along with the old.
-fn agent_plist(exe: &Path) -> String {
+/// and launchd would otherwise end the new copy along with the old. `app`: the bundle
+/// identifier of the app `exe` is in, as AssociatedBundleIdentifiers, so macOS names the
+/// login item and its "App Background Activity" notice after T3 WoW, not "t3wow"; a bare
+/// t3wow has none.
+fn agent_plist(exe: &Path, app: Option<&str>) -> String {
+    let associated = app.map(|id| format!("\t<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>{}</string>\n\t</array>\n", escape(id))).unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -631,7 +635,7 @@ fn agent_plist(exe: &Path) -> String {
 	<string>Interactive</string>
 	<key>AbandonProcessGroup</key>
 	<true/>
-</dict>
+{associated}</dict>
 </plist>
 "#,
         escape(&exe.to_string_lossy())
@@ -653,12 +657,12 @@ fn agent_enabled_at(path: &Path, exe: &Path) -> bool {
 
 /// Writes (on) or removes (off) the LaunchAgent. Turning it on doesn't load it into launchd:
 /// that would start a second companion now; macOS loads it at the next login.
-fn set_agent_at(path: &Path, exe: &Path, on: bool) -> io::Result<()> {
+fn set_agent_at(path: &Path, exe: &Path, app: Option<&str>, on: bool) -> io::Result<()> {
     if on {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, agent_plist(exe))
+        std::fs::write(path, agent_plist(exe, app))
     } else {
         match std::fs::remove_file(path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -682,7 +686,8 @@ pub fn autostart_enabled() -> bool {
 }
 
 pub fn set_autostart(on: bool) -> io::Result<()> {
-    set_agent_at(&agent_path(&home()?), &this_exe()?, on)
+    let app = crate::updater::running_app().map(|_| crate::updater::BUNDLE_ID);
+    set_agent_at(&agent_path(&home()?), &this_exe()?, app, on)
 }
 
 // ---- Permission help ----
@@ -861,16 +866,31 @@ mod tests {
     #[test]
     fn the_launch_agent_starts_this_program_at_login_and_only_that() {
         let exe = Path::new("/Users/me/Apps/T3 & WoW <beta>/t3wow");
-        let plist = agent_plist(exe);
+        let plist = agent_plist(exe, None);
         assert!(plist.contains("<key>Label</key>\n\t<string>com.t3wow.companion</string>"), "{plist}");
         assert!(plist.contains("<string>/Users/me/Apps/T3 &amp; WoW &lt;beta&gt;/t3wow</string>"), "{plist}");
         assert!(plist.contains("<key>RunAtLoad</key>\n\t<true/>"), "{plist}");
         assert!(plist.contains("<key>LimitLoadToSessionType</key>\n\t<string>Aqua</string>"), "{plist}");
         assert!(plist.contains("<key>AbandonProcessGroup</key>\n\t<true/>"), "{plist}");
         assert!(!plist.contains("KeepAlive"), "Quit means quit");
+        assert!(!plist.contains("AssociatedBundleIdentifiers"), "a bare t3wow is no app's");
         assert_eq!(agent_program(&plist).as_deref(), Some("/Users/me/Apps/T3 & WoW <beta>/t3wow"));
         assert_eq!(agent_program("<plist><dict></dict></plist>"), None);
         assert_eq!(agent_path(Path::new("/Users/me")), Path::new("/Users/me/Library/LaunchAgents/com.t3wow.companion.plist"));
+    }
+
+    /// From the app, the agent names the app's bundle, so macOS shows T3 WoW (its name and
+    /// icon) for the login item, not the program inside it.
+    #[test]
+    fn the_apps_launch_agent_names_the_app() {
+        let exe = Path::new("/Applications/T3 WoW.app/Contents/MacOS/t3wow");
+        let plist = agent_plist(exe, Some(crate::updater::BUNDLE_ID));
+        assert!(
+            plist.contains("\t<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>com.t3wow.companion</string>\n\t</array>\n</dict>"),
+            "{plist}"
+        );
+        assert_eq!(agent_program(&plist).as_deref(), Some("/Applications/T3 WoW.app/Contents/MacOS/t3wow"));
+        assert_eq!(plist.matches("<dict>").count(), 1);
     }
 
     #[test]
@@ -879,15 +899,15 @@ mod tests {
         let path = agent_path(&home);
         let exe = Path::new("/opt/t3wow/t3wow");
         assert!(!agent_enabled_at(&path, exe), "no file yet");
-        set_agent_at(&path, exe, true).unwrap();
+        set_agent_at(&path, exe, None, true).unwrap();
         assert!(agent_enabled_at(&path, exe));
         assert!(!agent_enabled_at(&path, Path::new("/elsewhere/t3wow")), "another copy's agent isn't this one's");
         std::fs::write(&path, "not a plist").unwrap();
         assert!(!agent_enabled_at(&path, exe), "a file that names no program");
-        set_agent_at(&path, exe, true).unwrap();
-        set_agent_at(&path, exe, false).unwrap();
+        set_agent_at(&path, exe, None, true).unwrap();
+        set_agent_at(&path, exe, None, false).unwrap();
         assert!(!path.exists() && !agent_enabled_at(&path, exe));
-        set_agent_at(&path, exe, false).expect("off twice is still off");
+        set_agent_at(&path, exe, None, false).expect("off twice is still off");
         let _ = std::fs::remove_dir_all(&home);
     }
 }
