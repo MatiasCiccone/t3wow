@@ -8,6 +8,8 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow-releases/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
 
+**On a Mac:** the companion is the T3 WoW app, which lives in the menu bar. See On a Mac below.
+
 ## Made for T3 Code 0.19.0
 
 **T3 WoW is developed and tested against the stable release of T3 Code, version 0.19.0.** On any other version, including pre-release builds, parts of it may not work.
@@ -88,6 +90,20 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 4. Leave the companion running while you play. Its tray menu shows the T3 and WoW status, and has sign in and out, Choose WoW folder, Repair addon files, Put back missing addon files automatically, Reinstall addon, Match WoW's interface version, Commands from the game, Open log, Start with Windows and the update check.
 
 The companion checks for a new version when it starts and every 6 hours, and updates itself from the tray menu. It installs an update only when the download matches the release's checksum (and, once release signing is set up, when the release is signed with the project's release key). The companion includes the addon, so the addon updates with it. If you install the addon from CurseForge, it updates here, and the companion never replaces a newer addon with an older one. Keep the two at the same version: when the companion is older than the addon, the window's top line reads **Update the T3 WoW companion**, and its tooltip and a chat line say how (Check for updates in the tray menu, then Update).
+
+## On a Mac
+
+On a Mac with Apple Silicon (tested on macOS 26.5.1 and 26.7.2), the companion is **T3 WoW.app**, for WoW: Forever's native Mac client. It lives in the menu bar instead of the tray, and its menu has the same items, with Start at login instead of Start with Windows. Fullscreen works: the app reads the game's own window. Keep WoW's Resolution at the display's native one (Render Scale can stay lower). Pasting images isn't available on a Mac yet.
+
+1. Download t3wow-macos-arm64.zip from the same releases page and double-click it. **In Finder, drag T3 WoW onto Applications**, then open it from there. (Opened anywhere else, it runs from a read-only copy that can't update itself.)
+2. macOS says "T3 WoW" Not Opened. **Click Done**, not the highlighted Move to Trash, which deletes the app.
+3. Open System Settings, then Privacy & Security, scroll to Security and click **Open Anyway**. Click **Open Anyway** again in the next dialog, and confirm with Touch ID or your password.
+4. When macOS asks to let T3 WoW record the screen, click Open System Settings, turn on T3 WoW, then click **Quit & Reopen**. T3 WoW reads only the game's window.
+5. Sign in to T3 and restart WoW, as in Setting up.
+
+Settings, sign-ins and the log are in ~/Library/Application Support/t3wow. The sign-ins are encrypted with the key in token.key beside them, so a copy of config.json alone means signing in again. Updates install from the menu bar, like on Windows, and keep the Screen Recording permission.
+
+While the app reads the game, macOS counts that as sharing the screen and mutes notification banners. To see them, turn on System Settings, Notifications, **Allow notifications when mirroring or sharing the display**. Either way, the newest notice heads the T3 WoW menu for 10 minutes. Fullscreen WoW hides the menu bar: press Cmd+Tab to switch to another app, and the T3 icon shows over the game.
 
 ## Trust and streaming
 
