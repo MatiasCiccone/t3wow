@@ -1,6 +1,6 @@
 # Release signing
 
-A T3 WoW release can be signed in two separate ways. They protect different things and are set up separately:
+A T3 WoW release can be signed in two separate ways. They protect different things and are set up separately (the Mac app's own code signature is a third, covered in [The Mac app's certificate](#the-mac-apps-certificate)):
 
 | | Release key | Authenticode (code signing) |
 | --- | --- | --- |
@@ -254,11 +254,69 @@ Then, in `release.yml`, replace the eSigner step with this one, and gate it and 
 
 Artifact Signing's certificates last 72 hours and renew daily. The timestamp keeps old signatures valid, and SmartScreen reputation follows the validated identity rather than each certificate.
 
+## The Mac app's certificate
+
+### What it is, and why
+
+`T3 WoW.app` is code signed with a self-signed certificate made for this project:
+
+| | |
+| --- | --- |
+| Name | `T3 WoW Self-Signed` |
+| SHA-1 | `9CDF7471D7EDC76A1F997A8C9F4C3A8BFAE1C4A8` |
+| Valid | 2026-11-13 05:19:24 UTC to **2036-11-10 05:19:24 UTC** (ten years) |
+| Key | RSA 2048; code signing only (`extendedKeyUsage=critical,codeSigning`, `CA:false`) |
+
+Signed with it, the app's designated requirement is `identifier "com.t3wow.companion" and certificate leaf = H"9cdf7471d7edc76a1f997a8c9f4c3a8bfae1c4a8"`. macOS matches its Screen Recording grant against that requirement, so an update signed with the same certificate keeps the grant: nobody visits System Settings after an update. Signed ad hoc, the requirement is the build's own hash, and every update needs the switch again.
+
+It is free, and it does only that. It isn't an Apple Developer ID: it has no Team ID, so Gatekeeper still blocks a downloaded app once (System Settings > Privacy & Security > Open Anyway), there is no notarization, and a keychain item's "Always Allow" wouldn't survive an update either (macOS files it under the build's hash). That last point is why the companion keeps the key for saved sign-ins in a file only the user can read (`companion/src/token_key.rs`), not in the Keychain.
+
+### Where it lives
+
+- **GitHub, for the Release workflow:** the `T3WOW_MACOS_CERT_P12` secret holds the certificate and its private key as a base64 `.p12`, and `T3WOW_MACOS_CERT_PASSWORD` that file's password. The `T3WOW_CODESIGN_IDENTITY` repository variable is the SHA-1 above, which codesign resolves without ambiguity whatever else the keychains hold.
+- **The owner's login keychain on the Mac** that made it: the backup, and what local signed builds use (`T3WOW_CODESIGN_IDENTITY=9CDF7471D7EDC76A1F997A8C9F4C3A8BFAE1C4A8 npm run build:app`). It is trusted for code signing there (user domain).
+- **Recommended: a third copy off that Mac**, in a password manager: Keychain Access > My Certificates > T3 WoW Self-Signed > Export, as a `.p12` with a strong password. GitHub never shows a secret again, so without this copy a lost Mac means a new certificate.
+
+### How release.yml uses it
+
+In the `build-macos` job, on the self-hosted Mac runner:
+
+- **Mac signing certificate** fails the release when the variable names a certificate but the secret is missing (or the reverse), rather than signing ad hoc: one ad hoc release after a signed one would cost every Mac user their Screen Recording grant. With neither, it warns and signs ad hoc.
+- **Signing keychain** decodes the `.p12` into the job's temporary folder, makes a keychain there with a random password generated in the job (masked, never printed), imports the `.p12` with `-T /usr/bin/codesign`, deletes the `.p12`, runs `security set-key-partition-list -S apple-tool:,apple:,codesign:` so codesign can use the key without a dialog, and puts the keychain at the front of the user's search list. `build:app` is then told to look for the identity in that keychain only (`T3WOW_CODESIGN_KEYCHAIN`, codesign's `--keychain`).
+- `build:app` gives codesign two minutes. A keychain dialog nobody answers fails the build with a hint, instead of hanging the runner.
+- **The app is this version** also checks that the designated requirement names the certificate (`certificate leaf = H"…"`).
+- **Remove the signing keychain** runs even after a failure: it takes the keychain off the search list and deletes it.
+
+The certificate doesn't need to be trusted on the runner: codesign signs with an untrusted self-signed identity when it's given by its SHA-1, and macOS's grant follows the requirement, not trust. (Checked on 2026-11-13 with a throwaway untrusted certificate in a temporary keychain: see the free-route report.)
+
+### Losing it, or replacing it
+
+A new certificate means a new designated requirement. Every Mac user then turns Screen Recording on once more after the update that brings it (if T3 WoW already shows as on, remove it with − and add it again with +); the app's own help says so when capture is refused. Nothing else is lost: sign-ins don't depend on the certificate. Never fill the gap with ad hoc releases, which would cost the grant on every update instead of once.
+
+### Renewing it
+
+codesign won't sign with an expired certificate, so make the next one well before **2036-11-10**, and make it last longer. Renewing is replacing: even the same key in a new certificate changes the requirement, so plan it as above (one Screen Recording grant per user). On the Mac, in a private temporary folder (`umask 077`):
+
+```sh
+openssl req -x509 -newkey rsa:2048 -days 7300 -sha256 -nodes -subj "/CN=T3 WoW Self-Signed" \
+  -addext "basicConstraints=critical,CA:false" -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning" -keyout key.pem -out cert.pem
+# The legacy algorithms are the ones `security import` reads reliably.
+openssl pkcs12 -export -inkey key.pem -in cert.pem -name "T3 WoW Self-Signed" \
+  -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 -out "T3 WoW Self-Signed.p12"
+security import "T3 WoW Self-Signed.p12" -k ~/Library/Keychains/login.keychain-db -T /usr/bin/codesign
+security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db cert.pem
+```
+
+Then set the two secrets from the new `.p12` (`base64 -i "T3 WoW Self-Signed.p12" | gh secret set T3WOW_MACOS_CERT_P12`, and the password through `gh secret set T3WOW_MACOS_CERT_PASSWORD` with the password on stdin), set `T3WOW_CODESIGN_IDENTITY` to the new SHA-1 (`security find-identity -p codesigning`), update the table above, back up the new `.p12`, and delete the temporary folder. Give the old and new certificates different names if both stay in the keychain.
+
 ## Checklist for the next release
 
 - [ ] Release key: run `bash scripts/release-signing-wizard.sh`, merge its pull request, confirm `T3WOW_SIGNING_KEY` is set.
 - [ ] Authenticode: skipped until the source is open (see [Decision](#decision-november-2026)). The "Authenticode not set up" warning in the run is expected.
+- [ ] Mac app: `T3WOW_MACOS_CERT_P12`, `T3WOW_MACOS_CERT_PASSWORD` and the `T3WOW_CODESIGN_IDENTITY` variable are set, and the t3wow-mac runner is online.
 - [ ] Bump the version in the three files and push the tag.
 - [ ] In the run: **Release key** says the key matches.
 - [ ] On `t3wow-releases`: `t3wow.exe.sha256.sig` is there.
+- [ ] In the run: **The app is this version** passed, so the Mac app's requirement names the certificate.
 - [ ] From a 0.5.0 companion, **Update to x.y.z** installs it. After the update, a forged release (for instance, the same release with its `.sig` removed, on a test repository through `T3WOW_UPDATE_REPO` in a debug build) is refused.
