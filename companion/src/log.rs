@@ -1,4 +1,5 @@
-//! The companion's log: %APPDATA%\t3wow\t3wow.log (the tray's "Open log"), echoed to the
+//! The companion's log: %APPDATA%\t3wow\t3wow.log, or on a Mac
+//! ~/Library/Application Support/t3wow/t3wow.log (the menu's "Open log"), echoed to the
 //! console when there is one.
 
 use std::fs::{File, OpenOptions};

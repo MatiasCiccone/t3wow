@@ -152,15 +152,19 @@ pub struct SignIn {
 /// them up for longer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
-// The Mac companion has no tray menu yet: `t3wow login` signs in (and `--origin` switches).
+// A Mac: the menu bar app's items, or under `t3wow run` (no menu) `t3wow login` signs in
+// (and `--origin` switches).
 #[cfg(not(target_os = "macos"))]
 const NO_LOCAL_T3: &str = "T3 Code isn't running on this PC. Start the T3 Code desktop app, or connect to T3 on another machine.";
 #[cfg(target_os = "macos")]
-const NO_LOCAL_T3: &str = "T3 Code isn't running on this Mac. Start the T3 Code desktop app, or connect to T3 on another machine (t3wow login --origin).";
+const NO_LOCAL_T3: (&str, &str) = (
+    "T3 Code isn't running on this Mac. Start the T3 Code desktop app, or connect to T3 on another machine (T3 server in the menu bar).",
+    "T3 Code isn't running on this Mac. Start the T3 Code desktop app, or connect to T3 on another machine (t3wow login --origin).",
+);
 #[cfg(not(target_os = "macos"))]
-const SIGN_IN_AGAIN: &str = "Sign in again from the tray menu.";
+pub(crate) const SIGN_IN_AGAIN: &str = "Sign in again from the tray menu.";
 #[cfg(target_os = "macos")]
-const SIGN_IN_AGAIN: &str = "Sign in again with t3wow login.";
+pub(crate) const SIGN_IN_AGAIN: (&str, &str) = ("Sign in again: choose Sign in to T3… in the menu bar.", "Sign in again with t3wow login.");
 /// An image upload (up to 10 MB, maybe to T3 on another machine) gets longer.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -268,7 +272,7 @@ pub fn connect(
     }
     let remote = config.origin.is_some();
     let label = server_label(config.origin.as_deref());
-    let target = target_in(&config).ok_or(NO_LOCAL_T3)?;
+    let target = target_in(&config).ok_or(crate::app::shown(NO_LOCAL_T3))?;
     let switched = config.origin != before;
     let trouble = |error: &str| {
         let hint = if remote {
@@ -586,7 +590,7 @@ impl McpClient {
         let status = response.status().as_u16();
         let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         if status == 401 || status == 403 {
-            return Err(PostError::Fail(T3Error::Auth(format!("T3 refused the sign-in ({status}). {SIGN_IN_AGAIN}"))));
+            return Err(PostError::Fail(T3Error::Auth(format!("T3 refused the sign-in ({status}). {}", crate::app::shown(SIGN_IN_AGAIN)))));
         }
         if let Some(id) = header("mcp-session-id") {
             *self.session.lock().unwrap() = Some(id);
@@ -735,6 +739,17 @@ impl McpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The menu bar app names its own items; `t3wow run` on a Mac (no menu) the commands.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_names_the_menu_bar_or_the_command() {
+        for (menu, terminal) in [NO_LOCAL_T3, SIGN_IN_AGAIN] {
+            assert!(menu.contains("menu bar") && !menu.contains("t3wow") && !menu.contains("tray"), "{menu}");
+            assert!(terminal.contains("t3wow login"), "{terminal}");
+        }
+        assert_eq!(crate::app::shown(SIGN_IN_AGAIN), "Sign in again with t3wow login.", "tests run as `t3wow run`");
+    }
 
     #[test]
     fn the_sign_in_note_follows_the_page_t3_sends_the_browser_to() {

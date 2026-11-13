@@ -3323,9 +3323,13 @@ fn pastes_stop_at_eight_need_an_image_and_follow_the_tray_setting() {
     rig.bridge.tick();
     #[cfg(not(target_os = "macos"))]
     assert!(str_of(&outcome(&rig, 12)["x"]).starts_with("blocked by the T3 WoW tray setting"));
-    // No tray on a Mac: the reason names the setting in the config file instead.
+    // A Mac: the menu bar app names its own setting; tests run as `t3wow run`, which has no
+    // menu, so the reason names the setting in the config file.
     #[cfg(target_os = "macos")]
-    assert!(str_of(&outcome(&rig, 12)["x"]).starts_with("blocked by T3 WoW's setting \"Commands from the game\" (gameCommands in its config.json)"));
+    {
+        assert!(str_of(&outcome(&rig, 12)["x"]).starts_with("blocked by T3 WoW's setting \"Commands from the game\" (gameCommands in its config.json)"));
+        assert_eq!(TRUST_SETTING.0, "the T3 WoW menu bar setting \"Commands from the game\"");
+    }
     assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(MAX_PASTED - 1));
 }
 
@@ -4517,16 +4521,20 @@ fn a_read_only_sign_in_shows_on_the_game_s_top_line_until_one_can_change_threads
     rig.bridge.set_sign_in_read_only(true);
     rig.advance(2000);
     rig.bridge.tick();
-    assert_eq!(rig.bridge.snapshot()["auth"], READ_ONLY_LINE);
-    // No tray menu on a Mac: the line says to run t3wow login instead.
+    assert_eq!(rig.bridge.snapshot()["auth"], crate::app::shown(READ_ONLY_LINE));
+    // A Mac: the menu bar's item, or under `t3wow run` (no menu, as in tests) t3wow login.
     #[cfg(target_os = "macos")]
-    assert_eq!(READ_ONLY_LINE, "Read-only T3 sign-in: run t3wow login again, pick Auto or Full access");
+    {
+        assert_eq!(rig.bridge.snapshot()["auth"], "Read-only T3 sign-in: run t3wow login again, pick Auto or Full access");
+        assert_eq!(READ_ONLY_LINE.0, "Read-only T3 sign-in: choose Sign in to T3… in the menu bar, pick Auto or Full access");
+    }
     assert!(rig.bridge.status().sign_in_read_only, "the tray's line says it too");
     assert!(latest(&rig).contains("Read-only T3 sign-in"), "{}", latest(&rig));
 
     // A refused sign-in is the bigger problem, and says what to do about it.
-    rig.bridge.auth_error = Some("T3 refused the sign-in (401). Sign in again from the tray menu.".into());
-    assert_eq!(rig.bridge.snapshot()["auth"], "T3 refused the sign-in (401). Sign in again from the tray menu.");
+    let refused = format!("T3 refused the sign-in (401). {}", crate::app::shown(crate::t3::SIGN_IN_AGAIN));
+    rig.bridge.auth_error = Some(refused.clone());
+    assert_eq!(rig.bridge.snapshot()["auth"], refused.as_str());
     rig.bridge.auth_error = None;
 
     // Signed in again with Auto: the line goes.
@@ -4871,3 +4879,13 @@ fn every_update_says_long_commands_are_welcome() {
 }
 
 mod live;
+
+/// The menu bar app names its own item for lost signal files; `t3wow run` on a Mac (no
+/// menu, as in tests) the command.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mac_names_the_menu_bar_item_or_the_command_for_lost_signal_files() {
+    assert!(SIGNALS_LOST.0.ends_with("or choose Repair addon files from its menu bar icon)"), "{}", SIGNALS_LOST.0);
+    assert!(!SIGNALS_LOST.0.contains("tray") && SIGNALS_LOST.1.contains("run t3wow install"));
+    assert_eq!(signals_lost(), SIGNALS_LOST.1);
+}

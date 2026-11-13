@@ -128,17 +128,50 @@ fn tooltip(activity: Option<&str>, status: &Status) -> String {
     tip.chars().take(127).collect()
 }
 
-/// The update item's text for each state of the update, with this companion's version;
-/// `installs`: choosing it installs the release (else it opens the release's page).
-fn update_text(update: &Update, current: &str, installs: bool) -> String {
-    match update {
-        Update::NotChecked => "Check for updates".to_string(),
-        Update::Checking => "Checking for updates…".to_string(),
-        Update::UpToDate => format!("Up to date ({current}): check again"),
-        Update::Available(release) if installs => format!("Update to {} (now {current})", release.version),
-        Update::Available(release) => format!("{} is out (now {current}): open the download page", release.version),
-        Update::Installing(version) => format!("Updating to {version}…"),
-        Update::Failed(_) => "Update check failed: try again".to_string(),
+/// What choosing the update item does with a release on offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateBy {
+    /// Installs it: Windows' t3wow.exe, a Mac's app.
+    Install,
+    /// Opens the release's page, to download the app: a bare t3wow on a Mac.
+    DownloadPage,
+    /// Says how to move the app first: a Mac's app that macOS runs from a temporary,
+    /// read-only copy (`updater::TRANSLOCATED`), which can't update itself.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    MoveFirst,
+}
+
+impl UpdateBy {
+    fn here() -> UpdateBy {
+        #[cfg(target_os = "macos")]
+        if crate::updater::running_translocated() {
+            return UpdateBy::MoveFirst;
+        }
+        if crate::updater::can_install() {
+            UpdateBy::Install
+        } else {
+            UpdateBy::DownloadPage
+        }
+    }
+}
+
+/// What the update item says in place of checking or installing while the app runs from a
+/// temporary copy: how to move it, as the notice at startup says in full.
+const MOVE_FIRST: &str = "To update: quit, drag T3 WoW into Applications in Finder, open it there";
+
+/// The update item's text for each state of the update, with this companion's version, and
+/// what choosing it does (`by`).
+fn update_text(update: &Update, current: &str, by: UpdateBy) -> String {
+    match (update, by) {
+        (Update::Checking, _) => "Checking for updates…".to_string(),
+        (Update::Installing(version), _) => format!("Updating to {version}…"),
+        (Update::Available(release), UpdateBy::MoveFirst) => format!("{} is out: quit, drag T3 WoW into Applications in Finder, open it there", release.version),
+        (_, UpdateBy::MoveFirst) => MOVE_FIRST.to_string(),
+        (Update::NotChecked, _) => "Check for updates".to_string(),
+        (Update::UpToDate, _) => format!("Up to date ({current}): check again"),
+        (Update::Available(release), UpdateBy::Install) => format!("Update to {} (now {current})", release.version),
+        (Update::Available(release), UpdateBy::DownloadPage) => format!("{} is out (now {current}): open the download page", release.version),
+        (Update::Failed(_), _) => "Update check failed: try again".to_string(),
     }
 }
 
@@ -206,9 +239,9 @@ pub struct Tray {
     interval_items: Vec<(UpdateInterval, CheckMenuItem)>,
     manual_only: CheckMenuItem,
     quit: MenuItem,
-    /// Choosing Update installs it (`updater::can_install`); else (a bare t3wow on a Mac) it
-    /// opens the release's page.
-    installs: bool,
+    /// What choosing Update does with a release: installs it, opens its page (a bare t3wow
+    /// on a Mac), or says to move the app first (a Mac's app run from a temporary copy).
+    update_by: UpdateBy,
     /// A Mac's permission items, shown below the WoW line while they apply.
     #[cfg(target_os = "macos")]
     help: platform::Help,
@@ -332,7 +365,7 @@ impl Tray {
             interval_items,
             manual_only,
             quit,
-            installs: crate::updater::can_install(),
+            update_by: UpdateBy::here(),
             #[cfg(target_os = "macos")]
             help: platform::Help::new(),
             #[cfg(target_os = "macos")]
@@ -411,9 +444,14 @@ impl Tray {
         } else if id == *self.updates.id() {
             let state = app.update.lock().unwrap().clone();
             match state {
+                Update::Checking | Update::Installing(_) => {}
+                // A copy macOS made read-only can't update, or check for anything it could
+                // install: how to move it, again.
+                #[cfg(target_os = "macos")]
+                _ if self.update_by == UpdateBy::MoveFirst => app.notify(app::translocated_notice()),
                 // A bare t3wow on a Mac can't install it: the release's page, to download the app.
                 #[cfg(target_os = "macos")]
-                Update::Available(_) if !self.installs => platform::open_url(&crate::updater::releases_page()),
+                Update::Available(_) if self.update_by == UpdateBy::DownloadPage => platform::open_url(&crate::updater::releases_page()),
                 // The Mac app says it restarts, and what carries over.
                 #[cfg(target_os = "macos")]
                 Update::Available(release) => {
@@ -423,7 +461,6 @@ impl Tray {
                 }
                 #[cfg(not(target_os = "macos"))]
                 Update::Available(release) => app.install_update(release, || relaunch()),
-                Update::Checking | Update::Installing(_) => {}
                 _ => app.check_updates(true),
             }
         } else if id == *self.check_on_start.id() || id == *self.manual_only.id() || self.interval_items.iter().any(|(_, item)| *item.id() == id) {
@@ -498,7 +535,7 @@ impl Tray {
         let app = &self.app;
         let update = app.update.lock().unwrap().clone();
         if self.shown_update.as_ref() != Some(&update) {
-            self.updates.set_text(update_text(&update, crate::updater::current_version(), self.installs));
+            self.updates.set_text(update_text(&update, crate::updater::current_version(), self.update_by));
             self.updates.set_enabled(update_enabled(&update));
             self.shown_update = Some(update);
         }
@@ -591,7 +628,7 @@ mod tests {
             (Update::Failed("timed out".into()), "Update check failed: try again", true),
         ];
         for (update, text, enabled) in cases {
-            assert_eq!(update_text(&update, "0.10.0", true), text);
+            assert_eq!(update_text(&update, "0.10.0", UpdateBy::Install), text);
             assert_eq!(update_enabled(&update), enabled, "{update:?}");
         }
     }
@@ -601,12 +638,28 @@ mod tests {
     #[test]
     fn where_updates_dont_install_the_item_says_the_release_is_out() {
         let release = Release { version: "0.11.0".into(), exe_url: String::new(), sha_url: String::new(), sig_url: None };
-        assert_eq!(update_text(&Update::Available(release), "0.10.0", false), "0.11.0 is out (now 0.10.0): open the download page");
+        assert_eq!(update_text(&Update::Available(release), "0.10.0", UpdateBy::DownloadPage), "0.11.0 is out (now 0.10.0): open the download page");
         for update in [Update::NotChecked, Update::Checking, Update::UpToDate, Update::Installing("0.11.0".into()), Update::Failed("x".into())] {
-            assert_eq!(update_text(&update, "0.10.0", false), update_text(&update, "0.10.0", true));
+            assert_eq!(update_text(&update, "0.10.0", UpdateBy::DownloadPage), update_text(&update, "0.10.0", UpdateBy::Install));
         }
         // Tests don't run in the Mac app: there, a bare program.
         assert_eq!(crate::updater::can_install(), cfg!(windows));
+        assert_eq!(UpdateBy::here(), if cfg!(windows) { UpdateBy::Install } else { UpdateBy::DownloadPage });
+    }
+
+    /// An app macOS runs from a temporary copy can't update: the item says how to move it
+    /// instead of offering to check or install, and still shows a check or an install under way.
+    #[test]
+    fn a_translocated_app_says_to_move_it_rather_than_update() {
+        let release = Release { version: "0.11.0".into(), exe_url: String::new(), sha_url: String::new(), sig_url: None };
+        assert_eq!(update_text(&Update::Available(release), "0.10.0", UpdateBy::MoveFirst), "0.11.0 is out: quit, drag T3 WoW into Applications in Finder, open it there");
+        for update in [Update::NotChecked, Update::UpToDate, Update::Failed("x".into())] {
+            assert_eq!(update_text(&update, "0.10.0", UpdateBy::MoveFirst), MOVE_FIRST, "{update:?}");
+        }
+        assert_eq!(update_text(&Update::Checking, "0.10.0", UpdateBy::MoveFirst), "Checking for updates…");
+        for text in [MOVE_FIRST.to_string(), update_text(&Update::Available(Release { version: "1.0.0".into(), exe_url: String::new(), sha_url: String::new(), sig_url: None }), "0.10.0", UpdateBy::MoveFirst)] {
+            assert!(text.contains("quit") && text.contains("Applications in Finder") && !text.contains("Update to"), "{text}");
+        }
     }
 
     #[test]

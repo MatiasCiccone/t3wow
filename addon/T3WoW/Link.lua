@@ -7,7 +7,7 @@
 --      The game seems to give up on a font file it has tried a few dozen times, so we
 --      never watch one file for long: while waiting we move to the next signal file every
 --      SIGNAL_PERIOD seconds, timed from the update that named the starting file. The
---      companion runs on this PC, shares the clock, and raises the files around ours.
+--      companion runs on this computer, shares the clock, and raises the files around ours.
 --      Pictures come the same way: the companion draws them into blank image slot files
 --      (img/NNNN.tga) and names the slot in an update; the game loads one filled while it
 --      runs, as long as it never asked for it while blank (see checkImages).
@@ -52,7 +52,7 @@ local floor, format = math.floor, string.format
 local db
 -- The client key, command count and queue: file-local while the game runs, so another
 -- addon can't add commands to the queue through the saved variables table (it can still
--- draw a strip of its own: the companion's tray setting "Commands from the game" caps
+-- draw a strip of its own: the companion's setting "Commands from the game" caps
 -- what any command can do). They go back into T3WoWDB at logout, which /reload also
 -- fires, so they keep across sessions.
 local own
@@ -326,8 +326,8 @@ end
 
 -- ---------------------------------------------------------------- sign-in
 -- Each update carries a stamp (lid) for the T3 sign-in it comes from. The companion gives
--- it a new one when it moves to another T3 (`t3wow.exe login --origin`) or signs out, and
--- blanks the slot files that held the previous one's threads. Seeing a new stamp, the
+-- it a new one when it moves to another T3 (its menu's T3 server, or `login --origin`) or
+-- signs out, and blanks the slot files that held the previous one's threads. Seeing a new stamp, the
 -- game drops everything it had from the previous one: threads, the open thread,
 -- notifications, and commands still waiting (meant for that T3's threads and machines).
 -- The stamp is kept in the saved variables (db.login, with db.loginAt, when the newest
@@ -599,8 +599,8 @@ local function updateCapability(now)
         trace(format("font check passed (attempt %d, %.1fs)", state.capabilityAttempts, now - c.at))
     elseif now - c.at > CAPABILITY_TIMEOUT and state.capabilityAttempts >= CAPABILITY_TRIES then
         state.signals = "off"
-        -- The Mac companion has no tray menu: its own command reinstalls.
-        local reinstall = (IsMacClient and IsMacClient()) and "run t3wow install in Terminal" or "Reinstall addon from the T3 WoW tray menu"
+        -- On a Mac the item is under the T3 WoW app's menu bar icon rather than in a tray.
+        local reinstall = (IsMacClient and IsMacClient()) and "choose Reinstall addon from T3 WoW's menu bar icon" or "Reinstall addon from the T3 WoW tray menu"
         state.signalCheck = format("the test font never loaded in %d tries (%s, then restart WoW)", state.capabilityAttempts, reinstall)
         trace("font check: the test font never loaded, signals off")
     elseif now - c.at > CAPABILITY_TIMEOUT then

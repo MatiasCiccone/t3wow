@@ -157,8 +157,9 @@ local function isSelectedView(view)
     return view ~= nil and selected ~= nil and not selected.new and view.id == selected.id and envIdOf(view.e) == selected.env
 end
 
--- The companion's tray setting "Commands from the game" (inbox.trust: "nonew" or
--- "readonly"; an older companion leaves it out) limits what the game may make T3 do. The
+-- The companion's setting "Commands from the game" (in Windows' tray menu, or the Mac's
+-- menu bar; inbox.trust: "nonew" or "readonly"; an older companion leaves it out) limits
+-- what the game may make T3 do. The
 -- companion refuses those commands anyway: the window greys them out and says why.
 local TRUST_NAME = { nonew = "No new threads", readonly = "Read-only" }
 local CHANGES_T3 = { send = true, new = true, settle = true, unsettle = true, snooze = true, unsnooze = true, stop = true, answer = true, paste = true, model = true, script = true }
@@ -169,17 +170,17 @@ local BLOCKED_LEAD = {
     answer = "Answering from the game is off", settle = "Settle is off", unsettle = "Unsettle is off", stop = "Stop is off",
     snooze = "Snooze is off", unsnooze = "Wake is off",
 }
--- Where the companion's settings are, and how it's updated. The Mac companion (`t3wow`,
--- run in Terminal) has no tray menu yet: "Commands from the game" is gameCommands in its
--- config.json there, and a newer t3wow is put in place by hand (releases are Windows-only).
+-- Where the companion's settings are, and how it's updated. On a Mac the companion is the
+-- T3 WoW app, a T3 icon in the menu bar (no tray): its menu has the same "Commands from the
+-- game", and Check for updates, then Update to <version>, installs a release there too.
 -- On UI, not a local of its own: the file has all of Lua's 200 locals in one chunk.
 UI.Companion = (IsMacClient and IsMacClient()) and {
-    blocked = '%s: T3 WoW has "Commands from the game" set to %s (gameCommands in its config.json).',
-    trust = "%s: gameCommands in T3 WoW's config.json",
-    stalled = "Companion not answering: is T3 WoW (t3wow) running on this Mac?",
-    update = "put a newer t3wow in place",
-    howToUpdate = "Put a newer t3wow in place, then restart it (Ctrl+C where it runs, then start it again).",
-    updateHint = "",
+    blocked = '%s: T3 WoW in the menu bar has "Commands from the game" set to %s.',
+    trust = "%s: see Commands from the game under T3 WoW's menu bar icon",
+    stalled = "Companion not answering: is T3 WoW running in the menu bar?",
+    update = "update it from its menu bar icon",
+    howToUpdate = "Click T3 WoW's T3 icon in the menu bar: Check for updates, then Update.",
+    updateHint = " (click T3 WoW's icon in the menu bar: Check for updates)",
 } or {
     blocked = '%s: the T3 WoW tray menu has "Commands from the game" set to %s.',
     trust = "%s: see Commands from the game in the T3 WoW tray menu",
@@ -2632,7 +2633,7 @@ do
     local ROW_GAP, GROUP_GAP = 10, 14
     local WORK_ICON = { b = "brain", c = "terminal", t = "hammer", q = "message", r = "eye", e = "pencil", s = "search", w = "globe" }
 
-    -- How long since `since` (a time from the companion, on this PC's clock), as T3 says
+    -- How long since `since` (a time from the companion, on this computer's clock), as T3 says
     -- it: seconds show whenever minutes do ("12m 0s"), hours alone stay bare ("1h").
     local function elapsed(since)
         local seconds = math.max(0, time() - since)
@@ -3004,7 +3005,7 @@ input:SetScript("OnTextChanged", function(self, userInput)
     UI.Picker.Update(userInput)
     UI.ComposerButton()
 end)
--- What the empty box says: what Enter does, or that the tray setting turned it off.
+-- What the empty box says: what Enter does, or that the companion's setting turned it off.
 setPlaceholder = function()
     local asking = pendingAsk() ~= nil
     local blocked = blockedReason((selected and selected.new) and "new" or (asking and "answer" or "send"))
@@ -3756,7 +3757,7 @@ UI.SendCurrent = sendCurrent
 -- As in T3's composer: / at the start of a word lists the provider's commands and skills,
 -- $ lists its skills, and @ lists your other machines and the machine's models. What you pick goes into the
 -- box as text, the way T3's own composer writes it, and T3 finds it there. MCP doesn't say what
--- a provider offers, so inbox.picks comes from T3's cache on this PC ({ e = machine, pv =
+-- a provider offers, so inbox.picks comes from T3's cache on this computer ({ e = machine, pv =
 -- provider, c = { { n = name, d = description, c = runs as /name, s = runs as $name } } });
 -- other machines have no list. Each update costs one of the session's 200, so the list comes
 -- once and is filtered here. It follows the end of the text only: where the game counts the

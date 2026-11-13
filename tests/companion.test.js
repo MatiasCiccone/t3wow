@@ -60,20 +60,22 @@ return "ok"
   );
 });
 
-// The Mac companion (`t3wow`, run in Terminal) has no tray menu, and releases carry only
-// the Windows one: a newer t3wow is put in place by hand.
-test("on a Mac an older companion says to put a newer t3wow in place, not to use a tray", () => {
+// On a Mac the companion is the T3 WoW app in the menu bar, not a tray, and it updates
+// itself from there as Windows' does from the tray.
+test("on a Mac an older companion says to update it from its menu bar icon, not a tray", () => {
   assert.equal(
     run(
       `
 inbox("0.9.1")
 assert(companionPill(), "the pill doesn't say it")
-assert(UI.StatusLines()[1] == "|cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): put a newer t3wow in place|r", hover())
-assert(printed[#printed] == "|cff8f8fffT3 WoW|r |cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): put a newer t3wow in place.|r", printed[#printed])
-assert(hover():find("~Put a newer t3wow in place, then restart it (Ctrl+C where it runs, then start it again).", 1, true), hover())
-assert(not hover():find("tray", 1, true) and not printed[#printed]:find("tray", 1, true), "a tray is mentioned on a Mac")
+assert(UI.StatusLines()[1] == "|cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): update it from its menu bar icon|r", hover())
+assert(printed[#printed] == "|cff8f8fffT3 WoW|r |cffff8000T3 WoW companion 0.9.1 is older than this addon (0.9.2): update it from its menu bar icon (click T3 WoW's icon in the menu bar: Check for updates).|r", printed[#printed])
+assert(hover():find("~Click T3 WoW's T3 icon in the menu bar: Check for updates, then Update.", 1, true), hover())
+for _, said in ipairs({ hover(), printed[#printed] }) do
+  assert(not said:find("tray", 1, true) and not said:find("t3wow", 1, true) and not said:find("Ctrl+C", 1, true), "a tray or a bare t3wow is mentioned on a Mac: " .. said)
+end
 inbox(nil)
-assert(UI.StatusLines()[1] == "|cffff8000The T3 WoW companion is older than this addon (0.9.2): put a newer t3wow in place|r", hover())
+assert(UI.StatusLines()[1] == "|cffff8000The T3 WoW companion is older than this addon (0.9.2): update it from its menu bar icon|r", hover())
 return "ok"
 `,
       "0.9.2",
