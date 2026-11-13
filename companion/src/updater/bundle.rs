@@ -173,10 +173,12 @@ fn stage(staging: &Path, zip: &[u8], unzip: &dyn Fn(&Path, &Path) -> Result<(), 
     Ok(new_app.clone())
 }
 
-/// What to add when macOS refuses to move or replace the app.
+/// What to add when macOS refuses to move or replace the app. App Management (macOS 13 and
+/// later) guards app bundles, and macOS doesn't ask about it for an app like this one: it
+/// refuses, and shows a notification that names the app.
 fn refused_hint(error: &io::Error) -> &'static str {
     if error.kind() == io::ErrorKind::PermissionDenied {
-        " (if macOS asked whether T3 WoW may manage apps, allow it in System Settings › Privacy & Security › App Management, then update again)"
+        " (if macOS said T3 WoW was prevented from modifying apps, turn T3 WoW on in System Settings › Privacy & Security › App Management, adding it with + if it isn't listed, then update again; or download the new T3 WoW.app from the releases page)"
     } else {
         ""
     }
