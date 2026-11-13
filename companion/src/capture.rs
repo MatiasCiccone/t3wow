@@ -339,9 +339,28 @@ mod mac {
     const UNKNOWN_SCALE: u32 = 2;
     const WINDOW_LIST_ALL: u32 = 0;
 
-    pub const PERMISSION_HELP: &str = "T3 WoW can't see the game: macOS hasn't given it Screen Recording permission. \
+    /// What to do when macOS refuses the capture: in the app, and for a bare t3wow. The app
+    /// has its own switch, named T3 WoW, and the capture picks a new grant up without a
+    /// restart. An update is a new program to macOS (ad hoc signed), so the switch an earlier
+    /// copy had may show as on and still not count until it is turned off and on. A bare
+    /// t3wow is allowed through the app it runs in, which only sees a grant once restarted.
+    const PERMISSION_HELP: (&str, &str) = (
+        "T3 WoW can't see the game: macOS hasn't given it Screen Recording permission. \
+        Open System Settings > Privacy & Security > Screen & System Audio Recording and turn on T3 WoW. \
+        After an update of T3 WoW, macOS may need its switch turned off and on again.",
+        "T3 WoW can't see the game: macOS hasn't given it Screen Recording permission. \
         Open System Settings > Privacy & Security > Screen & System Audio Recording, turn on the app you run t3wow from \
-        (Terminal, when you run it there), then quit that app completely, open it again and run t3wow again.";
+        (Terminal, when you run it there), then quit that app completely, open it again and run t3wow again.",
+    );
+
+    /// PERMISSION_HELP's text for the app (`in_app`) or for a bare t3wow.
+    pub fn permission_help(in_app: bool) -> &'static str {
+        if in_app {
+            PERMISSION_HELP.0
+        } else {
+            PERMISSION_HELP.1
+        }
+    }
     const NO_STRIP_YET: &str = "WoW is running but T3 WoW's strip isn't in view yet: log in to a character (or /reload), and keep other windows off the game's top-left corner.";
 
     #[repr(C)]
@@ -908,7 +927,7 @@ mod mac {
             match read {
                 Read::Failed(GrabError::Permission) if !self.told_permission => {
                     self.told_permission = true;
-                    Some(PERMISSION_HELP.to_string())
+                    Some(permission_help(crate::updater::running_app().is_some()).to_string())
                 }
                 Read::Failed(GrabError::Failed(text)) if self.last_failure.as_ref() != Some(text) => {
                     self.last_failure = Some(text.clone());
@@ -1290,12 +1309,27 @@ mod mac {
             assert_eq!(empty.read(Some(WINDOW), Instant::now()).0, Read::NoStrip);
         }
 
+        /// The app names its own switch, T3 WoW, and the off-and-on an update can need; a bare
+        /// t3wow names Terminal, whose restart it needs.
+        #[test]
+        fn the_permission_help_names_the_app_or_terminal() {
+            let app = permission_help(true);
+            assert!(app.contains("System Settings > Privacy & Security > Screen & System Audio Recording"), "{app}");
+            assert!(app.contains("turn on T3 WoW"), "{app}");
+            assert!(app.contains("After an update of T3 WoW, macOS may need its switch turned off and on again"), "{app}");
+            assert!(!app.contains("Terminal") && !app.contains("t3wow") && !app.contains("again and run"), "{app}");
+            let bare = permission_help(false);
+            assert!(bare.contains("Screen & System Audio Recording") && bare.contains("Terminal"), "{bare}");
+            assert!(bare.contains("quit that app completely"), "{bare}");
+        }
+
         #[test]
         fn each_problem_is_told_once_and_the_strip_ends_the_no_strip_notice() {
             let mut report = Report::default();
             assert_eq!(report.on(&Read::NotCapturable), None);
             let help = report.on(&Read::Failed(GrabError::Permission)).unwrap();
             assert!(help.contains("Screen & System Audio Recording"), "{help}");
+            assert_eq!(help, permission_help(false), "the tests run as a bare t3wow");
             for _ in 0..5 {
                 assert_eq!(report.on(&Read::Failed(GrabError::Permission)), None, "not once per frame");
             }
