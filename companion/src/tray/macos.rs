@@ -690,8 +690,9 @@ mod tests {
         // 36 pixels of glyph: 18 points at 2x, with room above and below in the 22-point bar.
         assert_eq!(rows.len(), 36, "{rows:?}");
         assert!(rows[0] >= 4 && *rows.last().unwrap() <= 40, "{rows:?}");
-        // Black with alpha only: a template image takes its shape from the alpha alone.
-        assert!(rgba.chunks(4).all(|px| px[..3] == [0, 0, 0] && (px[3] == 0 || px[3] == 255)));
+        // Black with alpha only: a template image takes its shape from the alpha alone (soft
+        // edges included, which keep the ring round at this size).
+        assert!(rgba.chunks(4).all(|px| px[..3] == [0, 0, 0]));
         let _ = icon();
     }
 
