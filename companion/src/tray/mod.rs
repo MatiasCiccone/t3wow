@@ -414,10 +414,10 @@ impl Tray {
                 // A bare t3wow on a Mac can't install it: the release's page, to download the app.
                 #[cfg(target_os = "macos")]
                 Update::Available(_) if !self.installs => platform::open_url(&crate::updater::releases_page()),
-                // The Mac app: macOS will ask for the Keychain and Screen Recording again.
+                // The Mac app says it restarts, and what carries over.
                 #[cfg(target_os = "macos")]
                 Update::Available(release) => {
-                    if platform::confirm(&format!("Update T3 WoW to {}?", release.version), platform::UPDATE_REGRANT) {
+                    if platform::confirm(&format!("Update T3 WoW to {}?", release.version), platform::UPDATE_CONFIRM) {
                         app.install_update(release, || relaunch());
                     }
                 }

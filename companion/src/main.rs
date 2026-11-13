@@ -208,7 +208,7 @@ const NO_LOCAL_T3: &str = "T3: not running on this Mac";
 #[cfg(not(target_os = "macos"))]
 const UPDATED: &str = "Updated. Restart T3 WoW (Quit from its tray menu, then start it again), then restart WoW if it is running: /reload does not load new addon files.";
 #[cfg(target_os = "macos")]
-const UPDATED: &str = "Updated. Restart T3 WoW (Quit T3 WoW from its menu bar icon, then open it again); macOS asks again for the Keychain (your login password, then Always Allow) and Screen Recording. Then restart WoW if it is running: /reload does not load new addon files.";
+const UPDATED: &str = "Updated. Restart T3 WoW (Quit T3 WoW from its menu bar icon, then open it again), then restart WoW if it is running: /reload does not load new addon files.";
 
 fn wow_dir(args: &Args, config: &Config) -> Result<PathBuf, String> {
     let dir = match &args.wow {

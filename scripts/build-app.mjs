@@ -87,6 +87,6 @@ writeFileSync(`${zip}.sha256`, checksumFile(hex));
 const mb = (file) => (statSync(file).size / 1024 / 1024).toFixed(1);
 console.log(`Built ${relative(ROOT, app)} (${version}, program ${mb(program)} MB) and ${relative(ROOT, zip)} (${mb(zip)} MB, sha256 ${hex}).`);
 if (IDENTITY === "-") {
-  console.log("Signed ad hoc: macOS asks for the Keychain and Screen Recording again after each update, and Gatekeeper blocks it once when downloaded");
+  console.log("Signed ad hoc: macOS asks for Screen Recording again after each update, and Gatekeeper blocks it once when downloaded");
   console.log("(System Settings > Privacy & Security > Open Anyway). Set T3WOW_CODESIGN_IDENTITY to sign with a certificate.");
 }
