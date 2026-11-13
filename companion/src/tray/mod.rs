@@ -1,15 +1,16 @@
 //! The system tray icon and its menu. The menu is the same everywhere; each platform's shell
-//! (windows.rs) runs the main thread's loop and calls `Tray::tick` twice a second, and the
-//! work happens in app::run on a background thread. Every action chosen here says how it
-//! went: a notification (start, success, failure), the menu's activity line and tooltip
-//! while it runs, or a message box where an answer is needed.
+//! (windows.rs, macos.rs) runs the main thread's loop and calls `Tray::tick` twice a second,
+//! and the work happens in app::run on a background thread. Every action chosen here says
+//! how it went: a notification (start, success, failure), the menu's activity line and
+//! tooltip while it runs, or a message box where an answer is needed.
 //!
 //! What differs by platform comes from `platform`, one module per system with the same
 //! names in each: `run` (the loop), `notify`, `confirm`, `ask_origin`, `open_path`,
 //! `autostart_enabled` and `set_autostart`, and the texts that name the system
 //! (`THIS_MACHINE`, `AUTOSTART`, `AUTOSTART_ON`, `AUTOSTART_OFF`, `NOT_A_CLIENT`). A module
 //! rather than a trait: there is one shell per build, so nothing would ever choose between
-//! two, and the texts can stay plain constants.
+//! two, and the texts can stay plain constants. A Mac's shell also draws the menu bar icon
+//! (`icon`, a template image) and adds the permission items (`Help`) below the WoW line.
 
 use crate::app::{self, App, Control, Level, Notice, Status, Update};
 use crate::config::{canonical_origin, server_label, Config, Trust, UpdateChecks, UpdateInterval};
@@ -19,14 +20,27 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+#[cfg(windows)]
+use tray_icon::Icon;
+use tray_icon::{TrayIcon, TrayIconBuilder};
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
+#[cfg(target_os = "macos")]
+use self::macos as platform;
 #[cfg(windows)]
 use self::windows as platform;
 
+/// A message box while the menu bar runs (main.rs's `message_box`).
+#[cfg(target_os = "macos")]
+pub use platform::message;
 pub use platform::run;
+
+/// Choosing Update installs it: releases carry the Windows program alone, so a Mac's menu
+/// opens the release's page instead.
+const INSTALLS_UPDATES: bool = cfg!(not(target_os = "macos"));
 
 /// Between two notifications, so one doesn't replace the other before it's read.
 const NOTICE_GAP: Duration = Duration::from_secs(2);
@@ -53,8 +67,9 @@ fn match_interface(app: &App) {
         crate::message_box(
             "T3 WoW",
             &format!(
-                "Couldn't read WoW's interface version in {}.\n\nIn the game, /dump select(4, GetBuildInfo()) prints it; then run this in a terminal:\nt3wow.exe install --interface <number>",
-                dir.display()
+                "Couldn't read WoW's interface version in {}.\n\nIn the game, /dump select(4, GetBuildInfo()) prints it; then run this in a terminal:\n{} install --interface <number>",
+                dir.display(),
+                crate::BIN
             ),
         );
         return;
@@ -87,6 +102,7 @@ fn match_interface(app: &App) {
     }
 }
 
+#[cfg(windows)]
 fn icon() -> Icon {
     Icon::from_rgba(include_bytes!("../../assets/tray-32.rgba").to_vec(), 32, 32).expect("tray icon")
 }
@@ -103,13 +119,15 @@ fn tooltip(activity: Option<&str>, status: &Status) -> String {
     tip.chars().take(127).collect()
 }
 
-/// The update item's text for each state of the update, with this companion's version.
-fn update_text(update: &Update, current: &str) -> String {
+/// The update item's text for each state of the update, with this companion's version;
+/// `installs`: choosing it installs the release (else it opens the release's page).
+fn update_text(update: &Update, current: &str, installs: bool) -> String {
     match update {
         Update::NotChecked => "Check for updates".to_string(),
         Update::Checking => "Checking for updates…".to_string(),
         Update::UpToDate => format!("Up to date ({current}): check again"),
-        Update::Available(release) => format!("Update to {} (now {current})", release.version),
+        Update::Available(release) if installs => format!("Update to {} (now {current})", release.version),
+        Update::Available(release) => format!("{} is out (now {current}): open the download page", release.version),
         Update::Installing(version) => format!("Updating to {version}…"),
         Update::Failed(_) => "Update check failed: try again".to_string(),
     }
@@ -179,6 +197,9 @@ pub struct Tray {
     interval_items: Vec<(UpdateInterval, CheckMenuItem)>,
     manual_only: CheckMenuItem,
     quit: MenuItem,
+    /// A Mac's permission items, shown below the WoW line while they apply.
+    #[cfg(target_os = "macos")]
+    help: platform::Help,
     shown_update: Option<Update>,
     shown_checks: Option<UpdateChecks>,
     checks_read: Instant,
@@ -257,8 +278,13 @@ impl Tray {
             let app = app.clone();
             std::thread::Builder::new().name("update checks".into()).spawn(move || app::watch_for_updates(app)).expect("update checks thread");
         }
-        let icon = TrayIconBuilder::new()
-            .with_icon(icon())
+        let builder = TrayIconBuilder::new();
+        #[cfg(windows)]
+        let builder = builder.with_icon(icon());
+        // Drawn from its alpha alone, in the menu bar's colour, light or dark.
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(platform::icon());
+        let icon = builder
             .with_tooltip("T3 WoW")
             .with_menu(Box::new(menu.clone()))
             .with_menu_on_left_click(true)
@@ -291,6 +317,8 @@ impl Tray {
             interval_items,
             manual_only,
             quit,
+            #[cfg(target_os = "macos")]
+            help: platform::Help::new(),
             shown_update: None,
             shown_checks: Some(checks_now),
             checks_read: Instant::now(),
@@ -327,6 +355,10 @@ impl Tray {
     /// Does what the menu item `id` stands for.
     fn choose(&mut self, id: MenuId) -> Tick {
         let app = &self.app;
+        #[cfg(target_os = "macos")]
+        if self.help.choose(&id, app) {
+            return Tick::Stay;
+        }
         if id == *self.quit.id() {
             log::line("Quit from the tray.");
             return Tick::Quit;
@@ -359,6 +391,10 @@ impl Tray {
         } else if id == *self.updates.id() {
             let state = app.update.lock().unwrap().clone();
             match state {
+                // A Mac can't install it: the release's page, to put it in place by hand.
+                #[cfg(target_os = "macos")]
+                Update::Available(_) => platform::open_url(&crate::updater::releases_page()),
+                #[cfg(not(target_os = "macos"))]
                 Update::Available(release) => app.install_update(release, || relaunch()),
                 Update::Checking | Update::Installing(_) => {}
                 _ => app.check_updates(true),
@@ -405,6 +441,8 @@ impl Tray {
             self.autostart.set_checked(platform::autostart_enabled());
         } else if id == *self.wow_folder.id() {
             let start = app.wow_dir.lock().unwrap().clone();
+            #[cfg(target_os = "macos")]
+            platform::bring_to_front();
             let mut dialog = rfd::FileDialog::new().set_title("Choose your World of Warcraft _forever_ folder");
             if let Some(start) = start {
                 dialog = dialog.set_directory(start);
@@ -429,7 +467,7 @@ impl Tray {
         let app = &self.app;
         let update = app.update.lock().unwrap().clone();
         if self.shown_update.as_ref() != Some(&update) {
-            self.updates.set_text(update_text(&update, crate::updater::current_version()));
+            self.updates.set_text(update_text(&update, crate::updater::current_version(), INSTALLS_UPDATES));
             self.updates.set_enabled(update_enabled(&update));
             self.shown_update = Some(update);
         }
@@ -473,6 +511,8 @@ impl Tray {
                 let _ = self.menu.insert(&self.activity_line, 0);
             }
         }
+        #[cfg(target_os = "macos")]
+        self.help.refresh(&self.menu, &self.wow_line);
         if status != self.shown || activity != self.shown_activity {
             self.t3_line.set_text(&status.t3);
             self.wow_line.set_text(&status.wow);
@@ -517,9 +557,21 @@ mod tests {
             (Update::Failed("timed out".into()), "Update check failed: try again", true),
         ];
         for (update, text, enabled) in cases {
-            assert_eq!(update_text(&update, "0.10.0"), text);
+            assert_eq!(update_text(&update, "0.10.0", true), text);
             assert_eq!(update_enabled(&update), enabled, "{update:?}");
         }
+    }
+
+    /// A Mac can't install a release (it carries the Windows program alone): the item says
+    /// it's out and opens its page; every other state reads as on Windows.
+    #[test]
+    fn where_updates_dont_install_the_item_says_the_release_is_out() {
+        let release = Release { version: "0.11.0".into(), exe_url: String::new(), sha_url: String::new(), sig_url: None };
+        assert_eq!(update_text(&Update::Available(release), "0.10.0", false), "0.11.0 is out (now 0.10.0): open the download page");
+        for update in [Update::NotChecked, Update::Checking, Update::UpToDate, Update::Installing("0.11.0".into()), Update::Failed("x".into())] {
+            assert_eq!(update_text(&update, "0.10.0", false), update_text(&update, "0.10.0", true));
+        }
+        assert_eq!(INSTALLS_UPDATES, !cfg!(target_os = "macos"));
     }
 
     #[test]

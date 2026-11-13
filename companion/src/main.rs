@@ -1,14 +1,15 @@
 //! T3 WoW companion: brings T3 Code into World of Warcraft: Forever.
 //!
-//! Double-clicked, it lives in the system tray: finds WoW, keeps the addon files in place,
+//! Double-clicked (on a Mac, started without a command), it lives in the system tray or the
+//! menu bar: finds WoW, keeps the addon files in place,
 //! signs in to T3 when needed, and carries commands and updates between the two.
 //! With a command (`t3wow.exe status`, `install`, ...) it works as a console tool.
 
 // Release builds have no console window; commands attach to the one they were run from.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-// Off Windows the key watcher, clipboard paste, update menu and tray aren't built yet, which
-// leaves what only they use unused.
+// Off Windows the key watcher and clipboard paste aren't built (and off Windows and macOS
+// the tray), which leaves what only they use unused.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod app;
 mod bridge;
@@ -31,7 +32,7 @@ mod render;
 mod slots;
 mod snooze;
 mod t3;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod tray;
 mod updater;
 mod wow;
@@ -53,6 +54,11 @@ pub fn message_box(title: &str, text: &str) {
     }
     #[cfg(not(windows))]
     eprintln!("{title}: {text}");
+    // The menu bar app has no terminal anyone reads: an alert too.
+    #[cfg(target_os = "macos")]
+    if app::menu_bar() {
+        tray::message(title, text);
+    }
 }
 
 /// One companion at a time: two would both write the slot files.
@@ -162,7 +168,7 @@ const BIN: &str = if cfg!(windows) { "t3wow.exe" } else { "t3wow" };
 #[cfg(not(windows))]
 const HELP: &str = "t3wow: T3 Code inside World of Warcraft: Forever
 
-  t3wow                start the companion
+  t3wow                start the companion in the menu bar
   t3wow run            run in this terminal instead, logging here
   t3wow install        [--wow <_forever_ folder>] [--interface 16001]   reinstall the addon from scratch
   t3wow login          [--origin http://<host>:<port> | local]          sign in to T3 again (local: the T3 on this Mac)
@@ -186,15 +192,15 @@ const NO_WOW: &str = "Could not find WoW: Forever. Pass --wow \"C:\\...\\World o
 #[cfg(target_os = "macos")]
 const NO_WOW: &str = "Could not find WoW: Forever. Pass --wow \"/Applications/World of Warcraft/_forever_\".";
 
-// The Mac companion has no tray icon yet: it runs where it was started, in a terminal.
+// On a Mac the other one may be in the menu bar, or `t3wow run` in a Terminal window.
 #[cfg(not(target_os = "macos"))]
 const ALREADY_RUNNING: &str = "T3 WoW is already running. Look for its icon in the system tray (next to the clock).";
 #[cfg(target_os = "macos")]
-const ALREADY_RUNNING: &str = "T3 WoW is already running (another t3wow, in a Terminal window).";
+const ALREADY_RUNNING: &str = "T3 WoW is already running. Look for its T3 icon in the menu bar, or a t3wow in a Terminal window.";
 #[cfg(not(target_os = "macos"))]
 const ALREADY_RUNNING_HERE: &str = "T3 WoW is already running (see the system tray).";
 #[cfg(target_os = "macos")]
-const ALREADY_RUNNING_HERE: &str = "T3 WoW is already running (another t3wow, in a Terminal window).";
+const ALREADY_RUNNING_HERE: &str = "T3 WoW is already running (its T3 icon in the menu bar, or another t3wow in a Terminal window).";
 #[cfg(not(target_os = "macos"))]
 const NO_LOCAL_T3: &str = "T3: not running on this PC";
 #[cfg(target_os = "macos")]
@@ -343,8 +349,10 @@ fn command(args: Args) -> Result<(), String> {
 fn main() {
     let args = parse_args();
     match args.command.as_deref() {
-        // Double-clicked: the tray app.
+        // Double-clicked: the tray app (on a Mac, the menu bar app).
         None => {
+            #[cfg(target_os = "macos")]
+            app::set_menu_bar();
             log::init(false);
             if !single_instance::acquire() {
                 message_box("T3 WoW", ALREADY_RUNNING);
@@ -355,9 +363,9 @@ fn main() {
             let app = app::App::new();
             let worker = app.clone();
             std::thread::Builder::new().name("companion".into()).spawn(move || app::run(worker)).expect("worker thread");
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             tray::run(app);
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             loop {
                 std::thread::park();
             }

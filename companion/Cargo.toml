@@ -26,9 +26,12 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 ureq = { version = "3", features = ["json"] }
 
-[target.'cfg(windows)'.dependencies]
+# The tray icon and its menu, and the folder picker: Windows' tray, a Mac's menu bar.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rfd = "0.17"
 tray-icon = "0.26"
+
+[target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
@@ -60,10 +63,25 @@ libc = "0.2"
 block2 = "=0.6.2"
 dispatch2 = { version = "=0.3.1", default-features = false, features = ["std", "block2", "objc2"] }
 objc2 = "=0.6.5"
+# The menu bar app (src/tray/macos.rs): its run loop, timer and alerts.
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "NSAlert",
+  "NSApplication",
+  "NSButton",
+  "NSControl",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSText",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
+] }
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMBase", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSString"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSBundle", "NSDate", "NSEnumerator", "NSError", "NSGeometry", "NSRunLoop", "NSString", "NSThread", "NSTimer"] }
 objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
   "std",
   "SCShareableContent",

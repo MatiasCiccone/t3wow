@@ -271,8 +271,7 @@ pub fn ensure() {
     keyring().ensure();
 }
 
-/// Asks the Keychain again after a refusal, for the menu item a later phase adds.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Asks the Keychain again after a refusal: the menu bar's Try the Keychain again.
 pub fn retry() {
     keyring().retry();
 }
