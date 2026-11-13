@@ -75,10 +75,27 @@ export function outDirFromMessages(stdout) {
  * codesign's arguments. `identity` "-" is ad hoc (no certificate). The hardened runtime is on:
  * the companion loads only system frameworks, so library validation costs nothing, and a
  * Developer ID build needs it for notarization. No secure timestamp unless asked for (it
- * needs Apple's timestamp server and a real certificate).
+ * needs Apple's timestamp server and a real certificate). `keychain` limits the search for the
+ * identity to that keychain, so a copy of the certificate elsewhere can't make it ambiguous.
  */
-export function codesignArgs(identity, app, { timestamp = false } = {}) {
-  return ["--force", "--options", "runtime", timestamp ? "--timestamp" : "--timestamp=none", "--sign", identity, app];
+export function codesignArgs(identity, app, { timestamp = false, keychain } = {}) {
+  const only = keychain && identity !== "-" ? ["--keychain", keychain] : [];
+  return ["--force", "--options", "runtime", timestamp ? "--timestamp" : "--timestamp=none", ...only, "--sign", identity, app];
+}
+
+/** How long codesign may take before the build gives up: a signing takes about a second. */
+export const CODESIGN_TIMEOUT_MS = 120_000;
+
+/**
+ * What to say when codesign didn't finish in time: it is waiting on a keychain dialog (the key
+ * needs permission, or the keychain is locked), which nobody answers on a CI runner.
+ */
+export function codesignTimeoutMessage(identity, keychain) {
+  return (
+    `codesign didn't finish within ${CODESIGN_TIMEOUT_MS / 1000} seconds signing with "${identity}"${keychain ? ` from ${keychain}` : ""}: ` +
+    "it is most likely waiting on a keychain dialog. Unlock the keychain (security unlock-keychain) and let codesign use the key without asking " +
+    "(security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k <password> <keychain>), then build again."
+  );
 }
 
 /** The iconset iconutil wants, from one square picture: [file name, pixels]. */

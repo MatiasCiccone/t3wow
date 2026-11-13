@@ -177,3 +177,45 @@ test("the Mac app is built on the Mac runner, and its checksum is signed and pub
   // Signing happens once both builds are in, before the release is published.
   assert.ok(publish.indexOf("- name: Sign the checksum") < publish.indexOf("softprops/action-gh-release"));
 });
+
+test("the Mac app is signed with the certificate from a keychain made for the job, which is removed afterwards", () => {
+  const workflow = readText("../.github/workflows/release.yml");
+  const at = workflow.indexOf("\n  build-macos:\n");
+  const job = workflow.slice(at, workflow.indexOf("\n  publish:\n"));
+  const step = (name) => {
+    const found = job.indexOf(`- name: ${name}\n`);
+    assert.notEqual(found, -1, `no "${name}" step`);
+    return found;
+  };
+  const body = (name) => job.slice(step(name)).split(/\n      - /)[0];
+  assert.match(job, /MAC_CERT: \$\{\{ secrets\.T3WOW_MACOS_CERT_P12 != '' \}\}/);
+  assert.match(job, /T3WOW_CODESIGN_IDENTITY: \$\{\{ vars\.T3WOW_CODESIGN_IDENTITY \|\| '-' \}\}/);
+  // The order: the check, the keychain, the build, the checks on what was built, then cleanup.
+  assert.ok(step("Tests (addon Lua and companion, on macOS)") < step("Mac signing certificate"));
+  assert.ok(step("Mac signing certificate") < step("Signing keychain"));
+  assert.ok(step("Signing keychain") < step("Build T3 WoW.app"));
+  assert.ok(step("Build T3 WoW.app") < step("The app is this version"));
+  assert.ok(job.indexOf("actions/upload-artifact") < step("Remove the signing keychain"));
+  // A certificate named without its secret fails rather than going ad hoc; it runs every time.
+  const check = body("Mac signing certificate");
+  assert.doesNotMatch(check, /\n\s+if:/);
+  assert.match(check, /"\$MAC_CERT" != "true" \] && \[ "\$T3WOW_CODESIGN_IDENTITY" != "-" \]; then\n[^\n]*::error::[^\n]*\n\s+exit 1/);
+  assert.match(check, /"\$MAC_CERT" = "true" \] && \[ "\$T3WOW_CODESIGN_IDENTITY" = "-" \]; then\n[^\n]*::error::[^\n]*\n\s+exit 1/);
+  // The keychain: gated on the secret, a password made in the job and masked, codesign allowed.
+  const keychain = body("Signing keychain");
+  assert.match(keychain, /^- name: Signing keychain\n\s+if: env\.MAC_CERT == 'true'\n/);
+  const order = ["password=$(openssl rand", "::add-mask::$password", "security create-keychain -p \"$password\"", "security import", "security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k \"$password\"", "security list-keychains -d user -s", "T3WOW_CODESIGN_KEYCHAIN="];
+  for (let i = 1; i < order.length; i++) {
+    assert.ok(keychain.indexOf(order[i - 1]) !== -1 && keychain.indexOf(order[i - 1]) < keychain.indexOf(order[i]), `${order[i - 1]} before ${order[i]}`);
+  }
+  assert.match(keychain, /security import "\$p12" [^\n]*-T \/usr\/bin\/codesign/);
+  assert.match(keychain, /rm -f "\$p12"/);
+  assert.doesNotMatch(keychain, /echo "\$(CERT_P12|CERT_PASSWORD|password)"/, "no secret is echoed");
+  // The certificate, not a cdhash, is what the app's designated requirement names.
+  assert.match(body("The app is this version"), /certificate leaf = H/);
+  // Cleanup runs even after a failure, and puts the search list back.
+  const cleanup = body("Remove the signing keychain");
+  assert.match(cleanup, /^- name: Remove the signing keychain\n\s+if: always\(\) && env\.MAC_CERT == 'true'\n/);
+  assert.match(cleanup, /security list-keychains -d user -s/);
+  assert.match(cleanup, /security delete-keychain/);
+});

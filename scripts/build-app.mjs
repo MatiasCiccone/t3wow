@@ -6,8 +6,10 @@
 // ("<sha-256>  t3wow-macos-arm64.zip", no newline, as for t3wow.exe). The release workflow
 // signs that checksum file with scripts/sign-release.mjs, as for Windows.
 //
-// The app is code signed with T3WOW_CODESIGN_IDENTITY (a certificate's name in the keychain),
-// or ad hoc ("-", the default) without one. T3WOW_CODESIGN_TIMESTAMP=1 adds a secure
+// The app is code signed with T3WOW_CODESIGN_IDENTITY (a certificate's name or SHA-1 in the
+// keychain), or ad hoc ("-", the default) without one. T3WOW_CODESIGN_KEYCHAIN looks for it in
+// that keychain only (the release workflow's own). codesign gets two minutes: past that it is
+// waiting on a keychain dialog, and the build fails rather than hang. T3WOW_CODESIGN_TIMESTAMP=1 adds a secure
 // timestamp (needs the network and a real certificate). T3WOW_RELEASE=1, as for the exe, gives
 // the plain version ("0.10.0"); any other build names its commit (companion/build.rs).
 //
@@ -20,11 +22,12 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_NAME, checksumFile, codesignArgs, EXECUTABLE, ICONSET, infoPlist, outDirFromMessages, ZIP_NAME } from "./app-bundle.mjs";
+import { APP_NAME, checksumFile, CODESIGN_TIMEOUT_MS, codesignArgs, codesignTimeoutMessage, EXECUTABLE, ICONSET, infoPlist, outDirFromMessages, ZIP_NAME } from "./app-bundle.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = process.env.T3WOW_DIST ?? join(ROOT, "dist");
 const IDENTITY = process.env.T3WOW_CODESIGN_IDENTITY || "-";
+const KEYCHAIN = process.env.T3WOW_CODESIGN_KEYCHAIN || undefined;
 // One picture for every size: the logo on a full square of deep blue, 1024 pixels. macOS 26 draws
 // every app icon as a rounded square and puts a round one like the logo on a light tile, so the
 // icon brings its own background.
@@ -74,7 +77,18 @@ try {
 
 // Extended attributes (Finder info, quarantine) would fail codesign's strict check.
 run("/usr/bin/xattr", ["-cr", app]);
-run("/usr/bin/codesign", codesignArgs(IDENTITY, app, { timestamp: process.env.T3WOW_CODESIGN_TIMESTAMP === "1" }));
+try {
+  run("/usr/bin/codesign", codesignArgs(IDENTITY, app, { timestamp: process.env.T3WOW_CODESIGN_TIMESTAMP === "1", keychain: KEYCHAIN }), {
+    timeout: CODESIGN_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
+} catch (error) {
+  if (error.code === "ETIMEDOUT" || error.signal === "SIGKILL") {
+    console.error(codesignTimeoutMessage(IDENTITY, KEYCHAIN));
+    process.exit(1);
+  }
+  throw error;
+}
 run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", app]);
 
 // The release's zip: the app as Finder would zip it, without extended attributes.
