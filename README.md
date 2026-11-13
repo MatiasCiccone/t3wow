@@ -180,6 +180,7 @@ npm ci
 npm test            # the addon's Lua (in fengari), release signing, and the companion (cargo test)
 npm run test:live   # the companion and the addon against the real T3 you're signed in to (see below)
 npm run build:exe   # dist/t3wow.exe, Windows only
+npm run build:app   # dist/T3 WoW.app and its release zip, Mac only
 npm run screenshots # redraws assets/screenshots from the addon's code (needs Chrome)
 ```
 
@@ -207,7 +208,11 @@ Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against ano
 - `T3WOW_SIGN_PFX` (and `T3WOW_SIGN_PASSWORD`): a `.pfx` file.
 - `T3WOW_SIGN_DLIB` and `T3WOW_SIGN_METADATA`: Azure Trusted Signing's dlib and its `metadata.json`.
 
-Without one it builds unsigned, and Windows SmartScreen warns on first run. This code signing is separate from the release key below, which the updater checks; [docs/release-signing.md](docs/release-signing.md) compares the two and the certificate options.
+Without one it builds unsigned, and Windows SmartScreen warns on first run.
+
+`build:app` builds the Mac menu bar app: `dist/T3 WoW.app` (the release program in `Contents/MacOS/t3wow`, an Info.plist with the companion's version, an icon made from `assets/logo.png`), code signed with the hardened runtime, then `dist/t3wow-macos-arm64.zip` and its `.sha256`, which a release carries next to `t3wow.exe`'s. It signs with `T3WOW_CODESIGN_IDENTITY` (a certificate's name in your keychain), or ad hoc without one; signed ad hoc, macOS asks again for the Keychain and Screen Recording after every update. The app updates itself from releases (whole app swapped, under the same checksum and release key checks as the exe); a bare `t3wow` doesn't.
+
+This code signing is separate from the release key below, which the updater checks; [docs/release-signing.md](docs/release-signing.md) compares the two and the certificate options.
 
 **CI** (`.github/workflows/ci.yml`) runs the tests, clippy and a release build on Windows for every pull request, and attaches the built `t3wow.exe` to the run. It runs on the owner's self-hosted Windows runners (label `t3wow`), with that machine's Rust; releases (`release.yml`) run on GitHub's. Every action in the workflows is pinned to a commit SHA, and Dependabot keeps the pins current.
 

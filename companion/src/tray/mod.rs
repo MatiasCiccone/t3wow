@@ -39,10 +39,6 @@ use self::windows as platform;
 pub use platform::message;
 pub use platform::run;
 
-/// Choosing Update installs it: releases carry the Windows program alone, so a Mac's menu
-/// opens the release's page instead.
-const INSTALLS_UPDATES: bool = cfg!(not(target_os = "macos"));
-
 /// The log's line for Quit, naming where it was chosen.
 const QUIT_LINE: &str = if cfg!(target_os = "macos") { "Quit from the menu bar." } else { "Quit from the tray." };
 
@@ -50,8 +46,17 @@ const QUIT_LINE: &str = if cfg!(target_os = "macos") { "Quit from the menu bar."
 const NOTICE_GAP: Duration = Duration::from_secs(2);
 
 /// Starts a fresh copy of the companion (after the single-instance lock is released) and quits.
+/// On a Mac in the app, through Launch Services (`open -n`), as if opened from Finder: a new
+/// copy of the app (the running one is still there), the one now on disk after an update.
 fn relaunch() -> ! {
     crate::single_instance::release();
+    #[cfg(target_os = "macos")]
+    if let Some(app) = crate::updater::running_app() {
+        match std::process::Command::new("/usr/bin/open").arg("-n").arg(&app).status() {
+            Ok(status) if status.success() => std::process::exit(0),
+            other => log::line(&format!("Couldn't reopen {} ({other:?}); starting its program instead.", app.display())),
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
     }
@@ -201,6 +206,9 @@ pub struct Tray {
     interval_items: Vec<(UpdateInterval, CheckMenuItem)>,
     manual_only: CheckMenuItem,
     quit: MenuItem,
+    /// Choosing Update installs it (`updater::can_install`); else (a bare t3wow on a Mac) it
+    /// opens the release's page.
+    installs: bool,
     /// A Mac's permission items, shown below the WoW line while they apply.
     #[cfg(target_os = "macos")]
     help: platform::Help,
@@ -324,6 +332,7 @@ impl Tray {
             interval_items,
             manual_only,
             quit,
+            installs: crate::updater::can_install(),
             #[cfg(target_os = "macos")]
             help: platform::Help::new(),
             #[cfg(target_os = "macos")]
@@ -402,9 +411,16 @@ impl Tray {
         } else if id == *self.updates.id() {
             let state = app.update.lock().unwrap().clone();
             match state {
-                // A Mac can't install it: the release's page, to put it in place by hand.
+                // A bare t3wow on a Mac can't install it: the release's page, to download the app.
                 #[cfg(target_os = "macos")]
-                Update::Available(_) => platform::open_url(&crate::updater::releases_page()),
+                Update::Available(_) if !self.installs => platform::open_url(&crate::updater::releases_page()),
+                // The Mac app: macOS will ask for the Keychain and Screen Recording again.
+                #[cfg(target_os = "macos")]
+                Update::Available(release) => {
+                    if platform::confirm(&format!("Update T3 WoW to {}?", release.version), platform::UPDATE_REGRANT) {
+                        app.install_update(release, || relaunch());
+                    }
+                }
                 #[cfg(not(target_os = "macos"))]
                 Update::Available(release) => app.install_update(release, || relaunch()),
                 Update::Checking | Update::Installing(_) => {}
@@ -482,7 +498,7 @@ impl Tray {
         let app = &self.app;
         let update = app.update.lock().unwrap().clone();
         if self.shown_update.as_ref() != Some(&update) {
-            self.updates.set_text(update_text(&update, crate::updater::current_version(), INSTALLS_UPDATES));
+            self.updates.set_text(update_text(&update, crate::updater::current_version(), self.installs));
             self.updates.set_enabled(update_enabled(&update));
             self.shown_update = Some(update);
         }
@@ -580,8 +596,8 @@ mod tests {
         }
     }
 
-    /// A Mac can't install a release (it carries the Windows program alone): the item says
-    /// it's out and opens its page; every other state reads as on Windows.
+    /// A bare t3wow on a Mac can't install a release: the item says it's out and opens its
+    /// page; every other state reads as where it installs.
     #[test]
     fn where_updates_dont_install_the_item_says_the_release_is_out() {
         let release = Release { version: "0.11.0".into(), exe_url: String::new(), sha_url: String::new(), sig_url: None };
@@ -589,7 +605,8 @@ mod tests {
         for update in [Update::NotChecked, Update::Checking, Update::UpToDate, Update::Installing("0.11.0".into()), Update::Failed("x".into())] {
             assert_eq!(update_text(&update, "0.10.0", false), update_text(&update, "0.10.0", true));
         }
-        assert_eq!(INSTALLS_UPDATES, !cfg!(target_os = "macos"));
+        // Tests don't run in the Mac app: there, a bare program.
+        assert_eq!(crate::updater::can_install(), cfg!(windows));
     }
 
     #[test]
