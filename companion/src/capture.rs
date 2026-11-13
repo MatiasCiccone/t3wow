@@ -1439,6 +1439,27 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
         .expect("capture thread");
 }
 
+/// The last capture was refused for want of Screen Recording permission; cleared by the
+/// next capture that works. The menu bar shows its help while this holds.
+#[cfg(target_os = "macos")]
+static SCREEN_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// macOS refuses to let the companion see the game (no Screen Recording permission).
+#[cfg(target_os = "macos")]
+pub fn screen_refused() -> bool {
+    SCREEN_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a capture says about the permission: refused, granted, or nothing new.
+#[cfg(target_os = "macos")]
+fn screen_access(read: &mac::Read) -> Option<bool> {
+    match read {
+        mac::Read::Failed(mac::GrabError::Permission) => Some(true),
+        mac::Read::Cells(_) | mac::Read::NoStrip => Some(false),
+        mac::Read::NotCapturable | mac::Read::Failed(_) => None,
+    }
+}
+
 /// Watches for the WoW client in `client_folder` and sends what changes: the process
 /// starting or stopping, and each new strip. As on Windows, a look at the client and the
 /// strip four times a second, from one ScreenCaptureKit stream on the game's window. When
@@ -1506,6 +1527,9 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                     }
                     if let Some(line) = report.on(&read) {
                         crate::log::line(&line);
+                    }
+                    if let Some(refused) = screen_access(&read) {
+                        SCREEN_REFUSED.store(refused, std::sync::atomic::Ordering::Relaxed);
                     }
                     if let (Some(geometry), Some(frame)) = (reader.geometry(), window) {
                         if logged != Some((geometry, frame)) {
@@ -1589,6 +1613,16 @@ mod tests {
         assert!(search_due(Watch::Lost, Duration::ZERO));
         assert!(!search_due(Watch::Nothing, s(1)));
         assert!(search_due(Watch::Nothing, s(2)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_refused_capture_or_a_working_one_changes_the_permission_state() {
+        assert_eq!(screen_access(&mac::Read::Failed(mac::GrabError::Permission)), Some(true));
+        assert_eq!(screen_access(&mac::Read::Cells(vec![1])), Some(false));
+        assert_eq!(screen_access(&mac::Read::NoStrip), Some(false), "a capture without the strip still worked");
+        assert_eq!(screen_access(&mac::Read::NotCapturable), None, "no window: nothing was asked");
+        assert_eq!(screen_access(&mac::Read::Failed(mac::GrabError::Failed("timed out".into()))), None);
     }
 
     #[test]

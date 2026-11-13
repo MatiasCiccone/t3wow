@@ -14,6 +14,8 @@ use crate::updater::{self, Release, Step};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -93,6 +95,37 @@ pub struct App {
     announced: Mutex<Option<String>>,
 }
 
+/// A Mac's menu bar is up: set once by the menu bar app, never by `t3wow run`, whose
+/// companion has no menu and whose texts name its commands instead.
+#[cfg(target_os = "macos")]
+static MENU_BAR: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+pub fn set_menu_bar() {
+    MENU_BAR.store(true, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "macos")]
+pub fn menu_bar() -> bool {
+    MENU_BAR.load(Ordering::Relaxed)
+}
+
+/// A Mac's text, for the menu bar app or for `t3wow run` in Terminal (no menu); elsewhere the
+/// tray's one text.
+#[cfg(target_os = "macos")]
+fn shown(texts: (&'static str, &'static str)) -> &'static str {
+    if menu_bar() {
+        texts.0
+    } else {
+        texts.1
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn shown(text: &'static str) -> &'static str {
+    text
+}
+
 /// "T3 on this PC" / "T3 at http://box:3773", from `config::server_label`.
 pub fn t3_named(label: &str) -> String {
     if label == server_label(None) {
@@ -100,6 +133,18 @@ pub fn t3_named(label: &str) -> String {
     } else {
         format!("T3 at {label}")
     }
+}
+
+/// The notification when a new release is out: on Windows the tray installs it, on a Mac
+/// (releases carry only the Windows program) the menu bar opens its download page.
+#[cfg(not(target_os = "macos"))]
+fn update_out_text(version: &str, current: &str) -> String {
+    format!("T3 WoW {version} is out (you have {current}). Choose Update to {version} in the tray menu.")
+}
+
+#[cfg(target_os = "macos")]
+fn update_out_text(version: &str, current: &str) -> String {
+    format!("T3 WoW {version} is out (you have {current}). Choose “{version} is out” in the menu bar to open its download page.")
 }
 
 /// The tray's line while an update runs.
@@ -219,7 +264,7 @@ impl App {
                     let mut announced = app.announced.lock().unwrap();
                     if asked || announced.as_ref() != Some(&release.version) {
                         let v = &release.version;
-                        app.notify(Notice::new(Level::Info, "T3 WoW update", format!("T3 WoW {v} is out (you have {current}). Choose Update to {v} in the tray menu.")));
+                        app.notify(Notice::new(Level::Info, "T3 WoW update", update_out_text(v, current)));
                         *announced = Some(v.clone());
                     }
                     Update::Available(release)
@@ -376,7 +421,7 @@ fn signed_in_notice(connected: &t3::Connected) -> Notice {
     let title = if connected.read_only {
         level = Level::Warning;
         // The warning first: the plain-HTTP note after it may not fit.
-        text = format!("{} {text}", t3::READ_ONLY_NOTE.replace("Sign in again", SIGN_IN_AGAIN));
+        text = format!("{} {text}", t3::READ_ONLY_NOTE.replace("Sign in again", shown(SIGN_IN_AGAIN)));
         if connected.switched { "Switched T3, but the sign-in is read only" } else { "Signed in to T3, but read only" }
     } else {
         title
@@ -388,18 +433,19 @@ fn signed_in_notice(connected: &t3::Connected) -> Notice {
     Notice::new(level, title, text)
 }
 
-/// How a read-only sign-in is done again: the tray's Sign in to T3…, or on a Mac (no tray
-/// menu yet) `t3wow login`.
+/// How a read-only sign-in is done again: the tray's Sign in to T3…, or on a Mac the menu
+/// bar's, or (under `t3wow run`) `t3wow login`.
 #[cfg(not(target_os = "macos"))]
 const SIGN_IN_AGAIN: &str = "Choose Sign in to T3…";
 #[cfg(target_os = "macos")]
-const SIGN_IN_AGAIN: &str = "Run t3wow login";
+const SIGN_IN_AGAIN: (&str, &str) = ("Choose Sign in to T3… in the menu bar", "Run t3wow login");
 
 /// The tray menu's T3 line while the sign-in in use can only read.
 #[cfg(not(target_os = "macos"))]
 const READ_ONLY_LINE: &str = "T3: connected, but read only: choose Sign in to T3, pick Auto or Full access";
 #[cfg(target_os = "macos")]
-const READ_ONLY_LINE: &str = "T3: connected, but read only: run t3wow login, pick Auto or Full access";
+const READ_ONLY_LINE: (&str, &str) =
+    ("T3: connected, but read only: choose Sign in to T3, pick Auto or Full access", "T3: connected, but read only: run t3wow login, pick Auto or Full access");
 
 /// The automatic update checks, as the tray's Update checks set them: one when the companion
 /// starts, then one whenever the interval has passed since the last check (a check from the
@@ -595,15 +641,36 @@ fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) 
     }
 }
 
-// The Mac companion has no tray menu yet: its commands do what the menu's items do.
+// Under `t3wow run` a Mac's companion has no menu: its commands do what the menu's items do.
 #[cfg(not(target_os = "macos"))]
 const SIGN_IN_NEEDED: &str = "T3: sign-in needed (approve it in your browser, or choose Sign in to T3)";
 #[cfg(target_os = "macos")]
-const SIGN_IN_NEEDED: &str = "T3: sign-in needed (approve it in your browser, or run t3wow login)";
+const SIGN_IN_NEEDED: (&str, &str) =
+    ("T3: sign-in needed (approve it in your browser, or choose Sign in to T3)", "T3: sign-in needed (approve it in your browser, or run t3wow login)");
 #[cfg(not(target_os = "macos"))]
 const NO_LOCAL_T3: &str = "T3 Code isn't running on this PC: start it, or choose T3 server > Connect to T3 on another machine…";
 #[cfg(target_os = "macos")]
-const NO_LOCAL_T3: &str = "T3 Code isn't running on this Mac: start it, or connect to T3 on another machine with t3wow login --origin http://<host>:<port>";
+const NO_LOCAL_T3: (&str, &str) = (
+    "T3 Code isn't running on this Mac: start it, or choose T3 server > Connect to T3 on another machine…",
+    "T3 Code isn't running on this Mac: start it, or connect to T3 on another machine with t3wow login --origin http://<host>:<port>",
+);
+/// The WoW line while macOS won't let the companion see the game.
+#[cfg(target_os = "macos")]
+const SCREEN_OFF_LINE: (&str, &str) = (
+    "WoW: running, but T3 WoW can't see it: choose Open Screen Recording settings…",
+    "WoW: running, but T3 WoW can't see it: turn on Screen Recording for Terminal",
+);
+
+/// The notification when macOS refuses the capture, for the menu bar app; under `t3wow run`
+/// the capture's own help (capture::PERMISSION_HELP) is in the log already.
+#[cfg(target_os = "macos")]
+fn screen_off_notice() -> Notice {
+    Notice::new(
+        Level::Warning,
+        "Turn on Screen Recording for T3 WoW",
+        "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar, turn on t3wow (or Terminal, if you started it there), then quit T3 WoW and start it again.",
+    )
+}
 #[cfg(not(target_os = "macos"))]
 const NO_BROWSER: &str = "No Microsoft Edge (or Chrome) to draw pictures with: pages and images show as text in the game";
 #[cfg(target_os = "macos")]
@@ -688,13 +755,13 @@ pub fn run(app: Arc<App>) {
         match t3::target() {
             Some(t3::Target { key, origin, token: Some(token) }) => break (key, origin, token),
             Some(_) => {
-                app.set(SIGN_IN_NEEDED, "WoW: waiting for the sign-in", true, false);
+                app.set(shown(SIGN_IN_NEEDED), "WoW: waiting for the sign-in", true, false);
                 if !asked {
                     asked = true;
                     app.sign_in();
                 }
             }
-            None => app.set(NO_LOCAL_T3, "WoW: waiting for T3", true, false),
+            None => app.set(shown(NO_LOCAL_T3), "WoW: waiting for T3", true, false),
         }
         wait(&app, &control_rx, 5, Some(&slots));
     };
@@ -746,6 +813,9 @@ pub fn run(app: Arc<App>) {
     let mut put_back_at = Instant::now() + PUT_BACK_EVERY;
     // The older T3 Code the tray's notification last went out for: once per start and version.
     let mut older_said: Option<String> = None;
+    // The Screen Recording notification went out, until the capture works again.
+    #[cfg(target_os = "macos")]
+    let mut screen_told = false;
     loop {
         while let Ok(message) = capture_rx.try_recv() {
             bridge.on_capture(message);
@@ -848,7 +918,7 @@ pub fn run(app: Arc<App>) {
         } else if let (false, Some(problem)) = (s.t3_ok, &s.t3_problem) {
             format!("T3: {}", problem.chars().take(70).collect::<String>())
         } else if s.t3_ok && s.sign_in_read_only {
-            READ_ONLY_LINE.to_string()
+            shown(READ_ONLY_LINE).to_string()
         } else if s.t3_ok {
             let connected = format!("T3: connected ({} machine{})", s.machines, if s.machines == 1 { "" } else { "s" });
             match &s.older_t3 {
@@ -888,8 +958,24 @@ pub fn run(app: Arc<App>) {
             }
             _ => format!("WoW: {wow_line}"),
         };
+        // macOS refuses the capture: the game can be running and still never be seen.
+        #[cfg(target_os = "macos")]
+        let screen_off = s.wow_running && crate::capture::screen_refused();
+        #[cfg(target_os = "macos")]
+        let wow_line = if screen_off {
+            if !screen_told && menu_bar() {
+                app.notify(screen_off_notice());
+            }
+            screen_told = true;
+            shown(SCREEN_OFF_LINE).to_string()
+        } else {
+            screen_told = false;
+            wow_line
+        };
         let restart_needed = restart.is_some() && s.wow_running;
         let attention = signed_out || s.auth_needed || s.sign_in_read_only || (!s.t3_ok && s.t3_problem.is_some()) || s.write_problem.is_some() || restart_needed;
+        #[cfg(target_os = "macos")]
+        let attention = attention || screen_off;
         app.set(t3_line, wow_line, attention, !signed_out && !s.auth_needed);
         // Mid-poll, each tick reads T3 for one request or TICK_BUDGET_MS, whichever is
         // longer, and the capture and the controls above get their turn in between: no nap.
@@ -952,6 +1038,24 @@ mod tests {
         // The page's own notice says which level to pick, whole.
         assert!(browser_open_text().contains("Pick Auto"));
         assert!(fits_a_toast(&browser_open_text()), "{}", browser_open_text());
+    }
+
+    /// The menu bar names its own items; `t3wow run` in Terminal, which has no menu, the
+    /// commands that do the same.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_names_the_menu_bar_items_or_the_commands() {
+        for (menu, terminal) in [SIGN_IN_AGAIN, READ_ONLY_LINE, SIGN_IN_NEEDED, NO_LOCAL_T3, SCREEN_OFF_LINE] {
+            assert!(!menu.contains("t3wow "), "{menu}");
+            assert!(terminal.contains("t3wow") || terminal.contains("Terminal"), "{terminal}");
+            assert!(!format!("{menu}{terminal}").contains("this PC"));
+        }
+        assert!(SIGN_IN_AGAIN.0.contains("menu bar"));
+        assert!(SCREEN_OFF_LINE.0.ends_with("Open Screen Recording settings…"));
+        let notice = screen_off_notice();
+        assert_eq!(notice.level, Level::Warning);
+        assert!(notice.text.contains("Open Screen Recording settings…"), "{}", notice.text);
+        assert!(update_out_text("0.11.0", "0.10.0").contains("Choose “0.11.0 is out” in the menu bar to open its download page"));
     }
 
     #[test]

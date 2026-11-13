@@ -269,6 +269,14 @@ fn check_exe(exe: &[u8], expected_sha: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a Mac's menu bar sends you for a new release, which `install` can't put in place:
+/// the newest listed release's page, in the public releases repository (the source
+/// repository is private).
+#[cfg(target_os = "macos")]
+pub fn releases_page() -> String {
+    format!("https://github.com/{}/releases/latest", repo())
+}
+
 /// Why `install` refuses off Windows.
 pub const WINDOWS_ONLY: &str = "Updates install only on Windows for now: releases carry the Windows program alone. Put a newer t3wow in place by hand.";
 
@@ -439,6 +447,14 @@ mod tests {
                 { "name": "t3wow.exe.sha256.sig", "browser_download_url": "https://x/sig" },
             ],
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_is_sent_to_the_public_releases_page() {
+        if std::env::var("T3WOW_UPDATE_REPO").is_err() {
+            assert_eq!(releases_page(), "https://github.com/MatiasCiccone/t3wow-releases/releases/latest");
+        }
     }
 
     #[test]
