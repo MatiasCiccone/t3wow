@@ -113,7 +113,7 @@ pub fn menu_bar() -> bool {
 /// A Mac's text, for the menu bar app or for `t3wow run` in Terminal (no menu); elsewhere the
 /// tray's one text.
 #[cfg(target_os = "macos")]
-fn shown(texts: (&'static str, &'static str)) -> &'static str {
+pub(crate) fn shown(texts: (&'static str, &'static str)) -> &'static str {
     if menu_bar() {
         texts.0
     } else {
@@ -122,7 +122,7 @@ fn shown(texts: (&'static str, &'static str)) -> &'static str {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn shown(text: &'static str) -> &'static str {
+pub(crate) fn shown(text: &'static str) -> &'static str {
     text
 }
 
@@ -144,7 +144,16 @@ fn update_out_text(version: &str, current: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn update_out_text(version: &str, current: &str) -> String {
+    if updater::running_translocated() {
+        return translocated_update_out_text(version, current);
+    }
     mac_update_out_text(version, current, updater::can_install())
+}
+
+/// A new release while macOS runs the app from a temporary copy: how to get it.
+#[cfg(target_os = "macos")]
+fn translocated_update_out_text(version: &str, current: &str) -> String {
+    format!("T3 WoW {version} is out (you have {current}). To update, quit T3 WoW, drag T3 WoW into Applications in Finder, and open it from there.")
 }
 
 /// `installs`: the menu's item installs the release (in the app), as the item's own text
@@ -156,6 +165,24 @@ fn mac_update_out_text(version: &str, current: &str, installs: bool) -> String {
     } else {
         format!("T3 WoW {version} is out (you have {current}). Choose “{version} is out” in the menu bar to open its download page.")
     }
+}
+
+/// The notice when an update fails: why, then how to try again. An app macOS runs from a
+/// temporary copy (`updater::TRANSLOCATED`) can't, until it is moved: that text says how.
+fn update_failed_text(error: &str, version: &str) -> String {
+    let error = error.trim_end_matches('.');
+    #[cfg(target_os = "macos")]
+    if error == updater::TRANSLOCATED.trim_end_matches('.') {
+        return updater::TRANSLOCATED.to_string();
+    }
+    format!("{error}. Choose Update to {version} in {MENU_NAME} to try again.")
+}
+
+/// The notice at startup when macOS runs the app from a temporary, read-only copy: the update
+/// item says the same, rather than trying.
+#[cfg(target_os = "macos")]
+pub fn translocated_notice() -> Notice {
+    Notice::new(Level::Warning, "Move T3 WoW to Applications", updater::TRANSLOCATED)
 }
 
 /// The tray's line while an update runs.
@@ -341,7 +368,7 @@ impl App {
                 }
                 Err(error) => {
                     app.set_activity(Task::Update, None);
-                    app.notify(Notice::new(Level::Error, format!("Update to {version} failed"), format!("{error}. Choose Update to {version} in the tray menu to try again.")));
+                    app.notify(Notice::new(Level::Error, format!("Update to {version} failed"), update_failed_text(&error, &version)));
                     // Still out there: the menu offers it again.
                     *app.update.lock().unwrap() = Update::Available(release);
                 }
@@ -647,10 +674,17 @@ fn wait(app: &App, rx: &Receiver<Control>, seconds: u64, slots: Option<&Slots>) 
         None => app.notify(Notice::new(
             Level::Error,
             "Can't change the addon yet",
-            "T3 WoW hasn't found the WoW folder: choose it with Choose WoW folder… in the tray menu first.",
+            format!("T3 WoW hasn't found the WoW folder: choose it with Choose WoW folder… in {MENU_NAME} first."),
         )),
     }
 }
+
+/// Where the menu's items are: Windows' tray menu, or a Mac's menu bar. Only the menu sends
+/// controls and installs updates (a Mac's app, which always has it), so its name will do.
+#[cfg(not(target_os = "macos"))]
+const MENU_NAME: &str = "the tray menu";
+#[cfg(target_os = "macos")]
+const MENU_NAME: &str = "the menu bar";
 
 // Under `t3wow run` a Mac's companion has no menu: its commands do what the menu's items do.
 #[cfg(not(target_os = "macos"))]
@@ -699,6 +733,11 @@ pub fn run(app: Arc<App>) {
     // Early, so it is up before the game is.
     #[cfg(target_os = "macos")]
     crate::capture::request_screen_access();
+    // A copy macOS made read-only can't update: say how to move it now, not after a download.
+    #[cfg(target_os = "macos")]
+    if updater::running_translocated() {
+        app.notify(translocated_notice());
+    }
 
     // 1. The WoW folder.
     let wow_dir = loop {
@@ -1017,7 +1056,7 @@ mod tests {
             assert!(notice.text.contains("Choose Sign in to T3… and pick Auto or Full access"), "{}", notice.text);
             assert!(notice.text.contains("T3 WoW is signed in to T3 on this PC."), "{}", notice.text);
         }
-        // No tray on a Mac: the companion's own command signs in again.
+        // Tests run as `t3wow run` on a Mac, which has no menu: its own command signs in again.
         #[cfg(target_os = "macos")]
         {
             assert!(notice.text.contains("Run t3wow login and pick Auto or Full access"), "{}", notice.text);
@@ -1093,6 +1132,41 @@ mod tests {
         assert!(bare.contains("Choose “0.11.0 is out” in the menu bar to open its download page"), "{bare}");
         assert_eq!(update_out_text("0.11.0", "0.10.0"), bare, "the tests run as a bare t3wow");
         assert!(fits_a_toast(&app) && fits_a_toast(&bare));
+    }
+
+    /// A failed update says why once (no doubled full stop) and where to try again: the
+    /// tray menu on Windows, the menu bar on a Mac.
+    #[test]
+    fn a_failed_update_says_why_and_where_to_try_again() {
+        let menu = if cfg!(target_os = "macos") { "the menu bar" } else { "the tray menu" };
+        let expected = format!("the download timed out. Choose Update to 0.11.0 in {menu} to try again.");
+        assert_eq!(update_failed_text("the download timed out", "0.11.0"), expected);
+        assert_eq!(update_failed_text("the download timed out.", "0.11.0"), expected);
+        assert!(!update_failed_text("x.", "0.11.0").contains(".."));
+    }
+
+    /// A copy macOS made read-only can't update until it is moved: the failure, the notice at
+    /// startup and a new release's notice say how, and never to try again from here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_translocated_app_says_how_to_move_it() {
+        let failed = update_failed_text(updater::TRANSLOCATED, "0.11.0");
+        assert_eq!(failed, updater::TRANSLOCATED);
+        assert!(failed.ends_with("Quit T3 WoW, drag T3 WoW into Applications in Finder, and open it from there."), "{failed}");
+        assert!(!failed.contains("try again") && !failed.contains("..") && !failed.contains("tray"), "{failed}");
+        let notice = translocated_notice();
+        assert_eq!((notice.level, notice.title.as_str(), notice.text.as_str()), (Level::Warning, "Move T3 WoW to Applications", updater::TRANSLOCATED));
+        let out = translocated_update_out_text("0.11.0", "0.10.0");
+        assert_eq!(out, "T3 WoW 0.11.0 is out (you have 0.10.0). To update, quit T3 WoW, drag T3 WoW into Applications in Finder, and open it from there.");
+        assert!(fits_a_toast(&failed) && fits_a_toast(&out));
+        // The tests aren't translocated: a new release's notice is a bare t3wow's.
+        assert!(!updater::running_translocated());
+    }
+
+    /// Choosing an addon action before the WoW folder is known names the menu it is in.
+    #[test]
+    fn the_menu_is_named_as_each_system_shows_it() {
+        assert_eq!(MENU_NAME, if cfg!(target_os = "macos") { "the menu bar" } else { "the tray menu" });
     }
 
     #[test]

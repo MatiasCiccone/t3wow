@@ -49,15 +49,24 @@ const SIGNALS_OUT: &str = "this WoW session used all its signal files; restart W
 /// cleaned it): the game can't be told an update is ready until they're back.
 #[cfg(not(target_os = "macos"))]
 const SIGNALS_LOST: &str = "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or choose Repair addon files in its tray menu)";
-// The Mac companion has no tray menu yet: `t3wow install` puts the files back.
+// A Mac: the menu bar app's item, or under `t3wow run` (no menu) `t3wow install`.
 #[cfg(target_os = "macos")]
-const SIGNALS_LOST: &str = "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or run t3wow install)";
-/// Where "Commands from the game" is set: the tray menu, or on a Mac (no tray yet) the
-/// config file.
+const SIGNALS_LOST: (&str, &str) = (
+    "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or choose Repair addon files from its menu bar icon)",
+    "the addon folder lost its signal files (something replaced or cleaned it): restart WoW once they're back (T3 WoW puts them back by itself, or run t3wow install)",
+);
+fn signals_lost() -> &'static str {
+    crate::app::shown(SIGNALS_LOST)
+}
+/// Where "Commands from the game" is set: the tray menu, the Mac's menu bar, or under
+/// `t3wow run` on a Mac (no menu) the config file.
 #[cfg(not(target_os = "macos"))]
 const TRUST_SETTING: &str = "the T3 WoW tray setting \"Commands from the game\"";
 #[cfg(target_os = "macos")]
-const TRUST_SETTING: &str = "T3 WoW's setting \"Commands from the game\" (gameCommands in its config.json)";
+const TRUST_SETTING: (&str, &str) = (
+    "the T3 WoW menu bar setting \"Commands from the game\"",
+    "T3 WoW's setting \"Commands from the game\" (gameCommands in its config.json)",
+);
 /// The name the game gives this machine when the system doesn't say.
 #[cfg(not(target_os = "macos"))]
 const THIS_MACHINE: &str = "This PC";
@@ -763,9 +772,12 @@ struct ViewCache {
 /// The game's top line while the sign-in in use can only read.
 #[cfg(not(target_os = "macos"))]
 const READ_ONLY_LINE: &str = "Read-only T3 sign-in: sign in again from the tray menu, pick Auto or Full access";
-// No tray menu on a Mac (yet): `t3wow login` signs in again.
+// A Mac: the menu bar's Sign in to T3…, or under `t3wow run` (no menu) `t3wow login`.
 #[cfg(target_os = "macos")]
-const READ_ONLY_LINE: &str = "Read-only T3 sign-in: run t3wow login again, pick Auto or Full access";
+const READ_ONLY_LINE: (&str, &str) = (
+    "Read-only T3 sign-in: choose Sign in to T3… in the menu bar, pick Auto or Full access",
+    "Read-only T3 sign-in: run t3wow login again, pick Auto or Full access",
+);
 
 /// What the tray shows.
 #[derive(Clone, Debug, Default)]
@@ -2214,7 +2226,7 @@ impl Bridge {
             machines: self.envs.iter().filter(|e| e.ok).count(),
             slot: self.link.slot,
             signals_out: self.signals_out.is_some(),
-            signals_lost: self.signals_out.as_deref() == Some(SIGNALS_LOST),
+            signals_lost: self.signals_out.as_deref() == Some(signals_lost()),
             write_problem: self.write_error.clone().filter(|_| self.write_failures >= WRITE_FAILURES_SHOWN),
             older_t3: self.older_t3.clone(),
         }
@@ -2420,7 +2432,7 @@ impl Bridge {
         }
         // Any addon can draw commands, so the tray setting decides what the game may do.
         if !self.trust.allows(&kind) {
-            let reason = format!("blocked by {TRUST_SETTING} ({})", self.trust.label());
+            let reason = format!("blocked by {} ({})", crate::app::shown(TRUST_SETTING), self.trust.label());
             self.log(&format!("{kind} from the game {reason}"));
             self.note(&format!("{kind}: {reason}"));
             return Some(json!({ "s": command["s"], "ok": false, "x": reason }));
@@ -4875,7 +4887,7 @@ impl Bridge {
             out.insert("out".into(), json!(self.outcomes.iter().map(|(_, o)| o).collect::<Vec<_>>()));
         }
         // A refused sign-in, else one that can only read: the game's top line says either.
-        out.insert("auth".into(), json!(self.auth_error.as_deref().or(self.sign_in_read_only.then_some(READ_ONLY_LINE))));
+        out.insert("auth".into(), json!(self.auth_error.as_deref().or(self.sign_in_read_only.then(|| crate::app::shown(READ_ONLY_LINE)))));
         // This companion pastes images (the game offers Ctrl+V for them), and the ones pasted
         // so far, by the message they go with (left out when there are none). Only Windows
         // can read the clipboard so far (`clip::read_image`).
@@ -5042,7 +5054,7 @@ impl Bridge {
             let lost = error.kind() == std::io::ErrorKind::NotFound;
             if lost || self.signal_failures >= WRITE_FAILURES_SHOWN {
                 let reason = if lost {
-                    SIGNALS_LOST.to_string()
+                    signals_lost().to_string()
                 } else {
                     format!("couldn't write the signal files ({error}); updates come on a timer until WoW restarts")
                 };

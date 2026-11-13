@@ -137,11 +137,11 @@ return "ok"
 `);
 });
 
-test("on a Mac a test font that never loads says to reinstall with t3wow, not from a tray", () => {
+test("on a Mac a test font that never loads says to reinstall from the menu bar icon, not a tray", () => {
   runGame(`
 Link.Init()
 tick(120)
-assert(Link.Status().signalCheck:find("run t3wow install in Terminal, then restart WoW", 1, true), Link.Status().signalCheck)
+assert(Link.Status().signalCheck:find("choose Reinstall addon from T3 WoW's menu bar icon, then restart WoW", 1, true), Link.Status().signalCheck)
 assert(not Link.Status().signalCheck:find("tray"), Link.Status().signalCheck)
 return "ok"
 `, { before: "function IsMacClient() return true end" });

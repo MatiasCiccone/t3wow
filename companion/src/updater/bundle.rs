@@ -19,8 +19,9 @@ pub const BUNDLE_ID: &str = "com.t3wow.companion";
 /// The program inside the app: Contents/MacOS/t3wow.
 const EXECUTABLE: &str = "t3wow";
 
-/// Says why an app macOS runs from a temporary copy can't update itself.
-const TRANSLOCATED: &str = "macOS is running T3 WoW from a temporary copy (it does that for an app opened where it was downloaded), which can't be updated. Move T3 WoW.app to Applications with Finder, open it from there, then update.";
+/// Says why an app macOS runs from a temporary copy can't update itself, and what to do: the
+/// update's failure notice, the notice at startup and the menu's update item all say it.
+pub const TRANSLOCATED: &str = "macOS runs T3 WoW from a temporary, read-only copy (it does that for an app opened where it was downloaded, or moved without Finder), so T3 WoW can't update itself. Quit T3 WoW, drag T3 WoW into Applications in Finder, and open it from there.";
 
 /// The app `exe` runs in: `<X>.app` when `exe` is `<X>.app/Contents/MacOS/<program>`.
 pub fn app_of(exe: &Path) -> Option<PathBuf> {
@@ -46,10 +47,18 @@ pub fn lock_path() -> PathBuf {
 
 const LOCK_PLACE: &str = "in T3 WoW's settings folder";
 
-/// App Translocation: macOS runs an app opened from where it was downloaded from a random,
-/// read-only folder.
+/// App Translocation: macOS runs a quarantined app opened where it was downloaded (or moved
+/// there by anything but Finder) from a random, read-only mount in the user's temporary
+/// folder: /private/var/folders/<..>/<..>/T/AppTranslocation/<UUID>/d/T3 WoW.app. Read from
+/// the path rather than Security's SecTranslocateIsTranslocatedURL, which isn't public API.
 fn translocated(app: &Path) -> bool {
-    app.components().any(|c| c.as_os_str() == "AppTranslocation")
+    let in_temp = app.starts_with("/private/var/folders") || app.starts_with("/var/folders");
+    in_temp && app.components().any(|c| c.as_os_str() == "AppTranslocation")
+}
+
+/// Whether macOS runs this app from a translocated copy, which can't update itself.
+pub fn running_translocated() -> bool {
+    running_app().is_some_and(|app| translocated(&app))
 }
 
 /// Puts the release `fetch` downloads and checks (the zipped app) in place of `app`.
@@ -238,7 +247,18 @@ mod tests {
     #[test]
     fn a_translocated_app_is_told_to_move() {
         assert!(translocated(Path::new("/private/var/folders/x/T/AppTranslocation/1234-5678/d/T3 WoW.app")));
+        // As the install test's process ran (its path, with the folder names made up).
+        assert!(translocated(Path::new("/private/var/folders/xd/abc123/T/AppTranslocation/6A1B2C3D-0000-4E5F-8A9B-0C1D2E3F4A5B/d/T3 WoW.app")));
+        assert!(translocated(Path::new("/var/folders/xd/abc123/T/AppTranslocation/1/d/T3 WoW.app")));
         assert!(!translocated(Path::new("/Applications/T3 WoW.app")));
+        assert!(!translocated(Path::new("/Users/me/Downloads/T3 WoW.app")), "opened in place but not translocated (Finder moved it, say)");
+        assert!(!translocated(Path::new("/Users/me/AppTranslocation/T3 WoW.app")), "a folder of the user's own with that name");
+        assert!(!translocated(Path::new("/private/var/folders/xd/abc123/T/T3 WoW.app")));
+        // A test binary isn't in an app, so it isn't translocated either.
+        assert!(!running_translocated());
+        // What to do, said in full and once: no doubled full stop when a sentence follows.
+        assert!(TRANSLOCATED.contains("Quit T3 WoW, drag T3 WoW into Applications in Finder, and open it from there."), "{TRANSLOCATED}");
+        assert!(!TRANSLOCATED.contains("..") && !TRANSLOCATED.contains("tray"), "{TRANSLOCATED}");
         let error = install(Path::new("/private/var/folders/x/T/AppTranslocation/1/d/T3 WoW.app"), "99.0.0", || panic!("nothing is downloaded"));
         assert_eq!(error, Err(TRANSLOCATED.to_string()));
     }

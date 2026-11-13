@@ -138,6 +138,12 @@ pub fn unencrypted_over_network(origin: &str) -> bool {
     !(host == "localhost" || host == "[::1]" || host.starts_with("127."))
 }
 
+/// Where the menu is, for the texts that name its items.
+#[cfg(not(target_os = "macos"))]
+const MENU: &str = "the tray menu";
+#[cfg(target_os = "macos")]
+const MENU: &str = "the menu bar";
+
 #[cfg(not(target_os = "macos"))]
 const THIS_MACHINE: &str = "this PC";
 #[cfg(target_os = "macos")]
@@ -297,7 +303,7 @@ impl UpdateChecks {
     pub fn description(self) -> String {
         let every = self.every.label().to_lowercase();
         match (self.on_start, self.every) {
-            (false, UpdateInterval::Never) => "T3 WoW no longer looks for updates by itself. Choose Check for updates in the tray menu to look.".into(),
+            (false, UpdateInterval::Never) => format!("T3 WoW no longer looks for updates by itself. Choose Check for updates in {MENU} to look."),
             (true, UpdateInterval::Never) => "T3 WoW looks for a new release when it starts, and tells you when there is one.".into(),
             (false, _) => format!("T3 WoW looks for a new release {every}, and tells you when there is one."),
             (true, _) => format!("T3 WoW looks for a new release when it starts and {every}, and tells you when there is one."),
@@ -945,6 +951,8 @@ mod tests {
         assert_eq!(UpdateChecks { on_start: true, every: UpdateInterval::Never }.summary(), "Update checks: when T3 WoW starts");
         assert_eq!(UpdateChecks { on_start: false, every: UpdateInterval::Day }.summary(), "Update checks: every day");
         assert!(UpdateChecks::MANUAL_ONLY.description().contains("Check for updates"));
+        let menu = if cfg!(target_os = "macos") { "in the menu bar" } else { "in the tray menu" };
+        assert!(UpdateChecks::MANUAL_ONLY.description().contains(menu), "{}", UpdateChecks::MANUAL_ONLY.description());
         assert!(!UpdateChecks { on_start: true, every: UpdateInterval::Never }.manual_only());
     }
 

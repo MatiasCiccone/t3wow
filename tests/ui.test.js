@@ -3009,17 +3009,17 @@ return "ok"
 `);
 });
 
-// On a Mac the companion is `t3wow` in a terminal, with no tray menu (and no image paste
-// yet): the window names it so, and says where "Commands from the game" is set instead.
-test("on a Mac the window names the companion without its tray, and Read-only points at its config", () => {
+// On a Mac the companion is the T3 WoW app in the menu bar, not a tray (and has no image
+// paste yet): the window names it so, and says where "Commands from the game" is set there.
+test("on a Mac the window names the companion's menu bar icon, not a tray, and Read-only points at it", () => {
   run(`${CTRL_V}
 inboxWith(ENVS, { threads = { THREAD }, trust = "readonly" })
 UI.Select({ e = 2, id = "t1" })
-assert(showing("Read%-only: gameCommands in T3 WoW's config.json"), "the status doesn't say where Read-only is set")
-assert(not showing("tray"), "a tray is mentioned on a Mac")
+assert(showing("Read%-only: see Commands from the game under T3 WoW's menu bar icon"), "the status doesn't say where Read-only is set")
+assert(not showing("tray") and not showing("config%.json"), "a tray or the config file is mentioned on a Mac")
 typeText("please")
 click("Send")
-assert(showing('Sending messages from the game is off: T3 WoW has "Commands from the game" set to Read%-only %(gameCommands in its config.json%)%.'), "no reason, or the tray's")
+assert(showing('Sending messages from the game is off: T3 WoW in the menu bar has "Commands from the game" set to Read%-only%.'), "no reason, or the tray's")
 -- A Mac companion doesn't paste (no pi): the box offers no Ctrl+V, and Ctrl+V asks nothing.
 inboxWith(ENVS, { threads = { THREAD } })
 assert(showing("^Message the agent %(Shift%+Enter for a new line%)$"), "placeholder")
@@ -3027,11 +3027,11 @@ assert(not showing("pastes images"), "an image paste is promised")
 local before = #queue()
 ctrlV()
 assert(#queue() == before, "asked a companion that can't paste")
--- Not answering: it's asked for on this Mac, not in a tray.
+-- Not answering: it's asked for in the menu bar, not in a tray.
 Link.Send({ t = "open", e = "mac", id = "t1" })
 tick(25)
 UI.Refresh()
-assert(showing("Companion not answering: is T3 WoW %(t3wow%) running on this Mac%?"), "stalled wording")
+assert(showing("Companion not answering: is T3 WoW running in the menu bar%?"), "stalled wording")
 return "ok"
 `, { before: ON_MAC });
 });
@@ -3065,7 +3065,7 @@ test("the first welcome names the companion as each system runs it", () => {
   const windows = run(WELCOME);
   assert.match(windows, /It needs the T3 WoW companion \(t3wow\.exe\) running in the system tray on this PC\./);
   const mac = run(WELCOME, { before: ON_MAC });
-  assert.match(mac, /It needs the T3 WoW companion \(t3wow\) running on this Mac\./);
+  assert.match(mac, /It needs the T3 WoW app running on this Mac, its T3 icon in the menu bar\./);
   assert.doesNotMatch(mac, /tray|\.exe|this PC/);
 });
 
