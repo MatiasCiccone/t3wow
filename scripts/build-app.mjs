@@ -10,6 +10,10 @@
 // or ad hoc ("-", the default) without one. T3WOW_CODESIGN_TIMESTAMP=1 adds a secure
 // timestamp (needs the network and a real certificate). T3WOW_RELEASE=1, as for the exe, gives
 // the plain version ("0.10.0"); any other build names its commit (companion/build.rs).
+//
+// For local update tests only: T3WOW_APP_PROFILE=debug bundles a debug build instead, the only
+// kind that reads T3WOW_UPDATE_API and T3WOW_UPDATE_REPO (companion/src/updater.rs), so the app
+// can update from a local server. Never for a release.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -25,6 +29,7 @@ const IDENTITY = process.env.T3WOW_CODESIGN_IDENTITY || "-";
 // every app icon as a rounded square and puts a round one like the logo on a light tile, so the
 // icon brings its own background.
 const ICON_SOURCE = join(ROOT, "assets", "app-icon.png");
+const DEBUG = process.env.T3WOW_APP_PROFILE === "debug";
 
 if (process.platform !== "darwin") {
   console.error("T3 WoW.app is a Mac app: build it on a Mac.");
@@ -36,7 +41,7 @@ const run = (command, args, options = {}) => execFileSync(command, args, { stdio
 // The build script's folder, from cargo's messages, holds the version it computed.
 const messages = execFileSync(
   "cargo",
-  ["build", "--release", "--manifest-path", join(ROOT, "companion", "Cargo.toml"), "--message-format=json-render-diagnostics"],
+  ["build", ...(DEBUG ? [] : ["--release"]), "--manifest-path", join(ROOT, "companion", "Cargo.toml"), "--message-format=json-render-diagnostics"],
   { stdio: ["ignore", "pipe", "inherit"], maxBuffer: 256 * 1024 * 1024, encoding: "utf8" },
 );
 const version = readFileSync(join(outDirFromMessages(messages), "t3wow-version.txt"), "utf8").trim();
@@ -48,7 +53,7 @@ rmSync(app, { recursive: true, force: true });
 mkdirSync(join(contents, "MacOS"), { recursive: true });
 mkdirSync(join(contents, "Resources"), { recursive: true });
 const program = join(contents, "MacOS", EXECUTABLE);
-copyFileSync(join(ROOT, "companion", "target", "release", "t3wow"), program);
+copyFileSync(join(ROOT, "companion", "target", DEBUG ? "debug" : "release", "t3wow"), program);
 chmodSync(program, 0o755);
 writeFileSync(join(contents, "Info.plist"), infoPlist(version));
 writeFileSync(join(contents, "PkgInfo"), "APPL????");
