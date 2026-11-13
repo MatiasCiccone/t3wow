@@ -57,7 +57,7 @@ const ASSETS: Assets = if cfg!(target_os = "macos") { MAC_ASSETS } else { WINDOW
 #[cfg(target_os = "macos")]
 mod bundle;
 #[cfg(target_os = "macos")]
-pub use bundle::running_app;
+pub use bundle::{running_app, BUNDLE_ID};
 
 // The public half of the release key, in its own file (all zeros until signing is set up).
 mod release_key;
