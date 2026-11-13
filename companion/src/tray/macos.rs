@@ -39,13 +39,10 @@ pub const NOT_A_CLIENT: &str = "doesn't look like a WoW client folder (no World 
 const SCREEN_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const SCREEN_ITEM: &str = "Open Screen Recording settings…";
 
-/// Asked before an update of the app: macOS ties the Keychain's Always Allow and Screen
-/// Recording to the app's exact code, so the updated app must be allowed again. The menu's
-/// permission items and the Keychain's own prompt take it from there.
-pub const UPDATE_REGRANT: &str = "T3 WoW restarts by itself once it's updated. macOS then treats it as a new app and asks again:\n\n\
-    • Keychain: type your Mac login password and choose Always Allow, so T3 WoW can read your saved T3 sign-in.\n\
-    • Screen Recording: turn T3 WoW on in System Settings (if it shows as on already, turn it off and on again). The menu offers the settings while it's needed.\n\n\
-    If WoW is in fullscreen, leave fullscreen first so you can see these prompts.";
+/// Asked before an update of the app, which restarts it. A release is signed with the
+/// project's certificate, so macOS's Screen Recording grant carries over to the update, and the
+/// sign-in's key is a file (`token_key`), which no update asks for.
+pub const UPDATE_CONFIRM: &str = "T3 WoW downloads the update and restarts by itself. Your T3 sign-in and its Screen Recording permission carry over.";
 
 /// The menu bar icon: "T3" in black on clear, 44x44 pixels with the glyph 36 pixels tall,
 /// which tray-icon shows at 22 points (its cap), so the glyph stands 18 points tall at 2x.
@@ -789,11 +786,11 @@ mod tests {
     }
 
     #[test]
-    fn an_update_says_what_macos_will_ask_again() {
-        for words in ["Keychain", "Always Allow", "Screen Recording", "fullscreen", "restarts by itself"] {
-            assert!(UPDATE_REGRANT.contains(words), "{words}");
+    fn an_update_says_it_restarts_and_asks_for_nothing_again() {
+        assert!(UPDATE_CONFIRM.contains("restarts by itself") && UPDATE_CONFIRM.contains("carry over"), "{UPDATE_CONFIRM}");
+        for words in ["Keychain", "Always Allow", "password", "off and on", "turn T3 WoW on"] {
+            assert!(!UPDATE_CONFIRM.contains(words), "{words}");
         }
-        assert!(!UPDATE_REGRANT.contains("  "), "{UPDATE_REGRANT}");
     }
 
     #[test]

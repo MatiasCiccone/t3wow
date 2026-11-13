@@ -674,13 +674,14 @@ const SCREEN_OFF_LINE: (&str, &str) = (
 
 /// The notification when macOS refuses the capture, for the menu bar; under `t3wow run` the
 /// capture's own help (capture::permission_help) is in the log already. In the app
-/// (`in_app`) the switch is T3 WoW's own, and a grant applies without a restart; after an
-/// update the old switch may show as on and need turning off and on. A bare t3wow's menu
-/// bar is allowed as t3wow, or as Terminal when started there, and restarts to see it.
+/// (`in_app`) the switch is T3 WoW's own, and a grant applies without a restart. A switch
+/// left by a build signed another way (ad hoc, or another certificate) may show as on and
+/// still not count; removing it and adding the app again fixes that. A bare t3wow's menu bar
+/// is allowed as t3wow, or as Terminal when started there, and restarts to see it.
 #[cfg(target_os = "macos")]
 fn screen_off_notice(in_app: bool) -> Notice {
     let text = if in_app {
-        "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar and turn on T3 WoW. After an update, macOS may need its switch turned off and on again."
+        "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar and turn on T3 WoW. If it shows as on already, remove it with − and add it again with +."
     } else {
         "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar, turn on t3wow (or Terminal, if you started it there), then quit T3 WoW and start it again."
     };
@@ -1067,13 +1068,15 @@ mod tests {
         }
     }
 
-    /// In the app the Screen Recording switch is T3 WoW's, and an update may need it turned
-    /// off and on; a bare t3wow started in Terminal is allowed as Terminal and restarts.
+    /// In the app the Screen Recording switch is T3 WoW's, and one left by another build may
+    /// need removing and adding again; a bare t3wow started in Terminal is allowed as
+    /// Terminal and restarts.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_mac_names_the_screen_recording_switch_it_needs() {
         let app = screen_off_notice(true).text;
-        assert!(app.contains("turn on T3 WoW") && app.contains("After an update, macOS may need its switch turned off and on again"), "{app}");
+        assert!(app.contains("turn on T3 WoW") && app.contains("If it shows as on already, remove it"), "{app}");
+        assert!(!app.contains("update"), "a signed update keeps the switch: {app}");
         assert!(!app.contains("Terminal") && !app.contains("t3wow") && !app.contains("start it again"), "{app}");
         let bare = screen_off_notice(false).text;
         assert!(bare.contains("Terminal") && bare.contains("quit T3 WoW and start it again"), "{bare}");

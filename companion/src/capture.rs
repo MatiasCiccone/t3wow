@@ -341,13 +341,14 @@ mod mac {
 
     /// What to do when macOS refuses the capture: in the app, and for a bare t3wow. The app
     /// has its own switch, named T3 WoW, and the capture picks a new grant up without a
-    /// restart. An update is a new program to macOS (ad hoc signed), so the switch an earlier
-    /// copy had may show as on and still not count until it is turned off and on. A bare
-    /// t3wow is allowed through the app it runs in, which only sees a grant once restarted.
+    /// restart. Releases are signed with one certificate, so the switch carries over an update;
+    /// one left by a build signed another way (ad hoc, say) may show as on and still not
+    /// count until it is removed and the app added again. A bare t3wow is allowed through the
+    /// app it runs in, which only sees a grant once restarted.
     const PERMISSION_HELP: (&str, &str) = (
         "T3 WoW can't see the game: macOS hasn't given it Screen Recording permission. \
         Open System Settings > Privacy & Security > Screen & System Audio Recording and turn on T3 WoW. \
-        After an update of T3 WoW, macOS may need its switch turned off and on again.",
+        If it shows as on already, select it, remove it with the − button and add T3 WoW again with +.",
         "T3 WoW can't see the game: macOS hasn't given it Screen Recording permission. \
         Open System Settings > Privacy & Security > Screen & System Audio Recording, turn on the app you run t3wow from \
         (Terminal, when you run it there), then quit that app completely, open it again and run t3wow again.",
@@ -1309,14 +1310,14 @@ mod mac {
             assert_eq!(empty.read(Some(WINDOW), Instant::now()).0, Read::NoStrip);
         }
 
-        /// The app names its own switch, T3 WoW, and the off-and-on an update can need; a bare
-        /// t3wow names Terminal, whose restart it needs.
+        /// The app names its own switch, T3 WoW, and what to do with a stale one; a bare t3wow
+        /// names Terminal, whose restart it needs.
         #[test]
         fn the_permission_help_names_the_app_or_terminal() {
             let app = permission_help(true);
             assert!(app.contains("System Settings > Privacy & Security > Screen & System Audio Recording"), "{app}");
             assert!(app.contains("turn on T3 WoW"), "{app}");
-            assert!(app.contains("After an update of T3 WoW, macOS may need its switch turned off and on again"), "{app}");
+            assert!(app.contains("If it shows as on already") && !app.contains("update"), "{app}");
             assert!(!app.contains("Terminal") && !app.contains("t3wow") && !app.contains("again and run"), "{app}");
             let bare = permission_help(false);
             assert!(bare.contains("Screen & System Audio Recording") && bare.contains("Terminal"), "{bare}");
