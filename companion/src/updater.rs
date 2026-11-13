@@ -269,10 +269,18 @@ fn check_exe(exe: &[u8], expected_sha: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Why `install` refuses off Windows.
+pub const WINDOWS_ONLY: &str = "Updates install only on Windows for now: releases carry the Windows program alone. Put a newer t3wow in place by hand.";
+
 /// Downloads the release, checks it, and swaps it in for the running exe (Windows lets a
 /// running exe be renamed, not overwritten). The caller restarts the companion. `step`
 /// hears how far it has got.
 pub fn install(release: &Release, step: &dyn Fn(Step)) -> Result<(), String> {
+    // A release holds only t3wow.exe, and it passes check_exe: anywhere else it would
+    // replace this program with one the system can't run.
+    if !cfg!(windows) {
+        return Err(WINDOWS_ONLY.into());
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     update_exe(
         &exe,
@@ -624,6 +632,16 @@ mod tests {
         clean_up_at(&exe);
         assert!(leftovers(&dir).is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_an_update_is_refused_before_anything_is_downloaded() {
+        let unreachable = "http://127.0.0.1:9/t3wow.exe".to_string();
+        let release = Release { version: "99.0.0".into(), exe_url: unreachable.clone(), sha_url: unreachable, sig_url: None };
+        let steps = std::cell::Cell::new(0);
+        assert_eq!(install(&release, &|_| steps.set(steps.get() + 1)), Err(WINDOWS_ONLY.to_string()));
+        assert_eq!(steps.get(), 0);
     }
 
     #[cfg(not(windows))]
