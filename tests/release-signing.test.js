@@ -152,3 +152,28 @@ test("the release workflow signs the exe before hashing it, and the checksum aft
     assert.match(workflow.slice(step(name)), /^- name: .+\n\s+if: env\.AUTHENTICODE == 'true'\n/);
   }
 });
+
+test("the Mac app is built on the Mac runner, and its checksum is signed and published with the exe's", () => {
+  const workflow = readText("../.github/workflows/release.yml");
+  const job = (name) => {
+    const at = workflow.indexOf(`\n  ${name}:\n`);
+    assert.notEqual(at, -1, `no ${name} job`);
+    const next = workflow.slice(at + 1).search(/\n  [a-z-]+:\n/);
+    return workflow.slice(at, next === -1 ? undefined : at + 1 + next);
+  };
+  // Not the PC's [self-hosted, t3wow] runners, which can't build for macOS.
+  assert.match(job("build-macos"), /runs-on: \[self-hosted, t3wow-mac\]/);
+  assert.match(job("build-macos"), /npm run build:app/);
+  assert.match(job("build-windows"), /runs-on: windows-latest/);
+  const publish = job("publish");
+  assert.match(publish, /needs: \[build-windows, build-macos\]/);
+  for (const sha of ["t3wow.exe.sha256", "t3wow-macos-arm64.zip.sha256"]) {
+    assert.ok(publish.includes(`node scripts/sign-release.mjs release/${sha}\n`), sha);
+  }
+  const files = publish.slice(publish.indexOf("files: |")).split("\n").map((line) => line.trim());
+  for (const file of ["t3wow.exe", "t3wow.exe.sha256", "t3wow.exe.sha256.sig", "t3wow-macos-arm64.zip", "t3wow-macos-arm64.zip.sha256", "t3wow-macos-arm64.zip.sha256.sig"]) {
+    assert.ok(files.includes(`release/${file}`), file);
+  }
+  // Signing happens once both builds are in, before the release is published.
+  assert.ok(publish.indexOf("- name: Sign the checksum") < publish.indexOf("softprops/action-gh-release"));
+});
