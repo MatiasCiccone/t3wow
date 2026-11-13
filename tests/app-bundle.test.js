@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BUNDLE_ID, checksumFile, codesignArgs, ICONSET, infoPlist, outDirFromMessages, ZIP_NAME } from "../scripts/app-bundle.mjs";
+import { BUNDLE_ID, checksumFile, CODESIGN_TIMEOUT_MS, codesignArgs, codesignTimeoutMessage, ICONSET, infoPlist, outDirFromMessages, ZIP_NAME } from "../scripts/app-bundle.mjs";
 
 const pairs = (plist) => Object.fromEntries([...plist.matchAll(/<key>([^<]+)<\/key>\s*<(string|true|array)\/?>([^<]*)/g)].map((m) => [m[1], m[2] === "true" ? true : m[3]]));
 
@@ -65,6 +65,23 @@ test("the version comes from the companion's build script folder", () => {
 test("codesign runs with the hardened runtime, ad hoc unless an identity is given", () => {
   assert.deepEqual(codesignArgs("-", "T3 WoW.app"), ["--force", "--options", "runtime", "--timestamp=none", "--sign", "-", "T3 WoW.app"]);
   assert.deepEqual(codesignArgs("T3 WoW Dev", "a.app", { timestamp: true }).slice(3, 6), ["--timestamp", "--sign", "T3 WoW Dev"]);
+});
+
+test("codesign looks only in the given keychain, and a dialog it waits on fails the build", () => {
+  assert.deepEqual(codesignArgs("ABCD", "a.app", { keychain: "/tmp/ci.keychain-db" }).slice(3, 8), ["--timestamp=none", "--keychain", "/tmp/ci.keychain-db", "--sign", "ABCD"]);
+  assert.ok(!codesignArgs("-", "a.app", { keychain: "/tmp/ci.keychain-db" }).includes("--keychain"), "ad hoc uses no keychain");
+  assert.ok(CODESIGN_TIMEOUT_MS > 0 && CODESIGN_TIMEOUT_MS <= 300_000, "well inside the job's own timeout");
+  const message = codesignTimeoutMessage("ABCD", "/tmp/ci.keychain-db");
+  for (const words of ["ABCD", "/tmp/ci.keychain-db", "keychain dialog", "set-key-partition-list", "unlock-keychain"]) {
+    assert.ok(message.includes(words), words);
+  }
+});
+
+test("build:app gives codesign a timeout and passes it the keychain", () => {
+  const script = readFileSync(new URL("../scripts/build-app.mjs", import.meta.url), "utf8");
+  assert.match(script, /timeout: CODESIGN_TIMEOUT_MS/);
+  assert.match(script, /keychain: KEYCHAIN/);
+  assert.match(script, /codesignTimeoutMessage\(IDENTITY, KEYCHAIN\)/);
 });
 
 test("the iconset has every size iconutil reads, from 16 to 512 pixels", () => {

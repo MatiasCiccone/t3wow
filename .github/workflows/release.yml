@@ -4,7 +4,8 @@
 # t3wow.exe and the Mac app (t3wow-macos-arm64.zip), each with its SHA-256 and the SHA-256's
 # signature (once signing is set up), and the addon on its own (zipped, for CurseForge or a
 # manual install). Three jobs: build-windows (GitHub-hosted), build-macos (the self-hosted Mac
-# runner labelled t3wow-mac, so the release waits while that Mac is asleep or offline), and
+# runner labelled t3wow-mac, so the release waits while that Mac is asleep or offline; it signs
+# the app with the project's certificate from the T3WOW_MACOS_CERT_P12 secret), and
 # publish, which signs both checksums and uploads everything once both builds are done. Publishing there needs the RELEASES_TOKEN secret: a
 # fine-grained token with Contents read and write on t3wow-releases only. Signing needs the
 # T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
@@ -158,8 +159,12 @@ jobs:
     runs-on: [self-hosted, t3wow-mac]
     env:
       T3WOW_RELEASE: "1"
-      # The signing identity in that user's login keychain; unset, the app is signed ad hoc.
+      # The project's self-signed certificate (docs/release-signing.md), by its SHA-1. It comes
+      # from the T3WOW_MACOS_CERT_P12 secret, through a keychain made for this job; with
+      # neither the variable nor the secret, the app is signed ad hoc.
       T3WOW_CODESIGN_IDENTITY: ${{ vars.T3WOW_CODESIGN_IDENTITY || '-' }}
+      # 'true' or 'false': secrets can't appear in a step's if.
+      MAC_CERT: ${{ secrets.T3WOW_MACOS_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,6 +173,61 @@ jobs:
       - run: npm ci
       - name: Tests (addon Lua and companion, on macOS)
         run: npm test
+
+      # macOS keeps Screen Recording for an update only while the app's designated requirement,
+      # which names the certificate, stays the same. One release signed ad hoc after a signed
+      # one would cost every Mac user their grant, so a half-configured release fails here.
+      - name: Mac signing certificate
+        run: |
+          if [ "$MAC_CERT" = "true" ] && [ "$T3WOW_CODESIGN_IDENTITY" = "-" ]; then
+            echo "::error::The T3WOW_MACOS_CERT_P12 secret is set but the T3WOW_CODESIGN_IDENTITY variable isn't: set it to the certificate's SHA-1 (docs/release-signing.md)."
+            exit 1
+          fi
+          if [ "$MAC_CERT" != "true" ] && [ "$T3WOW_CODESIGN_IDENTITY" != "-" ]; then
+            echo "::error::The T3WOW_CODESIGN_IDENTITY variable names a certificate but the T3WOW_MACOS_CERT_P12 secret is missing. Refusing to sign ad hoc: that would cost every Mac user their Screen Recording grant. Restore the secret (docs/release-signing.md)."
+            exit 1
+          fi
+          if [ "$MAC_CERT" != "true" ]; then
+            echo "::warning::No Mac signing certificate: T3 WoW.app is signed ad hoc, and macOS asks for Screen Recording again after each update."
+          fi
+
+      # A keychain of its own, with a password made here and never shown, so the job doesn't
+      # depend on the login keychain being unlocked. The partition list lets codesign use the
+      # key without the dialog nobody is there to answer.
+      - name: Signing keychain
+        if: env.MAC_CERT == 'true'
+        env:
+          CERT_P12: ${{ secrets.T3WOW_MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.T3WOW_MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/t3wow-signing.keychain-db"
+          security delete-keychain "$keychain" 2>/dev/null || true
+          password=$(openssl rand -hex 32)
+          echo "::add-mask::$password"
+          p12="$RUNNER_TEMP/T3 WoW Self-Signed.p12"
+          (umask 077 && printf '%s' "$CERT_P12" | base64 --decode > "$p12")
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          status=0
+          security import "$p12" -k "$keychain" -f pkcs12 -P "$CERT_PASSWORD" -T /usr/bin/codesign > /dev/null || status=$?
+          rm -f "$p12"
+          [ "$status" = 0 ] || { echo "::error::Couldn't import T3WOW_MACOS_CERT_P12: is T3WOW_MACOS_CERT_PASSWORD its password?"; exit 1; }
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          # In front of the user's search list, which the cleanup step puts back.
+          keychains=("$keychain")
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line#\"}"; line="${line%\"}"
+            [ -n "$line" ] && [ "$line" != "$keychain" ] && keychains+=("$line")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
+          identities=$(security find-identity -p codesigning "$keychain")
+          if ! printf '%s' "$identities" | grep -qiF "$T3WOW_CODESIGN_IDENTITY"; then
+            echo "::error::T3WOW_MACOS_CERT_P12 holds no signing identity that T3WOW_CODESIGN_IDENTITY names."
+            exit 1
+          fi
+          echo "T3WOW_CODESIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Build T3 WoW.app
         run: npm run build:app
@@ -178,6 +238,14 @@ jobs:
           built=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "dist/T3 WoW.app/Contents/Info.plist")
           if [ "$built" != "$tag" ]; then echo "::error::T3 WoW.app says it is $built, not $tag: was T3WOW_RELEASE set for the build?"; exit 1; fi
           codesign --verify --deep --strict "dist/T3 WoW.app"
+          if [ "$T3WOW_CODESIGN_IDENTITY" != "-" ]; then
+            requirement=$(codesign -d -r- "dist/T3 WoW.app" 2>&1)
+            want=$(printf '%s' "$T3WOW_CODESIGN_IDENTITY" | tr '[:upper:]' '[:lower:]')
+            case "$requirement" in
+              *"certificate leaf = H\"$want\""*) ;;
+              *) echo "::error::T3 WoW.app's designated requirement doesn't name the certificate: $requirement"; exit 1 ;;
+            esac
+          fi
           mkdir -p release
           cp dist/t3wow-macos-arm64.zip dist/t3wow-macos-arm64.zip.sha256 release/
 
@@ -186,6 +254,20 @@ jobs:
           name: macos
           path: release/
           if-no-files-found: error
+
+      # Even after a failure: the keychain goes, and the user's search list is as it was.
+      - name: Remove the signing keychain
+        if: always() && env.MAC_CERT == 'true'
+        run: |
+          keychain="$RUNNER_TEMP/t3wow-signing.keychain-db"
+          keychains=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line#\"}"; line="${line%\"}"
+            [ -n "$line" ] && [ "$line" != "$keychain" ] && keychains+=("$line")
+          done < <(security list-keychains -d user)
+          [ "${#keychains[@]}" -gt 0 ] && security list-keychains -d user -s "${keychains[@]}"
+          security delete-keychain "$keychain" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/T3 WoW Self-Signed.p12"
 
   publish:
     needs: [build-windows, build-macos]
