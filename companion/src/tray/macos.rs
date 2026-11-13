@@ -42,7 +42,7 @@ const SCREEN_ITEM: &str = "Open Screen Recording settings…";
 /// Asked before an update of the app, which restarts it. A release is signed with the
 /// project's certificate, so macOS's Screen Recording grant carries over to the update, and the
 /// sign-in's key is a file (`token_key`), which no update asks for.
-pub const UPDATE_CONFIRM: &str = "T3 WoW downloads the update and restarts by itself. Your T3 sign-in and its Screen Recording permission carry over.";
+pub const UPDATE_CONFIRM: &str = "T3 WoW downloads the update and restarts by itself. Your T3 sign-in and T3 WoW's Screen Recording permission carry over.";
 
 /// The menu bar icon: "T3" in black on clear, 44x44 pixels with the glyph 36 pixels tall,
 /// which tray-icon shows at 22 points (its cap), so the glyph stands 18 points tall at 2x.
