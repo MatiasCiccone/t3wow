@@ -136,7 +136,7 @@ pub fn t3_named(label: &str) -> String {
 }
 
 /// The notification when a new release is out: on Windows the tray installs it, on a Mac
-/// (releases carry only the Windows program) the menu bar opens its download page.
+/// the app's menu bar installs it too, and a bare t3wow's opens the download page.
 #[cfg(not(target_os = "macos"))]
 fn update_out_text(version: &str, current: &str) -> String {
     format!("T3 WoW {version} is out (you have {current}). Choose Update to {version} in the tray menu.")
@@ -144,7 +144,18 @@ fn update_out_text(version: &str, current: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn update_out_text(version: &str, current: &str) -> String {
-    format!("T3 WoW {version} is out (you have {current}). Choose “{version} is out” in the menu bar to open its download page.")
+    mac_update_out_text(version, current, updater::can_install())
+}
+
+/// `installs`: the menu's item installs the release (in the app), as the item's own text
+/// says (tray::update_text), or opens its download page (a bare t3wow).
+#[cfg(target_os = "macos")]
+fn mac_update_out_text(version: &str, current: &str, installs: bool) -> String {
+    if installs {
+        format!("T3 WoW {version} is out (you have {current}). Choose Update to {version} in the menu bar.")
+    } else {
+        format!("T3 WoW {version} is out (you have {current}). Choose “{version} is out” in the menu bar to open its download page.")
+    }
 }
 
 /// The tray's line while an update runs.
@@ -661,15 +672,19 @@ const SCREEN_OFF_LINE: (&str, &str) = (
     "WoW: running, but T3 WoW can't see it: turn on Screen Recording for Terminal",
 );
 
-/// The notification when macOS refuses the capture, for the menu bar app; under `t3wow run`
-/// the capture's own help (capture::PERMISSION_HELP) is in the log already.
+/// The notification when macOS refuses the capture, for the menu bar; under `t3wow run` the
+/// capture's own help (capture::permission_help) is in the log already. In the app
+/// (`in_app`) the switch is T3 WoW's own, and a grant applies without a restart; after an
+/// update the old switch may show as on and need turning off and on. A bare t3wow's menu
+/// bar is allowed as t3wow, or as Terminal when started there, and restarts to see it.
 #[cfg(target_os = "macos")]
-fn screen_off_notice() -> Notice {
-    Notice::new(
-        Level::Warning,
-        "Turn on Screen Recording for T3 WoW",
-        "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar, turn on t3wow (or Terminal, if you started it there), then quit T3 WoW and start it again.",
-    )
+fn screen_off_notice(in_app: bool) -> Notice {
+    let text = if in_app {
+        "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar and turn on T3 WoW. After an update, macOS may need its switch turned off and on again."
+    } else {
+        "macOS doesn't let T3 WoW see the game. Choose Open Screen Recording settings… in the menu bar, turn on t3wow (or Terminal, if you started it there), then quit T3 WoW and start it again."
+    };
+    Notice::new(Level::Warning, "Turn on Screen Recording for T3 WoW", text)
 }
 #[cfg(not(target_os = "macos"))]
 const NO_BROWSER: &str = "No Microsoft Edge (or Chrome) to draw pictures with: pages and images show as text in the game";
@@ -956,7 +971,7 @@ pub fn run(app: Arc<App>) {
         #[cfg(target_os = "macos")]
         let wow_line = if screen_off {
             if !screen_told && menu_bar() {
-                app.notify(screen_off_notice());
+                app.notify(screen_off_notice(updater::running_app().is_some()));
             }
             screen_told = true;
             shown(SCREEN_OFF_LINE).to_string()
@@ -1044,10 +1059,37 @@ mod tests {
         }
         assert!(SIGN_IN_AGAIN.0.contains("menu bar"));
         assert!(SCREEN_OFF_LINE.0.ends_with("Open Screen Recording settings…"));
-        let notice = screen_off_notice();
-        assert_eq!(notice.level, Level::Warning);
-        assert!(notice.text.contains("Open Screen Recording settings…"), "{}", notice.text);
-        assert!(update_out_text("0.11.0", "0.10.0").contains("Choose “0.11.0 is out” in the menu bar to open its download page"));
+        for in_app in [true, false] {
+            let notice = screen_off_notice(in_app);
+            assert_eq!(notice.level, Level::Warning);
+            assert!(notice.text.contains("Open Screen Recording settings…"), "{}", notice.text);
+            assert!(fits_a_toast(&notice.text), "{}", notice.text);
+        }
+    }
+
+    /// In the app the Screen Recording switch is T3 WoW's, and an update may need it turned
+    /// off and on; a bare t3wow started in Terminal is allowed as Terminal and restarts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_names_the_screen_recording_switch_it_needs() {
+        let app = screen_off_notice(true).text;
+        assert!(app.contains("turn on T3 WoW") && app.contains("After an update, macOS may need its switch turned off and on again"), "{app}");
+        assert!(!app.contains("Terminal") && !app.contains("t3wow") && !app.contains("start it again"), "{app}");
+        let bare = screen_off_notice(false).text;
+        assert!(bare.contains("Terminal") && bare.contains("quit T3 WoW and start it again"), "{bare}");
+    }
+
+    /// The app's menu installs a release, a bare t3wow's opens its download page: the notice
+    /// names the item each one shows (tray::update_text).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_names_the_update_item_its_menu_shows() {
+        let app = mac_update_out_text("0.11.0", "0.10.0", true);
+        assert_eq!(app, "T3 WoW 0.11.0 is out (you have 0.10.0). Choose Update to 0.11.0 in the menu bar.");
+        let bare = mac_update_out_text("0.11.0", "0.10.0", false);
+        assert!(bare.contains("Choose “0.11.0 is out” in the menu bar to open its download page"), "{bare}");
+        assert_eq!(update_out_text("0.11.0", "0.10.0"), bare, "the tests run as a bare t3wow");
+        assert!(fits_a_toast(&app) && fits_a_toast(&bare));
     }
 
     #[test]
