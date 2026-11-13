@@ -777,6 +777,9 @@ pub struct Bridge {
     /// tests.
     pub zone: Box<dyn Fn(i64) -> i64 + Send>,
     pub link: LinkState,
+    /// The capture has said whether WoW runs. Until then `link.wow_key` is only what the last
+    /// run saw, and that game may have quit since.
+    wow_seen: bool,
     window_open: bool,
     view: Option<View>,
     envs: Vec<Env>,
@@ -1909,6 +1912,7 @@ impl Bridge {
             opener: Box::new(crate::t3::open_browser),
             zone: Box::new(crate::snooze::system_offset),
             link,
+            wow_seen: false,
             window_open: false,
             view: None,
             envs: vec![Env { id: String::new(), name: hostname(), ok: true }],
@@ -2175,7 +2179,7 @@ impl Bridge {
             t3_problem: self.auth_error.clone().or_else(|| self.poll_error.clone()),
             auth_needed: self.auth_error.is_some(),
             sign_in_read_only: self.sign_in_read_only,
-            wow_running: self.link.wow_key.as_deref().is_some_and(|k| !k.is_empty()),
+            wow_running: self.wow_seen && self.link.wow_key.as_deref().is_some_and(|k| !k.is_empty()),
             in_game: self.link.ui_session.is_some(),
             signals: self.link.polling == Some(false) && self.signals_out.is_none(),
             machines: self.envs.iter().filter(|e| e.ok).count(),
@@ -2192,6 +2196,7 @@ impl Bridge {
     pub fn on_capture(&mut self, message: CaptureMessage) {
         match message {
             CaptureMessage::Wow(key) => {
+                self.wow_seen = true;
                 let key = key.unwrap_or_default();
                 if Some(&key) != self.link.wow_key.as_ref() {
                     self.log(&if key.is_empty() { "WoW not running".to_string() } else { format!("WoW running ({key})") });
