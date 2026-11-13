@@ -187,7 +187,7 @@ npm run screenshots # redraws assets/screenshots from the addon's code (needs Ch
 - `addon/T3WoW`: the addon (Lua). `tests/` runs it in a Lua VM: the link and the window against a simulated game, and the contract with the companion. It also checks the release signing scripts against the signed release the companion's tests verify.
 - `companion/`: the companion (Rust): screen capture (`capture.rs`), the T3 client and sign-in (`t3.rs`), settings and saved sign-ins (`config.rs`), the bridge (`bridge.rs`), pictures for the game (`render.rs`: pages drawn with headless Edge, TGA files), the addon files (`slots.rs`, with the addon embedded), updates (`updater.rs`), the tray (`tray.rs`, with its notifications and status from `app.rs`) and the tray's address box (`dialog.rs`, a plain Win32 dialog). `companion/tests/fixtures` holds the frames, inbox files and a signed release both sides are tested against.
 - `scripts/`: the exe build, the release key scripts, the release signing wizard, `unlist-release.mjs` (unlists a release; see [Unlisting a release](docs/unlisting-a-release.md)), and `skin-textures.mjs`, which draws the addon's theme textures (`addon/T3WoW/Media/*.tga`; run it after changing a shape). `scripts/screenshots/` runs the real addon against a pretend game with layout and draws `assets/screenshots`; run it before a release, and edit `scene.lua` for what the shots show. None of it ships.
-- `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400).
+- `assets/`: the logo (`logo.png`, and `curseforge-avatar.png` at 400×400), and the Mac app's icon (`app-icon.png`, the logo on a 1024×1024 deep blue square).
 
 `cargo test -- --ignored` in `companion/` also runs the test that draws with the real Edge (Windows with Edge or Chrome only).
 
@@ -210,7 +210,7 @@ Debug builds read `T3WOW_UPDATE_REPO` (`owner/repo`) to test updates against ano
 
 Without one it builds unsigned, and Windows SmartScreen warns on first run.
 
-`build:app` builds the Mac menu bar app: `dist/T3 WoW.app` (the release program in `Contents/MacOS/t3wow`, an Info.plist with the companion's version, an icon made from `assets/logo.png`), code signed with the hardened runtime, then `dist/t3wow-macos-arm64.zip` and its `.sha256`, which a release carries next to `t3wow.exe`'s. It signs with `T3WOW_CODESIGN_IDENTITY` (a certificate's name in your keychain), or ad hoc without one; signed ad hoc, macOS asks again for the Keychain and Screen Recording after every update. The app updates itself from releases (whole app swapped, under the same checksum and release key checks as the exe); a bare `t3wow` doesn't.
+`build:app` builds the Mac menu bar app: `dist/T3 WoW.app` (the release program in `Contents/MacOS/t3wow`, an Info.plist with the companion's version, an icon made from `assets/app-icon.png`, the logo on a deep blue square), code signed with the hardened runtime, then `dist/t3wow-macos-arm64.zip` and its `.sha256`, which a release carries next to `t3wow.exe`'s. It signs with `T3WOW_CODESIGN_IDENTITY` (a certificate's name in your keychain), or ad hoc without one; signed ad hoc, macOS asks again for the Keychain and Screen Recording after every update. The app updates itself from releases (whole app swapped, under the same checksum and release key checks as the exe); a bare `t3wow` doesn't.
 
 This code signing is separate from the release key below, which the updater checks; [docs/release-signing.md](docs/release-signing.md) compares the two and the certificate options.
 
