@@ -2527,6 +2527,34 @@ fn a_restart_after_moving_to_another_t3_starts_the_game_afresh_and_one_without_k
 }
 
 #[test]
+fn a_restart_doesnt_say_wow_runs_until_the_capture_has_looked() {
+    let dir = std::env::temp_dir().join(format!("t3wow-wow-seen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("state.json");
+    // The last run saw WoW, and saved its process.
+    let link = LinkState { wow_key: Some("456@1".into()), ui_session: Some("ui1".into()), ..LinkState::default() };
+    std::fs::write(&state, serde_json::to_string(&link).unwrap()).unwrap();
+    let start = || Bridge::new(FakeT3::new(), Box::new(FakeSlots(Arc::new(Mutex::new(Written::default())))), Some(state.clone()), Box::new(|_| {}), Box::new(|| 1_000_000));
+
+    // WoW was closed meanwhile: until the capture's first look, the saved process proves
+    // nothing (a "restart WoW" notice would go out for a game that isn't there).
+    let mut bridge = start();
+    assert!(!bridge.status().wow_running);
+    bridge.on_capture(CaptureMessage::Wow(None));
+    assert!(!bridge.status().wow_running);
+
+    // The same WoW still running: running as soon as the capture says so, with nothing reset.
+    std::fs::write(&state, serde_json::to_string(&link).unwrap()).unwrap();
+    let mut bridge = start();
+    assert!(!bridge.status().wow_running);
+    bridge.on_capture(CaptureMessage::Wow(Some("456@1".into())));
+    assert!(bridge.status().wow_running);
+    assert_eq!(bridge.link.ui_session.as_deref(), Some("ui1"), "the same game keeps its UI session");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn signing_out_drops_what_was_read_with_that_sign_in() {
     let mut rig = Rig::new(9_700_000);
     rig.bridge.set_login("local");
