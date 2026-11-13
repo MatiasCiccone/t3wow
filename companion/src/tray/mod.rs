@@ -10,7 +10,8 @@
 //! (`THIS_MACHINE`, `AUTOSTART`, `AUTOSTART_ON`, `AUTOSTART_OFF`, `NOT_A_CLIENT`). A module
 //! rather than a trait: there is one shell per build, so nothing would ever choose between
 //! two, and the texts can stay plain constants. A Mac's shell also draws the menu bar icon
-//! (`icon`, a template image) and adds the permission items (`Help`) below the WoW line.
+//! (`icon`, a template image), adds the permission items (`Help`) below the WoW line, and
+//! keeps the latest notice above the T3 line (`NoticeLine`).
 
 use crate::app::{self, App, Control, Level, Notice, Status, Update};
 use crate::config::{canonical_origin, server_label, Config, Trust, UpdateChecks, UpdateInterval};
@@ -41,6 +42,9 @@ pub use platform::run;
 /// Choosing Update installs it: releases carry the Windows program alone, so a Mac's menu
 /// opens the release's page instead.
 const INSTALLS_UPDATES: bool = cfg!(not(target_os = "macos"));
+
+/// The log's line for Quit, naming where it was chosen.
+const QUIT_LINE: &str = if cfg!(target_os = "macos") { "Quit from the menu bar." } else { "Quit from the tray." };
 
 /// Between two notifications, so one doesn't replace the other before it's read.
 const NOTICE_GAP: Duration = Duration::from_secs(2);
@@ -200,6 +204,9 @@ pub struct Tray {
     /// A Mac's permission items, shown below the WoW line while they apply.
     #[cfg(target_os = "macos")]
     help: platform::Help,
+    /// A Mac's latest notice, above the T3 line, where it can always be read.
+    #[cfg(target_os = "macos")]
+    notice_line: platform::NoticeLine,
     shown_update: Option<Update>,
     shown_checks: Option<UpdateChecks>,
     checks_read: Instant,
@@ -319,6 +326,8 @@ impl Tray {
             quit,
             #[cfg(target_os = "macos")]
             help: platform::Help::new(),
+            #[cfg(target_os = "macos")]
+            notice_line: platform::NoticeLine::new(),
             shown_update: None,
             shown_checks: Some(checks_now),
             checks_read: Instant::now(),
@@ -346,6 +355,8 @@ impl Tray {
         if self.last_notice.is_none_or(|at| at.elapsed() >= NOTICE_GAP) {
             if let Some(notice) = self.notices.pop_front() {
                 platform::notify(&self.icon, &notice);
+                #[cfg(target_os = "macos")]
+                self.notice_line.show(&self.menu, &self.t3_line, &notice);
                 self.last_notice = Some(Instant::now());
             }
         }
@@ -360,7 +371,7 @@ impl Tray {
             return Tick::Stay;
         }
         if id == *self.quit.id() {
-            log::line("Quit from the tray.");
+            log::line(QUIT_LINE);
             return Tick::Quit;
         } else if id == *self.sign_in.id() {
             if self.shown.signed_in {
@@ -512,7 +523,10 @@ impl Tray {
             }
         }
         #[cfg(target_os = "macos")]
-        self.help.refresh(&self.menu, &self.wow_line);
+        {
+            self.help.refresh(&self.menu, &self.wow_line);
+            self.notice_line.refresh(&self.menu);
+        }
         if status != self.shown || activity != self.shown_activity {
             self.t3_line.set_text(&status.t3);
             self.wow_line.set_text(&status.wow);

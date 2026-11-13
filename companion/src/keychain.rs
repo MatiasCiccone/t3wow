@@ -52,15 +52,29 @@ pub enum Problem {
     Failed(i32),
 }
 
+/// The menu bar's item that asks the Keychain again (tray/macos.rs shows it after a refusal).
+pub const RETRY_ITEM: &str = "Try the Keychain again";
+
+impl Problem {
+    /// What to say; `menu_bar`: the menu bar app, whose menu can ask again, rather than
+    /// `t3wow run` in Terminal, which only a restart can.
+    pub fn text(&self, menu_bar: bool) -> String {
+        match (self, menu_bar) {
+            (Problem::NotRead, _) => "waiting for the macOS Keychain; saved sign-ins aren't available yet".into(),
+            (Problem::Denied, false) => "macOS Keychain access was denied, so saved sign-ins can't be read (they are still saved). Restart T3 WoW to be asked again".into(),
+            (Problem::Denied, true) => format!("macOS Keychain access was denied, so saved sign-ins can't be read (they are still saved). Choose \u{201c}{RETRY_ITEM}\u{201d} in the menu bar, or restart T3 WoW, to be asked again"),
+            (Problem::Locked, false) => "macOS couldn't open the login keychain: it's locked, or its permission dialog can't be shown here (over SSH, for example). Saved sign-ins are still saved. Unlock it or run T3 WoW on the Mac itself, then restart it".into(),
+            (Problem::Locked, true) => format!("macOS couldn't open the login keychain: it's locked, or its permission dialog can't be shown. Saved sign-ins are still saved. Unlock it, then choose \u{201c}{RETRY_ITEM}\u{201d} in the menu bar"),
+            (Problem::Malformed, _) => "the T3 WoW item in the macOS Keychain doesn't hold a key, so saved sign-ins can't be read (they are still saved)".into(),
+            (Problem::Failed(code), false) => format!("the macOS Keychain answered with error {code}, so saved sign-ins can't be read (they are still saved). Restart T3 WoW to try again"),
+            (Problem::Failed(code), true) => format!("the macOS Keychain answered with error {code}, so saved sign-ins can't be read (they are still saved). Choose \u{201c}{RETRY_ITEM}\u{201d} in the menu bar, or restart T3 WoW, to try again"),
+        }
+    }
+}
+
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Problem::NotRead => f.write_str("waiting for the macOS Keychain; saved sign-ins aren't available yet"),
-            Problem::Denied => f.write_str("macOS Keychain access was denied, so saved sign-ins can't be read (they are still saved). Restart T3 WoW to be asked again"),
-            Problem::Locked => f.write_str("macOS couldn't open the login keychain: it's locked, or its permission dialog can't be shown here (over SSH, for example). Saved sign-ins are still saved. Unlock it or run T3 WoW on the Mac itself, then restart it"),
-            Problem::Malformed => f.write_str("the T3 WoW item in the macOS Keychain doesn't hold a key, so saved sign-ins can't be read (they are still saved)"),
-            Problem::Failed(code) => write!(f, "the macOS Keychain answered with error {code}, so saved sign-ins can't be read (they are still saved). Restart T3 WoW to try again"),
-        }
+        f.write_str(&self.text(crate::app::menu_bar()))
     }
 }
 
@@ -516,6 +530,19 @@ mod tests {
             assert_eq!(store.creates(), 0, "{problem:?}");
             assert_eq!(store.key(), None, "{problem:?}");
         }
+    }
+
+    #[test]
+    fn a_refusal_names_the_menu_bar_item_only_in_the_menu_bar_app() {
+        for problem in [Problem::Denied, Problem::Locked, Problem::Failed(-1)] {
+            let menu_bar = problem.text(true);
+            assert!(menu_bar.to_lowercase().contains("choose \u{201c}try the keychain again\u{201d} in the menu bar"), "{menu_bar}");
+            let terminal = problem.text(false);
+            assert!(!terminal.contains(RETRY_ITEM) && terminal.to_lowercase().contains("restart"), "{terminal}");
+        }
+        assert!(Problem::Denied.text(false).ends_with("Restart T3 WoW to be asked again"), "t3wow run keeps its words");
+        assert!(Problem::Denied.text(true).ends_with(", or restart T3 WoW, to be asked again"));
+        assert_eq!(Problem::Malformed.text(true), Problem::Malformed.text(false), "asking again wouldn't help");
     }
 
     #[test]

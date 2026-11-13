@@ -12,9 +12,11 @@ use crate::keychain::Problem;
 use crate::log;
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::NSObjectProtocol;
-use objc2::{sel, MainThreadMarker};
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSTextField};
+use objc2::MainThreadMarker;
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSMenu, NSModalResponse,
+    NSRunningApplication, NSTextField,
+};
 use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 use std::io;
@@ -23,7 +25,8 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use std::time::{Duration, Instant};
+use tray_icon::menu::{ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon};
 
 /// The server menu's item for the T3 on this machine.
@@ -38,7 +41,7 @@ pub const NOT_A_CLIENT: &str = "doesn't look like a WoW client folder (no World 
 /// The Screen Recording pane of System Settings (Privacy & Security).
 const SCREEN_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const SCREEN_ITEM: &str = "Open Screen Recording settings…";
-const KEYCHAIN_ITEM: &str = "Try the Keychain again";
+const KEYCHAIN_ITEM: &str = crate::keychain::RETRY_ITEM;
 
 /// The menu bar icon: "T3" in black on clear, 44x44 pixels with the glyph 36 pixels tall,
 /// which tray-icon shows at 22 points (its cap), so the glyph stands 18 points tall at 2x.
@@ -102,20 +105,31 @@ fn edit_menu() {
     std::mem::forget(menu);
 }
 
-/// Makes T3 WoW the active app, so the alert or panel about to open comes up in front
-/// (of the game, say) instead of behind the active app.
+/// Makes T3 WoW the active app, taking the keyboard from the app in front (Terminal, the
+/// game), so the alert or panel about to open comes up in front and what is typed, Return
+/// and Esc go to it. macOS 14's `activate` asks rather than takes: the app in front keeps
+/// the keyboard unless it yields, which Terminal and WoW never do. So this uses the older
+/// calls that take it, deprecated but still working.
 pub fn bring_to_front() {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let ns_app = NSApplication::sharedApplication(mtm);
     // Before the run loop starts (a message at start-up) nothing has set it yet.
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    // `activate` from macOS 14; before that only the older call exists.
-    if ns_app.respondsToSelector(sel!(activate)) {
-        ns_app.activate();
-    } else {
-        #[allow(deprecated)]
+    #[allow(deprecated)]
+    {
         ns_app.activateIgnoringOtherApps(true);
+        NSRunningApplication::currentApplication().activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
     }
+}
+
+/// Runs `alert` once T3 WoW has the keyboard: the alert's window key and in front, and its
+/// first responder (the address box's field, or the default button) ready for keys.
+fn run_in_front(alert: &NSAlert) -> NSModalResponse {
+    bring_to_front();
+    alert.layout();
+    let window = alert.window();
+    window.makeKeyAndOrderFront(None);
+    alert.runModal()
 }
 
 // ---- Notifications ----
@@ -171,6 +185,87 @@ pub fn notify(_tray: &TrayIcon, notice: &Notice) {
     }
 }
 
+// ---- The latest notice, in the menu ----
+
+/// How long the menu keeps the latest notice, unless a newer one replaces it.
+const NOTICE_KEPT: Duration = Duration::from_secs(10 * 60);
+/// The notice line's length in characters, "…" included: under the WoW line's longest
+/// texts, so the menu doesn't grow to fit a notice (the tooltip has all of it).
+const NOTICE_LINE_CHARS: usize = 90;
+
+/// The notice line: title and text on one line, a warning or an error marked, cut to fit.
+fn notice_line_text(notice: &Notice) -> String {
+    let mark = match notice.level {
+        Level::Info => "",
+        Level::Warning | Level::Error => "⚠️ ",
+    };
+    let line = format!("{mark}{}: {}", notice.title, notice.text);
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= NOTICE_LINE_CHARS {
+        return line;
+    }
+    let cut: String = line.chars().take(NOTICE_LINE_CHARS - 1).collect();
+    // At a word's end when there is one near: no half words.
+    let cut = match cut.rfind(' ') {
+        Some(at) if cut[..at].chars().count() >= NOTICE_LINE_CHARS * 2 / 3 => cut[..at].trim_end_matches([' ', ',', ':', ';']).to_string(),
+        _ => cut,
+    };
+    format!("{cut}…")
+}
+
+/// The notice line's tooltip: all of it, the title on its own line.
+fn notice_tooltip(notice: &Notice) -> String {
+    let mark = if notice.level == Level::Info { "" } else { "⚠️ " };
+    format!("{mark}{}\n{}", notice.title, notice.text)
+}
+
+/// The notice is still worth showing at `now`.
+fn notice_current(shown_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(shown_at) < NOTICE_KEPT
+}
+
+/// The latest notice as a greyed line above the T3 line, for NOTICE_KEPT or until a newer
+/// one. Notification Center doesn't show a bare binary's notifications (osascript's go to
+/// Script Editor, which macOS may never have allowed): this line is where a notice can
+/// always be read. The app bundle, with notifications of its own, comes later.
+pub struct NoticeLine {
+    item: MenuItem,
+    shown_at: Option<Instant>,
+}
+
+impl NoticeLine {
+    pub fn new() -> NoticeLine {
+        NoticeLine { item: MenuItem::new("", false, None), shown_at: None }
+    }
+
+    /// Shows `notice` right above `before` (the T3 line), in place of the one shown.
+    pub fn show(&mut self, menu: &Menu, before: &MenuItem, notice: &Notice) {
+        let _ = menu.remove(&self.item);
+        self.item.set_text(notice_line_text(notice));
+        let Some(at) = menu.items().iter().position(|item| item.id() == before.id()) else { return };
+        if menu.insert(&self.item, at).is_err() {
+            return;
+        }
+        self.shown_at = Some(Instant::now());
+        // muda has no tooltips: set it on the NSMenuItem it just made, the one at `at` in the
+        // NSMenu the menu bar icon shows.
+        // SAFETY: `ns_menu` is the menu's own NSMenu, alive as long as `menu`, on the main thread.
+        if let Some(ns_menu) = unsafe { menu.ns_menu().cast::<NSMenu>().as_ref() } {
+            if let Some(ns_item) = ns_menu.itemAtIndex(at as isize) {
+                ns_item.setToolTip(Some(&NSString::from_str(&notice_tooltip(notice))));
+            }
+        }
+    }
+
+    /// Takes the line away once it has been up for NOTICE_KEPT.
+    pub fn refresh(&mut self, menu: &Menu) {
+        if self.shown_at.is_some_and(|at| !notice_current(at, Instant::now())) {
+            let _ = menu.remove(&self.item);
+            self.shown_at = None;
+        }
+    }
+}
+
 // ---- Alerts ----
 
 fn alert(mtm: MainThreadMarker, title: &str, text: &str, style: NSAlertStyle, buttons: &[&str]) -> Retained<NSAlert> {
@@ -188,15 +283,13 @@ fn alert(mtm: MainThreadMarker, title: &str, text: &str, style: NSAlertStyle, bu
 /// main thread there is no alert (AppKit allows none there): the caller has printed it.
 pub fn message(title: &str, text: &str) {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    bring_to_front();
-    alert(mtm, title, text, NSAlertStyle::Informational, &["OK"]).runModal();
+    run_in_front(&alert(mtm, title, text, NSAlertStyle::Informational, &["OK"]));
 }
 
 /// A Yes/No question; true for Yes.
 pub fn confirm(title: &str, text: &str) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
-    bring_to_front();
-    alert(mtm, title, text, NSAlertStyle::Informational, &["Yes", "No"]).runModal() == NSAlertFirstButtonReturn
+    run_in_front(&alert(mtm, title, text, NSAlertStyle::Informational, &["Yes", "No"])) == NSAlertFirstButtonReturn
 }
 
 /// The address box's text, under its title: what to type, the note on plain HTTP the
@@ -225,8 +318,7 @@ pub fn ask_origin(initial: &str) -> Option<String> {
         alert.setAccessoryView(Some(&field));
         alert.layout();
         alert.window().setInitialFirstResponder(Some(&field));
-        bring_to_front();
-        if alert.runModal() != NSAlertFirstButtonReturn {
+        if run_in_front(&alert) != NSAlertFirstButtonReturn {
             return None;
         }
         typed = field.stringValue().to_string();
@@ -461,6 +553,47 @@ mod tests {
         let warning = notification_args(&Notice::new(Level::Error, "Update failed", "x"));
         assert_eq!(warning[6], "⚠️ Update failed");
         assert_eq!(route(None), Route::Script, "a bare binary has no bundle for UNUserNotificationCenter");
+    }
+
+    #[test]
+    fn the_notice_line_puts_title_and_text_on_one_line_and_marks_trouble() {
+        let info = Notice::new(Level::Info, "Addon files", "nothing missing");
+        assert_eq!(notice_line_text(&info), "Addon files: nothing missing");
+        assert_eq!(notice_tooltip(&info), "Addon files\nnothing missing");
+        let warning = Notice::new(Level::Warning, "Restart WoW to load the new addon", "Quit WoW completely\nand start it again.");
+        assert_eq!(notice_line_text(&warning), "⚠️ Restart WoW to load the new addon: Quit WoW completely and start it again.");
+        assert_eq!(notice_tooltip(&warning), "⚠️ Restart WoW to load the new addon\nQuit WoW completely\nand start it again.");
+        assert!(notice_line_text(&Notice::new(Level::Error, "Update failed", "x")).starts_with("⚠️ Update failed: "));
+    }
+
+    #[test]
+    fn a_long_notice_is_cut_at_a_word_and_the_tooltip_keeps_all_of_it() {
+        let text = "Every T3 WoW file is in /Applications/World of Warcraft/_forever_/Interface/AddOns, and the slot addons are all there.";
+        let notice = Notice::new(Level::Info, "Addon files: nothing missing", text);
+        let line = notice_line_text(&notice);
+        assert!(line.chars().count() <= NOTICE_LINE_CHARS, "{line}");
+        assert!(line.ends_with('…') && !line.ends_with(" …"), "{line}");
+        let shown = line.trim_end_matches('…');
+        assert!(format!("Addon files: nothing missing: {text}").starts_with(shown), "{line}");
+        assert!(notice_tooltip(&notice).ends_with(text));
+        // One long word: cut where it must be.
+        let word = Notice::new(Level::Info, "Path", "x".repeat(200));
+        let line = notice_line_text(&word);
+        assert_eq!(line.chars().count(), NOTICE_LINE_CHARS);
+        assert!(line.starts_with("Path: xxx") && line.ends_with("x…"), "{line}");
+        // Multi-byte characters near the cut don't split.
+        let accents = Notice::new(Level::Warning, "Trouble", "é".repeat(200));
+        assert_eq!(notice_line_text(&accents).chars().count(), NOTICE_LINE_CHARS);
+    }
+
+    #[test]
+    fn the_notice_line_goes_after_ten_minutes() {
+        let shown = Instant::now();
+        assert!(notice_current(shown, shown));
+        assert!(notice_current(shown, shown + Duration::from_secs(9 * 60 + 59)));
+        assert!(!notice_current(shown, shown + Duration::from_secs(10 * 60)));
+        assert!(!notice_current(shown, shown + Duration::from_secs(3600)));
+        assert!(notice_current(shown + Duration::from_secs(5), shown), "a clock that seems to go back keeps it");
     }
 
     #[test]
