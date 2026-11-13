@@ -15,10 +15,10 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSMenu, NSModalResponse,
-    NSRunningApplication, NSTextField,
+    NSRunningApplication, NSTextField, NSWorkspace,
 };
 use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString, NSTimer};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -110,8 +110,18 @@ fn edit_menu() {
 /// and Esc go to it. macOS 14's `activate` asks rather than takes: the app in front keeps
 /// the keyboard unless it yields, which Terminal and WoW never do. So this uses the older
 /// calls that take it, deprecated but still working.
-pub fn bring_to_front() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
+///
+/// Keep what it returns until the alert or panel has closed: dropping it gives the keyboard
+/// back (see `InFront`). An accessory app has no window once its alert is gone, so without
+/// that it would stay the active app and keys would go nowhere until the user clicked.
+pub fn bring_to_front() -> InFront {
+    let Some(mtm) = MainThreadMarker::new() else { return InFront { previous: None, outermost: false } };
+    let outermost = FRONT_DEPTH.with(|depth| {
+        depth.set(depth.get() + 1);
+        depth.get() == 1
+    });
+    // Only the outermost one remembers: inside it, the app in front is T3 WoW itself.
+    let previous = if outermost { NSWorkspace::sharedWorkspace().frontmostApplication() } else { None };
     let ns_app = NSApplication::sharedApplication(mtm);
     // Before the run loop starts (a message at start-up) nothing has set it yet.
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -120,12 +130,72 @@ pub fn bring_to_front() {
         ns_app.activateIgnoringOtherApps(true);
         NSRunningApplication::currentApplication().activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
     }
+    InFront { previous, outermost }
+}
+
+thread_local! {
+    /// How many `InFront`s are alive on the main thread. Only the outermost gives the
+    /// keyboard back, so the address box's retries don't hand it to the game in between.
+    static FRONT_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// T3 WoW holds the keyboard while this lives (from `bring_to_front`). Dropped, it hands the
+/// keyboard back to the app that was in front before: that app is reactivated, which puts
+/// the user back where they were (the game, Terminal). If there is none to go back to (it
+/// quit meanwhile, it was T3 WoW itself, or macOS refuses), T3 WoW hides instead, and macOS
+/// activates the next app in window order. Hiding alone could pick a different app than the
+/// one the user came from, so it is only the fallback.
+#[must_use = "dropping it at once hands the keyboard back before the alert opens"]
+pub struct InFront {
+    previous: Option<Retained<NSRunningApplication>>,
+    outermost: bool,
+}
+
+/// How to give the keyboard back once the outermost alert has closed.
+#[derive(Debug, PartialEq)]
+enum GiveBack {
+    /// Reactivate the app that was in front.
+    Previous,
+    /// Hide T3 WoW, so macOS activates the next app.
+    Hide,
+}
+
+/// `previous` tells about the app that was in front: whether it is T3 WoW itself, and
+/// whether it has quit since.
+fn give_back(previous: Option<(bool, bool)>) -> GiveBack {
+    match previous {
+        Some((is_self, terminated)) if !is_self && !terminated => GiveBack::Previous,
+        _ => GiveBack::Hide,
+    }
+}
+
+impl Drop for InFront {
+    fn drop(&mut self) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        FRONT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        if !self.outermost {
+            return;
+        }
+        let previous = self.previous.take();
+        // isEqual: is how Apple says to compare running apps (not pids).
+        let facts = previous.as_ref().map(|app| (**app == *NSRunningApplication::currentApplication(), app.isTerminated()));
+        let restored = match (give_back(facts), previous) {
+            // T3 WoW is the active app, so macOS lets it hand activation on.
+            (GiveBack::Previous, Some(app)) => app.activateWithOptions(NSApplicationActivationOptions::empty()),
+            _ => false,
+        };
+        if !restored {
+            NSApplication::sharedApplication(mtm).hide(None);
+        }
+    }
 }
 
 /// Runs `alert` once T3 WoW has the keyboard: the alert's window key and in front, and its
-/// first responder (the address box's field, or the default button) ready for keys.
+/// first responder (the address box's field, or the default button) ready for keys. Once
+/// it closes, the keyboard goes back to the app that had it (unless an outer `InFront`
+/// still holds it).
 fn run_in_front(alert: &NSAlert) -> NSModalResponse {
-    bring_to_front();
+    let _front = bring_to_front();
     alert.layout();
     let window = alert.window();
     window.makeKeyAndOrderFront(None);
@@ -308,6 +378,8 @@ fn origin_box_text(problem: Option<&str>) -> String {
 /// with what's wrong and what was typed. None when cancelled.
 pub fn ask_origin(initial: &str) -> Option<String> {
     let mtm = MainThreadMarker::new()?;
+    // Held across the retries, so the keyboard stays here until the box is done.
+    let _front = bring_to_front();
     let mut typed = initial.to_string();
     let mut problem: Option<String> = None;
     loop {
@@ -584,6 +656,16 @@ mod tests {
         // Multi-byte characters near the cut don't split.
         let accents = Notice::new(Level::Warning, "Trouble", "é".repeat(200));
         assert_eq!(notice_line_text(&accents).chars().count(), NOTICE_LINE_CHARS);
+    }
+
+    #[test]
+    fn the_keyboard_goes_back_to_the_app_that_had_it_or_t3_wow_hides() {
+        assert_eq!(give_back(Some((false, false))), GiveBack::Previous);
+        // It quit while the alert was up.
+        assert_eq!(give_back(Some((false, true))), GiveBack::Hide);
+        // T3 WoW was already the active app: going "back" to it would keep the keys stuck.
+        assert_eq!(give_back(Some((true, false))), GiveBack::Hide);
+        assert_eq!(give_back(None), GiveBack::Hide);
     }
 
     #[test]

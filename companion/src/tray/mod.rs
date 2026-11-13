@@ -452,13 +452,17 @@ impl Tray {
             self.autostart.set_checked(platform::autostart_enabled());
         } else if id == *self.wow_folder.id() {
             let start = app.wow_dir.lock().unwrap().clone();
-            #[cfg(target_os = "macos")]
-            platform::bring_to_front();
             let mut dialog = rfd::FileDialog::new().set_title("Choose your World of Warcraft _forever_ folder");
             if let Some(start) = start {
                 dialog = dialog.set_directory(start);
             }
-            if let Some(picked) = dialog.pick_folder() {
+            let picked = {
+                // On a Mac the panel takes the keyboard, which goes back once it closes.
+                #[cfg(target_os = "macos")]
+                let _front = platform::bring_to_front();
+                dialog.pick_folder()
+            };
+            if let Some(picked) = picked {
                 match crate::wow::normalize(&picked.to_string_lossy()).filter(|d| crate::wow::looks_like_client(d)) {
                     Some(dir) => {
                         Config::update(|c| c.wow_dir = Some(dir.to_string_lossy().into_owned()));
