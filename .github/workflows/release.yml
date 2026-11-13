@@ -1,8 +1,11 @@
 # Publishes a release when a version tag is pushed (git tag v0.4.0 && git push origin v0.4.0).
 # The source repository is private, so the release goes to the public
 # MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
-# t3wow.exe, its SHA-256, the SHA-256's signature (once signing is set up), and the addon on its own (zipped, for
-# CurseForge or a manual install). Publishing there needs the RELEASES_TOKEN secret: a
+# t3wow.exe and the Mac app (t3wow-macos-arm64.zip), each with its SHA-256 and the SHA-256's
+# signature (once signing is set up), and the addon on its own (zipped, for CurseForge or a
+# manual install). Three jobs: build-windows (GitHub-hosted), build-macos (the self-hosted Mac
+# runner labelled t3wow-mac, so the release waits while that Mac is asleep or offline), and
+# publish, which signs both checksums and uploads everything once both builds are done. Publishing there needs the RELEASES_TOKEN secret: a
 # fine-grained token with Contents read and write on t3wow-releases only. Signing needs the
 # T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
 # scripts/gen-signing-key.mjs), whose public half is in companion/src/updater/release_key.rs. Until both
@@ -28,9 +31,9 @@ env:
   CURSEFORGE_GAME_TYPE: "88568"
 
 jobs:
-  release:
-    # GitHub-hosted, unlike CI: the steps need PowerShell 7 (pwsh, Invoke-RestMethod -Form)
-    # and Git's bash, which the self-hosted runners' PC doesn't have.
+  build-windows:
+    # GitHub-hosted, unlike CI: the steps need PowerShell 7 (pwsh) and Git's bash, which the
+    # self-hosted runners' PC doesn't have.
     runs-on: windows-latest
     env:
       # Authenticode signing (SSL.com eSigner) runs only once its secrets are set; see
@@ -143,10 +146,70 @@ jobs:
           "$hash  t3wow.exe" | Out-File -Encoding ascii -NoNewline release/t3wow.exe.sha256
           Compress-Archive -Path addon/T3WoW -DestinationPath "release/T3WoW-${{ github.ref_name }}.zip"
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: release/
+          if-no-files-found: error
+
+  build-macos:
+    # The MacBook registered as a self-hosted runner (labels self-hosted, macOS, ARM64,
+    # t3wow-mac), building as its user: GitHub-hosted Macs count their minutes ten times.
+    runs-on: [self-hosted, t3wow-mac]
+    env:
+      T3WOW_RELEASE: "1"
+      # The signing identity in that user's login keychain; unset, the app is signed ad hoc.
+      T3WOW_CODESIGN_IDENTITY: ${{ vars.T3WOW_CODESIGN_IDENTITY || '-' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: false
+
+      - run: npm ci
+      - name: Tests (addon Lua and companion, on macOS)
+        run: npm test
+
+      - name: Build T3 WoW.app
+        run: npm run build:app
+
+      - name: The app is this version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "dist/T3 WoW.app/Contents/Info.plist")
+          if [ "$built" != "$tag" ]; then echo "::error::T3 WoW.app says it is $built, not $tag: was T3WOW_RELEASE set for the build?"; exit 1; fi
+          codesign --verify --deep --strict "dist/T3 WoW.app"
+          mkdir -p release
+          cp dist/t3wow-macos-arm64.zip dist/t3wow-macos-arm64.zip.sha256 release/
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release/
+          merge-multiple: true
+
       - name: Sign the checksum
         env:
           T3WOW_SIGNING_KEY: ${{ secrets.T3WOW_SIGNING_KEY }}
-        run: node scripts/sign-release.mjs release/t3wow.exe.sha256
+        run: |
+          node scripts/sign-release.mjs release/t3wow.exe.sha256
+          node scripts/sign-release.mjs release/t3wow-macos-arm64.zip.sha256
 
       # Only feat and fix subjects (without the prefix) go public: the rest (ci, chore,
       # docs, refactor...) is the private repository's business.
@@ -161,7 +224,9 @@ jobs:
             echo
             echo "${changes:-- Fixes and improvements behind the scenes.}"
             echo
-            echo "Download \`t3wow.exe\` and run it; it installs the addon and updates itself from here."
+            echo "On Windows, download \`t3wow.exe\` and run it; it installs the addon and updates itself from here."
+            echo
+            echo "On a Mac with Apple Silicon (alpha), download \`t3wow-macos-arm64.zip\`, unzip it and move T3 WoW.app to Applications. The first time, open it, then allow it in System Settings > Privacy & Security (Open Anyway)."
           } > release/NOTES.md
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -175,6 +240,9 @@ jobs:
             release/t3wow.exe
             release/t3wow.exe.sha256
             release/t3wow.exe.sha256.sig
+            release/t3wow-macos-arm64.zip
+            release/t3wow-macos-arm64.zip.sha256
+            release/t3wow-macos-arm64.zip.sha256.sig
             release/T3WoW-${{ github.ref_name }}.zip
 
       # The addon zip goes to CurseForge too, filed under the WoW Forever version whose API
@@ -190,8 +258,8 @@ jobs:
           $versions = Invoke-RestMethod -Headers $headers -Uri https://wow.curseforge.com/api/game/versions
           $version = $versions | Where-Object { $_.gameVersionTypeID -eq $env:CURSEFORGE_GAME_TYPE -and $_.apiVersion -eq $interface } | Select-Object -First 1
           if (-not $version) { throw "CurseForge has no WoW Forever version for interface ${interface}." }
-          $changes = (Get-Content release/NOTES.md | Where-Object { $_ -notmatch '^Download ' }) -join "`n"
-          $changelog = "$changes`nThe addon needs the T3 WoW companion (t3wow.exe): https://github.com/$env:RELEASES_REPO/releases/latest"
+          $changes = (Get-Content release/NOTES.md | Where-Object { $_ -notmatch '^On (Windows|a Mac)' }) -join "`n"
+          $changelog = "$changes`nThe addon needs the T3 WoW companion (t3wow.exe on Windows, T3 WoW.app on a Mac): https://github.com/$env:RELEASES_REPO/releases/latest"
           $metadata = @{
             changelog = $changelog
             changelogType = "markdown"
