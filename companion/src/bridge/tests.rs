@@ -375,6 +375,8 @@ impl Rig {
         let sink = Arc::clone(&opened);
         bridge.opener = Box::new(move |link| sink.lock().unwrap().push(link.to_string()));
         bridge.on_capture(CaptureMessage::Wow(Some("123@1".into())));
+        // The keys come through, whatever this Mac's Input Monitoring says.
+        bridge.keys_hidden = Box::new(|| false);
         Rig { bridge, t3, written, clock, opened }
     }
 
@@ -3204,6 +3206,26 @@ fn ctrl_v_is_looked_for_only_while_you_type_in_the_message_box() {
 }
 
 #[test]
+fn a_paste_refused_while_macos_may_hide_the_keys_says_how_to_let_them_through() {
+    let (mut rig, presses) = paste_rig(51_500_000, 4, 4, 100);
+    rig.bridge.keys_hidden = Box::new(|| true);
+    let paste = |rig: &mut Rig, s: u64| {
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": s, "t": "paste", "d": "mac:t1" }] }));
+        rig.bridge.tick();
+        outcome(rig, s)
+    };
+    let refused = paste(&mut rig, 2);
+    assert_eq!(refused["ok"], false);
+    assert_eq!(refused["x"], crate::app::shown(KEYS_HIDDEN));
+    #[cfg(target_os = "macos")]
+    assert!(refused["x"].as_str().unwrap().contains("Input Monitoring"));
+    // A press that was seen pastes all the same: this is only what a refusal says.
+    press(&rig, &presses);
+    rig.advance(200);
+    assert_eq!(paste(&mut rig, 3)["ok"], true);
+}
+
+#[test]
 fn no_addon_can_paste_without_your_ctrl_v_and_each_press_pastes_once() {
     let (mut rig, presses) = paste_rig(51_000_000, 4, 4, 100);
     let paste = |rig: &mut Rig, s: u64| {
@@ -3368,9 +3390,9 @@ fn without_pictures_in_the_game_a_paste_still_works_with_no_small_picture() {
     assert_eq!(rig.bridge.snapshot()["att"], json!([{ "d": "new", "i": 1, "w": 2, "h": 2 }]));
     assert!(rig.written.lock().unwrap().images.is_empty());
     // The game is only told it can paste where the clipboard can be read.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     assert_eq!(rig.bridge.snapshot()["pi"], true);
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     assert!(rig.bridge.snapshot().get("pi").is_none());
 }
 

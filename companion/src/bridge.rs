@@ -956,6 +956,9 @@ pub struct Bridge {
     pub presses: Box<dyn Fn() -> (u64, i64) + Send>,
     /// Turns the look for Ctrl+V on or off (`keys::arm`); replaced in tests.
     pub arm_keys: Box<dyn Fn(bool) + Send>,
+    /// Whether macOS may be hiding the keys, so no Cmd+V can be seen (`keys::keys_hidden`;
+    /// never elsewhere); replaced in tests.
+    pub keys_hidden: Box<dyn Fn() -> bool + Send>,
     /// The presses pastes have used: each press lets one paste through.
     presses_used: u64,
     /// Images pasted in the game, by the message they go with: "new" for New Thread,
@@ -1641,7 +1644,19 @@ const MAX_PASTED: usize = 8;
 /// A paste counts only if the frame that brought it was read this soon after a Ctrl+V
 /// in WoW (see `keys`), and not before it.
 const PASTE_PRESS_MS: i64 = 5000;
+#[cfg(not(target_os = "macos"))]
 const UNPROVEN_PASTE: &str = "T3 WoW pastes only right after you press Ctrl+V in its message box";
+#[cfg(target_os = "macos")]
+const UNPROVEN_PASTE: &str = "T3 WoW pastes only right after you press Cmd+V in its message box";
+/// A refused paste when macOS may be hiding the keys (`keys::keys_hidden`): in the menu bar
+/// app, and for a bare t3wow (allowed through the app it runs in).
+#[cfg(target_os = "macos")]
+const KEYS_HIDDEN: (&str, &str) = (
+    "T3 WoW didn't see your Cmd+V: macOS may be hiding keys from it. Turn on T3 WoW in System Settings > Privacy & Security > Input Monitoring, then quit and reopen T3 WoW.",
+    "t3wow didn't see your Cmd+V: macOS may be hiding keys from it. Turn on Terminal (or the app t3wow runs in) in System Settings > Privacy & Security > Input Monitoring, then restart it.",
+);
+#[cfg(not(target_os = "macos"))]
+const KEYS_HIDDEN: &str = UNPROVEN_PASTE;
 const NO_IMAGE: &str = "the clipboard holds no image";
 /// Sends remembered until T3 shows their message.
 const SENT_KEPT: usize = 16;
@@ -2027,6 +2042,7 @@ impl Bridge {
             clipboard: Box::new(clip::read_image),
             presses: Box::new(crate::keys::presses),
             arm_keys: Box::new(crate::keys::arm),
+            keys_hidden: Box::new(crate::keys::keys_hidden),
             presses_used: 0,
             drafts: BTreeMap::new(),
             sent: Vec::new(),
@@ -2737,6 +2753,12 @@ impl Bridge {
         let (count, at) = (self.presses)();
         let seen = self.command_seen_at;
         if count <= self.presses_used || at > seen || seen - at > PASTE_PRESS_MS {
+            // On a Mac without Input Monitoring the keys may not come through at all: then
+            // say how to turn it on (macOS has just been asked to list T3 WoW there).
+            if (self.keys_hidden)() {
+                self.log("paste from the game without a Cmd+V seen in WoW, and macOS may be hiding the keys (no Input Monitoring): refused");
+                return Err(T3Error::Other(crate::app::shown(KEYS_HIDDEN).into()));
+            }
             self.log("paste from the game without a Ctrl+V in WoW just before it: refused");
             return Err(T3Error::Other(UNPROVEN_PASTE.into()));
         }
@@ -4888,10 +4910,10 @@ impl Bridge {
         }
         // A refused sign-in, else one that can only read: the game's top line says either.
         out.insert("auth".into(), json!(self.auth_error.as_deref().or(self.sign_in_read_only.then(|| crate::app::shown(READ_ONLY_LINE)))));
-        // This companion pastes images (the game offers Ctrl+V for them), and the ones pasted
-        // so far, by the message they go with (left out when there are none). Only Windows
-        // can read the clipboard so far (`clip::read_image`).
-        #[cfg(windows)]
+        // This companion pastes images (the game offers Ctrl+V, on a Mac Cmd+V, for them), and
+        // the ones pasted so far, by the message they go with (left out when there are none).
+        // Windows and macOS can read the clipboard (`clip::read_image`).
+        #[cfg(any(windows, target_os = "macos"))]
         out.insert("pi".into(), json!(true));
         let pasted: Vec<Value> = self
             .drafts

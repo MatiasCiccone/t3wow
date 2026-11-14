@@ -193,6 +193,7 @@ impl Live {
         let (clip, read) = (Arc::clone(&clipboard), Arc::clone(&presses));
         bridge.clipboard = Box::new(move || Ok(clip.lock().unwrap().take()));
         bridge.presses = Box::new(move || *read.lock().unwrap());
+        bridge.keys_hidden = Box::new(|| false);
         bridge.on_capture(CaptureMessage::Wow(Some(format!("live@{}", now_ms()))));
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("live").join(test);
         let _ = std::fs::remove_dir_all(&dir);
