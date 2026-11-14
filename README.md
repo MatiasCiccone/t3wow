@@ -91,7 +91,7 @@ The app is signed with the project's own certificate, not one from Apple, so mac
 9. macOS says T3 WoW may not be able to record the screen until it is quit. Click **Quit & Reopen**. T3 WoW restarts by itself, with no Gatekeeper prompt this time.
 10. Restart WoW completely (as in [Set up](#set-up)) and log in to a character. The menu's WoW line says when the companion sees the game.
 
-The companion reads only the game's window, and only its top-left corner, though macOS calls the permission recording the screen and audio. If the WoW line says T3 WoW can't see the game, choose **Open Screen Recording settings…** in the menu and turn T3 WoW on; if it shows as on already, remove it with **−** and add it again with **+**.
+The companion reads only the top-left corner of the game's window, though macOS calls the permission recording the screen and audio. While its window capture starts up or can't run, it copies that corner of the screen instead, so a window covering the corner is read too. If the WoW line says T3 WoW can't see the game, choose **Open Screen Recording settings…** in the menu and turn T3 WoW on; if it shows as on already, remove it with **−** and add it again with **+**.
 
 ### Where things live on a Mac
 
