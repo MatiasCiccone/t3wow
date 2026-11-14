@@ -62,16 +62,20 @@ libc = "0.2"
 block2 = "=0.6.2"
 dispatch2 = { version = "=0.3.1", default-features = false, features = ["std", "block2", "objc2"] }
 objc2 = "=0.6.5"
-# The menu bar app (src/tray/macos.rs): its run loop, timer and alerts.
+# The menu bar app (src/tray/macos.rs): its run loop, timer and alerts; and images pasted in
+# the game (src/clip.rs): the pasteboard, and its TIFFs made PNGs.
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
   "std",
   "objc2-core-foundation",
   "NSAlert",
   "NSApplication",
+  "NSBitmapImageRep",
   "NSButton",
   "NSControl",
+  "NSImageRep",
   "NSMenu",
   "NSMenuItem",
+  "NSPasteboard",
   "NSResponder",
   "NSRunningApplication",
   "NSText",
@@ -83,7 +87,7 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMBase", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
 objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSBundle", "NSDate", "NSEnumerator", "NSError", "NSGeometry", "NSRunLoop", "NSString", "NSThread", "NSTimer"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSBundle", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSRunLoop", "NSString", "NSThread", "NSTimer"] }
 # The app's own notifications (src/tray/macos.rs), once it runs as T3 WoW.app.
 objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [
   "std",
