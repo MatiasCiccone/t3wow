@@ -983,11 +983,11 @@ pub fn run(app: Arc<App>) {
             (false, _, _) => "not running".to_string(),
             (true, false, _) => "running, waiting for the addon (log in, or /reload)".to_string(),
             (true, true, _) if s.write_problem.is_some() => s.write_problem.as_deref().unwrap_or("").chars().take(70).collect::<String>(),
-            (true, true, _) if used >= SLOT_COUNT => "in game, all 200 updates used: Reload UI in the game".to_string(),
-            (true, true, true) => format!("in game, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
-            (true, true, false) if s.signals_lost && slots.missing_files() => "in game, signal files missing: choose Repair addon files, then restart WoW".to_string(),
-            (true, true, false) if s.signals_out => format!("in game, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
-            (true, true, false) => format!("in game, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, _) if used >= SLOT_COUNT => "connected, all 200 updates used: Reload UI in the game".to_string(),
+            (true, true, true) => format!("connected, updates arrive in about a second ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) if s.signals_lost && slots.missing_files() => "connected, signal files missing: choose Repair addon files, then restart WoW".to_string(),
+            (true, true, false) if s.signals_out => format!("connected, updates on a timer until WoW restarts ({used}/{SLOT_COUNT} updates used)"),
+            (true, true, false) => format!("connected, updates on a timer ({used}/{SLOT_COUNT} updates used)"),
         };
         // The restart comes first, where the tray's tooltip still shows it.
         if s.wow_running {
