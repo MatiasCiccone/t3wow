@@ -2976,7 +2976,8 @@ input:SetAutoFocus(false)
 input:SetFontObject(Skin.fonts.text)
 input:SetTextInsets(0, 0, 2, 2)
 input:SetWidth(messageWidth() - 24)
--- The companion looks for Ctrl+V only while you're typing here, so it hears when you are.
+-- The companion looks for Ctrl+V (Cmd+V on a Mac) only while you're typing here, so it hears
+-- when you are.
 input:SetScript("OnEditFocusGained", function()
     inputBox:SetColors(nil, "focus")
     ns.Link.Send({ t = "ui", o = true, f = true })
@@ -3013,7 +3014,8 @@ setPlaceholder = function()
     local card = not asking and isSelectedView(view) and view.card
     placeholder:SetText(blocked or (asking and "Type your own answer, or a note to go with your pick")
         or (card and "Answer T3's card in T3, not here (a message goes to the agent)")
-        or (inbox and inbox.pi and "Message the agent (Shift+Enter for a new line, Ctrl+V pastes images too)")
+        or (inbox and inbox.pi and ((IsMacClient and IsMacClient()) and "Message the agent (Shift+Enter for a new line, Cmd+V pastes images too)"
+            or "Message the agent (Shift+Enter for a new line, Ctrl+V pastes images too)"))
         or "Message the agent (Shift+Enter for a new line)")
 end
 input:SetScript("OnCursorChanged", function(_, _, y, _, height)
@@ -3023,7 +3025,7 @@ input:SetScript("OnCursorChanged", function(_, _, y, _, height)
 end)
 
 -- ---------------------------------------------------------------- pasting images
--- The game can't read the clipboard, and Ctrl+V pastes only text into the box. When it
+-- The game can't read the clipboard, and Ctrl+V (Cmd+V on a Mac) pastes only text into the box. When it
 -- pastes nothing, the clipboard may hold an image: the companion reads it, and keeps it
 -- for the message being written (a thread's, or New Thread's), drawn small above the box
 -- (inbox.att: { d = the message, i = its number, w, h, f, tw, th for the small picture's

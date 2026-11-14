@@ -2029,6 +2029,18 @@ function ctrlV(pasted)
   if pasted then box.text = box.text .. pasted end
   later()
 end
+-- Cmd+V on a Mac (needs IsMetaKeyDown from metaDown).
+function cmdV(pasted)
+  local box, later = composer(), nil
+  local after = C_Timer.After
+  C_Timer.After = function(_, fn) later = fn end
+  metaDown = true
+  box.scripts.OnKeyDown(box, "V")
+  metaDown = false
+  C_Timer.After = after
+  if pasted then box.text = box.text .. pasted end
+  later()
+end
 function pasteChips()
   local chips = {}
   for _, f in ipairs(frames) do
@@ -3009,8 +3021,8 @@ return "ok"
 `);
 });
 
-// On a Mac the companion is the T3 WoW app in the menu bar, not a tray (and has no image
-// paste yet): the window names it so, and says where "Commands from the game" is set there.
+// On a Mac the companion is the T3 WoW app in the menu bar, not a tray: the window names it
+// so, and says where "Commands from the game" is set there.
 test("on a Mac the window names the companion's menu bar icon, not a tray, and Read-only points at it", () => {
   run(`${CTRL_V}
 inboxWith(ENVS, { threads = { THREAD }, trust = "readonly" })
@@ -3020,20 +3032,30 @@ assert(not showing("tray") and not showing("config%.json"), "a tray or the confi
 typeText("please")
 click("Send")
 assert(showing('Sending messages from the game is off: T3 WoW in the menu bar has "Commands from the game" set to Read%-only%.'), "no reason, or the tray's")
--- A Mac companion doesn't paste (no pi): the box offers no Ctrl+V, and Ctrl+V asks nothing.
+-- An older Mac companion doesn't paste (no pi): the box offers no Cmd+V, and Cmd+V asks nothing.
 inboxWith(ENVS, { threads = { THREAD } })
 assert(showing("^Message the agent %(Shift%+Enter for a new line%)$"), "placeholder")
 assert(not showing("pastes images"), "an image paste is promised")
 local before = #queue()
-ctrlV()
+cmdV()
 assert(#queue() == before, "asked a companion that can't paste")
+-- One that pastes: the box offers Cmd+V, not Ctrl+V, and Cmd+V asks for the image.
+inboxWith(ENVS, { pi = true, threads = { THREAD } })
+assert(showing("Cmd%+V pastes images too"), "the placeholder doesn't offer Cmd+V")
+assert(not showing("Ctrl%+V"), "Ctrl+V offered on a Mac")
+cmdV()
+assert(#queue() == before + 1 and sent().t == "paste" and sent().d == "mac:t1", "Cmd+V didn't ask for the image")
+-- Cmd+V that pastes text is only text.
+before = #queue()
+cmdV("some text")
+assert(#queue() == before, "a text paste asked for an image")
 -- Not answering: it's asked for in the menu bar, not in a tray.
 Link.Send({ t = "open", e = "mac", id = "t1" })
 tick(25)
 UI.Refresh()
 assert(showing("Companion not answering: is T3 WoW running in the menu bar%?"), "stalled wording")
 return "ok"
-`, { before: ON_MAC });
+`, { before: ON_MAC + "\nmetaDown = false\nfunction IsMetaKeyDown() return metaDown end" });
 });
 
 test("off a Mac the window keeps the tray's wording", () => {
