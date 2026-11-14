@@ -1,7 +1,8 @@
 //! Images pasted in the game: the game can't read the clipboard, so when you press Ctrl+V
-//! in its message box with an image copied, the companion reads it here (a screenshot from
-//! Snipping Tool, an image copied in a browser or an editor) and keeps it as a PNG to send
-//! with the message, plus a small picture for the game to show above the box.
+//! (Cmd+V on a Mac) in its message box with an image copied, the companion reads it here (a
+//! screenshot from Snipping Tool or macOS's Cmd+Ctrl+Shift+4, an image copied in a browser or
+//! an editor) and keeps it as a PNG to send with the message, plus a small picture for the
+//! game to show above the box.
 
 use crate::render::{decode_png, Bitmap};
 
@@ -38,9 +39,47 @@ pub fn read_image() -> Result<Option<Clipped>, String> {
     }
 }
 
-#[cfg(not(windows))]
+/// The image on a Mac's clipboard (the general pasteboard), None if it holds none.
+#[cfg(target_os = "macos")]
+pub fn read_image() -> Result<Option<Clipped>, String> {
+    let copied = mac::read();
+    pick(copied, mac::tiff_png)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn read_image() -> Result<Option<Clipped>, String> {
     Ok(None)
+}
+
+/// What a Mac's clipboard holds: an image as a PNG and as a TIFF (screenshots copy both,
+/// browsers often only the TIFF), and whether a file was copied (in Finder).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct MacCopied {
+    png: Option<Vec<u8>>,
+    tiff: Option<Vec<u8>>,
+    file: bool,
+}
+
+/// The image to send from a Mac's clipboard: the PNG as it was copied when it reads (it
+/// keeps its transparency and needs no encoding), else the TIFF, made a PNG by `tiff_png`
+/// (macOS's own decoder). A file copied in Finder brings only its icon as a TIFF, which isn't
+/// the image you meant: that is no image, as a file copied in Explorer is on Windows.
+#[cfg(any(target_os = "macos", test))]
+fn pick(copied: MacCopied, tiff_png: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>) -> Result<Option<Clipped>, String> {
+    if let Some(png) = copied.png {
+        if let Ok(bitmap) = decode_png(&png) {
+            return fit_upload(Some(png), bitmap).map(Some);
+        }
+    }
+    match copied.tiff.filter(|_| !copied.file) {
+        Some(tiff) => {
+            let png = tiff_png(&tiff)?;
+            let bitmap = decode_png(&png).map_err(|_| "the copied image is in a format T3 WoW can't read".to_string())?;
+            fit_upload(Some(png), bitmap).map(Some)
+        }
+        None => Ok(None),
+    }
 }
 
 /// A PNG small enough for T3: the one copied if it fits, else the pixels encoded, at half
@@ -254,6 +293,39 @@ mod win {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::MacCopied;
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF};
+    use objc2_foundation::{NSData, NSDictionary};
+
+    pub fn read() -> MacCopied {
+        autoreleasepool(|_| {
+            let board = NSPasteboard::generalPasteboard();
+            // SAFETY: AppKit's constant type names, valid for the life of the process.
+            let (png, tiff, file) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeTIFF, NSPasteboardTypeFileURL) };
+            let data = |kind| board.dataForType(kind).map(|d| d.to_vec());
+            let file = board.types().is_some_and(|types| types.containsObject(file));
+            MacCopied { png: data(png), tiff: data(tiff), file }
+        })
+    }
+
+    /// A TIFF as a PNG, by macOS's own image classes.
+    pub fn tiff_png(tiff: &[u8]) -> Result<Vec<u8>, String> {
+        let bad = || "the copied image is in a format T3 WoW can't read".to_string();
+        autoreleasepool(|_| {
+            let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(tiff)).ok_or_else(bad)?;
+            if (rep.pixelsWide() as u64) * (rep.pixelsHigh() as u64) > super::MAX_PIXELS {
+                return Err("the copied image is too large".into());
+            }
+            // SAFETY: no properties, so none of the wrong type.
+            let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }.ok_or_else(bad)?;
+            Ok(png.to_vec())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +434,127 @@ mod tests {
         assert_eq!((preview(&tall).width, preview(&tall).height), (200, 2048));
         let tiny = Bitmap { width: 2, height: 2, rgba: [RED, BLUE, RED, BLUE].concat() };
         assert_eq!(preview(&tiny), tiny);
+    }
+
+    fn png_of(bitmap: &Bitmap) -> Vec<u8> {
+        encode_png(bitmap).unwrap()
+    }
+
+    #[test]
+    fn a_macs_png_is_preferred_and_sent_as_it_was_copied() {
+        let bitmap = Bitmap { width: 2, height: 1, rgba: [RED, BLUE].concat() };
+        let png = png_of(&bitmap);
+        let copied = MacCopied { png: Some(png.clone()), tiff: Some(b"a tiff".to_vec()), file: false };
+        let clipped = pick(copied, |_| panic!("the TIFF was read with a PNG there")).unwrap().unwrap();
+        assert_eq!(clipped.png, png);
+        assert_eq!(clipped.bitmap, bitmap);
+    }
+
+    #[test]
+    fn a_macs_tiff_is_read_when_there_is_no_png_or_it_doesnt_decode() {
+        let bitmap = Bitmap { width: 1, height: 2, rgba: [GREEN, WHITE].concat() };
+        let converted = png_of(&bitmap);
+        for png in [None, Some(b"not a png".to_vec())] {
+            let copied = MacCopied { png, tiff: Some(b"a tiff".to_vec()), file: false };
+            let clipped = pick(copied, |tiff| {
+                assert_eq!(tiff, b"a tiff");
+                Ok(converted.clone())
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(clipped.bitmap, bitmap);
+            assert_eq!(clipped.png, converted);
+        }
+    }
+
+    #[test]
+    fn a_file_copied_in_finder_is_no_image_and_neither_is_text() {
+        let copied = MacCopied { png: None, tiff: Some(b"the file's icon".to_vec()), file: true };
+        assert!(pick(copied, |_| panic!("read the icon")).unwrap().is_none());
+        assert!(pick(MacCopied::default(), |_| panic!("read a TIFF that isn't there")).unwrap().is_none());
+        // A PNG copied with a file (an app that puts both) still goes.
+        let bitmap = Bitmap { width: 1, height: 1, rgba: RED.to_vec() };
+        let copied = MacCopied { png: Some(png_of(&bitmap)), tiff: None, file: true };
+        assert_eq!(pick(copied, |_| unreachable!()).unwrap().unwrap().bitmap, bitmap);
+    }
+
+    #[test]
+    fn a_tiff_macos_cant_read_says_so() {
+        let copied = MacCopied { png: None, tiff: Some(vec![0; 8]), file: false };
+        assert!(pick(copied, |_| Err("the copied image is in a format T3 WoW can't read".into())).is_err());
+        let copied = MacCopied { png: None, tiff: Some(vec![0; 8]), file: false };
+        assert!(pick(copied, |_| Ok(b"still not a png".to_vec())).is_err());
+    }
+
+    /// macOS turns a real TIFF into a PNG with the same pixels.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_reads_a_tiff() {
+        let tiff = tiff_of(3, 2, &[RED, GREEN, BLUE, WHITE, RED, GREEN]);
+        let bitmap = decode_png(&mac::tiff_png(&tiff).unwrap()).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (3, 2));
+        assert_eq!(bitmap.rgba, [RED, GREEN, BLUE, WHITE, RED, GREEN].concat());
+        assert!(mac::tiff_png(b"not a tiff").is_err());
+    }
+
+    /// An uncompressed RGBA TIFF, little-endian, one strip.
+    #[cfg(target_os = "macos")]
+    fn tiff_of(w: u32, h: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
+        let data: Vec<u8> = pixels.iter().flatten().copied().collect();
+        let entries: [(u16, u16, u32, u32); 11] = [
+            (256, 4, 1, w),                 // width
+            (257, 4, 1, h),                 // height
+            (258, 3, 4, 0),                 // bits per sample: offset filled below
+            (259, 3, 1, 1),                 // no compression
+            (262, 3, 1, 2),                 // RGB
+            (273, 4, 1, 0),                 // strip offset: filled below
+            (277, 3, 1, 4),                 // samples per pixel
+            (278, 4, 1, h),                 // rows per strip
+            (279, 4, 1, data.len() as u32), // strip byte count
+            (284, 3, 1, 1),                 // chunky
+            (338, 3, 1, 2),                 // unassociated alpha
+        ];
+        let ifd_len = 2 + entries.len() * 12 + 4;
+        let bits_at = 8 + ifd_len as u32;
+        let data_at = bits_at + 8;
+        let mut out = b"II*\0".to_vec();
+        out.extend_from_slice(&8u32.to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            let value = match tag {
+                258 => bits_at,
+                273 => data_at,
+                _ => value,
+            };
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            if kind == 3 && count == 1 {
+                out.extend_from_slice(&(value as u16).to_le_bytes());
+                out.extend_from_slice(&[0, 0]);
+            } else {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..4 {
+            out.extend_from_slice(&8u16.to_le_bytes());
+        }
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "reads the real clipboard: copy an image of T3WOW_CLIP_SIZE (\"WxH\") first"]
+    fn reads_an_image_copied_on_this_mac() {
+        let want = std::env::var("T3WOW_CLIP_SIZE").expect("set T3WOW_CLIP_SIZE to the copied image's size, like 120x80");
+        let copied = mac::read();
+        println!("on the clipboard: PNG {:?} bytes, TIFF {:?} bytes, file {}", copied.png.as_ref().map(Vec::len), copied.tiff.as_ref().map(Vec::len), copied.file);
+        let clipped = read_image().unwrap().expect("no image on the clipboard");
+        assert_eq!(format!("{}x{}", clipped.bitmap.width, clipped.bitmap.height), want);
+        assert_eq!(decode_png(&clipped.png).unwrap().width, clipped.bitmap.width);
+        println!("read {want}: {} bytes of PNG, top-left pixel {:?}", clipped.png.len(), &clipped.bitmap.rgba[..4]);
     }
 
     #[test]
