@@ -98,7 +98,7 @@ On a Mac with Apple Silicon (tested on macOS 26.5.1 and 26.7.2), the companion i
 1. Download t3wow-macos-arm64.zip from the same releases page and double-click it. **In Finder, drag T3 WoW onto Applications**, then open it from there. (Opened anywhere else, it runs from a read-only copy that can't update itself.)
 2. macOS says "T3 WoW" Not Opened. **Click Done**, not the highlighted Move to Trash, which deletes the app.
 3. Open System Settings, then Privacy & Security, scroll to Security and click **Open Anyway**. Click **Open Anyway** again in the next dialog, and confirm with Touch ID or your password.
-4. When macOS asks to let T3 WoW record the screen, click Open System Settings, turn on T3 WoW, then click **Quit & Reopen**. T3 WoW reads only the game's window.
+4. When macOS asks to let T3 WoW record the screen, click Open System Settings, turn on T3 WoW, then click **Quit & Reopen**. T3 WoW reads only the top-left corner of the game's window (or of the screen there, while its window capture starts up).
 5. Sign in to T3 and restart WoW, as in Setting up.
 
 Settings, sign-ins and the log are in ~/Library/Application Support/t3wow. The sign-ins are encrypted with the key in token.key beside them, so a copy of config.json alone means signing in again. Updates install from the menu bar, like on Windows, and keep the Screen Recording permission.
