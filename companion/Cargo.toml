@@ -28,7 +28,7 @@ ureq = { version = "3", features = ["json"] }
 
 # The tray icon and its menu, and the folder picker: Windows' tray, a Mac's menu bar.
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-rfd = "0.17"
+rfd = "0.18"
 tray-icon = "0.26"
 
 [target.'cfg(windows)'.dependencies]
