@@ -74,7 +74,7 @@ On a Mac the companion is **T3 WoW.app**, a menu bar app: it does what the secti
 - **WoW: Forever's native Mac client.** Any display mode works, fullscreen included: the app reads the game's own window with ScreenCaptureKit, so the game can be fullscreen or have other windows over it.
 - **WoW at the display's native resolution**: in the game, **Options → System → Graphics → Resolution** set to the display's own (3456x2234 on a 14-inch MacBook Pro, for example). The companion reads the strip's squares pixel for pixel, and at a lower resolution macOS scales the game's picture, which can blur them. **Render Scale** only changes the 3D world, so it can stay lower.
 - T3 Code, as above. Pictures are drawn with Google Chrome, Microsoft Edge or Chromium from Applications.
-- Pasting images with Ctrl+V isn't available on a Mac yet.
+- Pasting images works as on Windows, with **Cmd+V**: a screenshot copied with **Cmd+Ctrl+Shift+4** (or **Cmd+Ctrl+Shift+3**), or an image copied in a browser or an editor. A file copied in Finder isn't pasted as an image. If macOS hides the keys from T3 WoW, the first image paste says so and macOS lists T3 WoW under **System Settings → Privacy & Security → Input Monitoring**: turn it on, then quit and reopen T3 WoW. Text pastes as always either way.
 
 ### Install on a Mac
 
@@ -180,7 +180,7 @@ The setting applies at once and is saved in `config.json` (`gameCommands`). A re
 
 The addon keeps its command queue and client key out of its saved variables while the game runs, so another addon can't just add commands to them; it can still draw a strip of its own, which only this setting limits. Install addons you trust, pick **No new threads** or **Read-only**, or grant T3 less access when you sign in (**Supervised** keeps threads asking before commands and file changes).
 
-**Pasting images:** a paste is the one command an addon can't fake. The companion reads the clipboard only for a paste that arrives within 5 seconds after you pressed Ctrl+V in WoW, and each press lets one paste through. Addons can't press keys, so an addon that draws a paste of its own, with no Ctrl+V or with one long ago, is refused, and nothing is read. To see the press, the companion checks two keys (Ctrl and V) about 60 times a second, only while you're typing in the T3 WoW message box and WoW is the window in front, and only counts presses; it looks at no other key. An addon could still time a paste of its own to land within those seconds after one of your own Ctrl+V presses. Each refused try shows in the window and the companion's log, the image could only go into one of your own threads, and your own paste would then be refused, so you'd see it.
+**Pasting images:** a paste is the one command an addon can't fake. The companion reads the clipboard only for a paste that arrives within 5 seconds after you pressed Ctrl+V in WoW, and each press lets one paste through. Addons can't press keys, so an addon that draws a paste of its own, with no Ctrl+V or with one long ago, is refused, and nothing is read. To see the press, the companion checks two keys (Ctrl and V; on a Mac, Command and V) about 60 times a second, only while you're typing in the T3 WoW message box and WoW is the window in front, and only counts presses; it looks at no other key. An addon could still time a paste of its own to land within those seconds after one of your own Ctrl+V presses. Each refused try shows in the window and the companion's log, the image could only go into one of your own threads, and your own paste would then be refused, so you'd see it.
 
 **Pages from threads:** to draw a page an agent showed, the companion opens it in a headless Microsoft Edge (or Chrome) with a profile of its own (`%APPDATA%\t3wow\render`), as T3 shows it in its own window: the page's scripts run for a few seconds, and images and fonts it names on the web load. Only pages in threads you open in the game are drawn, and only when the addon can show pictures.
 
@@ -203,7 +203,7 @@ Each game process also has 4000 signal files; a long day in one WoW session can 
 
 While the companion isn't running, the addon spaces its slot loads out (about once a minute after the first 20 seconds) instead of using up the session.
 
-The addon uses only the documented addon API. The companion reads pixels in one corner of the WoW window, writes files in the AddOns folder, and, while you're typing in the T3 WoW message box and WoW is in front, checks whether Ctrl+V is pressed (for pasting images); it never sends input to the game or reads its memory.
+The addon uses only the documented addon API. The companion reads pixels in one corner of the WoW window, writes files in the AddOns folder, and, while you're typing in the T3 WoW message box and WoW is in front, checks whether Ctrl+V (Cmd+V on a Mac) is pressed (for pasting images); it never sends input to the game or reads its memory.
 
 ## Troubleshooting
 
