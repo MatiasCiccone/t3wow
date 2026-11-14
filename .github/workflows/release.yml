@@ -311,7 +311,7 @@ jobs:
             echo "On a Mac with Apple Silicon (alpha), download \`t3wow-macos-arm64.zip\`, unzip it and move T3 WoW.app to Applications. The first time, open it, then allow it in System Settings > Privacy & Security (Open Anyway)."
           } > release/NOTES.md
 
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           repository: ${{ env.RELEASES_REPO }}
           token: ${{ secrets.RELEASES_TOKEN }}
