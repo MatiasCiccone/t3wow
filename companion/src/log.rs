@@ -34,7 +34,17 @@ fn clock() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
-#[cfg(not(windows))]
+/// Local time, as on Windows: the epoch seconds moved by this Mac's offset from UTC.
+#[cfg(target_os = "macos")]
+fn clock() -> String {
+    let now = crate::config::now_ms() / 1000;
+    let local = now + crate::snooze::system_offset(now);
+    let (y, mo, d) = crate::snooze::civil_from_days(local.div_euclid(86_400));
+    let rest = local.rem_euclid(86_400);
+    format!("{y:04}-{mo:02}-{d:02} {:02}:{:02}:{:02}", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn clock() -> String {
     format!("{}", crate::config::now_ms() / 1000)
 }

@@ -72,7 +72,19 @@ pub fn system_offset(utc: i64) -> i64 {
     local_seconds - utc
 }
 
-#[cfg(not(windows))]
+/// This Mac's offset from UTC at `utc`, daylight saving included, from the time zone set
+/// in System Settings (or `TZ`).
+#[cfg(target_os = "macos")]
+pub fn system_offset(utc: i64) -> i64 {
+    let at: libc::time_t = utc;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&at, &mut tm) }.is_null() {
+        return 0;
+    }
+    tm.tm_gmtoff
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn system_offset(_utc: i64) -> i64 {
     0
 }
@@ -586,5 +598,19 @@ mod tests {
         assert_eq!(describe(local(2026, 11, 10, 17, 0) - OFFSET, n, &zone), "5:00 PM");
         assert_eq!(describe(local(2026, 11, 13, 15, 0) - OFFSET, n, &zone), "Fri 3:00 PM");
         assert_eq!(describe(local(2026, 12, 1, 0, 5) - OFFSET, n, &zone), "Dec 1 12:05 AM");
+    }
+
+    /// The offset matches what `date` says for the same instants, winter and summer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macs_offset_is_its_time_zones() {
+        for at in [local(2026, 1, 15, 12, 0), local(2026, 7, 15, 12, 0), crate::config::now_ms() / 1000] {
+            let out = std::process::Command::new("/bin/date").args(["-r", &at.to_string(), "+%z"]).output().expect("date");
+            let said = String::from_utf8(out.stdout).unwrap();
+            let said = said.trim();
+            let sign = if said.starts_with('-') { -1 } else { 1 };
+            let expected = sign * (said[1..3].parse::<i64>().unwrap() * 3600 + said[3..5].parse::<i64>().unwrap() * 60);
+            assert_eq!(system_offset(at), expected, "at {at}, date says {said}");
+        }
     }
 }
