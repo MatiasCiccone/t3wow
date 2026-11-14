@@ -1530,6 +1530,8 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                     wow = mac::find_wow(&client_folder);
                     searched = Some(Instant::now());
                 }
+                // Cmd+V counts only in this client (see `keys`).
+                crate::keys::watch_process(wow.as_ref().map_or(0, |w| w.pid()));
                 let key = wow.as_ref().map(|w| w.key.clone());
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key.clone());
