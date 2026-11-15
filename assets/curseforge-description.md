@@ -93,7 +93,7 @@ The companion checks for a new version when it starts and every 6 hours, and upd
 
 ## On a Mac
 
-On a Mac with Apple Silicon (tested on macOS 26.5.1 and 26.7.2), the companion is **T3 WoW.app**, for WoW: Forever's native Mac client. It lives in the menu bar instead of the tray, and its menu has the same items, with Start at login instead of Start with Windows. Fullscreen works: the app reads the game's own window. Keep WoW's Resolution at the display's native one (Render Scale can stay lower). Pasting images isn't available on a Mac yet.
+On a Mac with Apple Silicon (tested on macOS 26.5.1 and 26.7.2), the companion is **T3 WoW.app**, for WoW: Forever's native Mac client. It lives in the menu bar instead of the tray, and its menu has the same items, with Start at login instead of Start with Windows. Fullscreen works: the app reads the game's own window. Keep WoW's Resolution at the display's native one (Render Scale can stay lower). Pasting images works with **Cmd+V** once T3 WoW has Input Monitoring: the first image paste asks for it; turn on T3 WoW in System Settings, Privacy & Security, Input Monitoring, then quit and reopen T3 WoW.
 
 1. Download t3wow-macos-arm64.zip from the same releases page and double-click it. **In Finder, drag T3 WoW onto Applications**, then open it from there. (Opened anywhere else, it runs from a read-only copy that can't update itself.)
 2. macOS says "T3 WoW" Not Opened. **Click Done**, not the highlighted Move to Trash, which deletes the app.

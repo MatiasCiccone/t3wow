@@ -74,7 +74,7 @@ On a Mac the companion is **T3 WoW.app**, a menu bar app: it does what the secti
 - **WoW: Forever's native Mac client.** Any display mode works, fullscreen included: the app reads the game's own window with ScreenCaptureKit, so the game can be fullscreen or have other windows over it.
 - **WoW at the display's native resolution**: in the game, **Options → System → Graphics → Resolution** set to the display's own (3456x2234 on a 14-inch MacBook Pro, for example). The companion reads the strip's squares pixel for pixel, and at a lower resolution macOS scales the game's picture, which can blur them. **Render Scale** only changes the 3D world, so it can stay lower.
 - T3 Code, as above. Pictures are drawn with Google Chrome, Microsoft Edge or Chromium from Applications.
-- Pasting images works as on Windows, with **Cmd+V**: a screenshot copied with **Cmd+Ctrl+Shift+4** (or **Cmd+Ctrl+Shift+3**), or an image copied in a browser or an editor. A file copied in Finder isn't pasted as an image. If macOS hides the keys from T3 WoW, the first image paste says so and macOS lists T3 WoW under **System Settings → Privacy & Security → Input Monitoring**: turn it on, then quit and reopen T3 WoW. Text pastes as always either way.
+- Pasting images works as on Windows, with **Cmd+V**: a screenshot copied with **Cmd+Ctrl+Shift+4** (or **Cmd+Ctrl+Shift+3**), or an image copied in a browser or an editor. A file copied in Finder isn't pasted as an image. It needs Input Monitoring, since macOS hides key presses from T3 WoW without it: the first image paste is refused and macOS offers to open **System Settings → Privacy & Security → Input Monitoring**. Turn on T3 WoW there, then quit and reopen T3 WoW. Text pastes as always either way.
 
 ### Install on a Mac
 
