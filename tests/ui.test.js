@@ -2380,6 +2380,16 @@ assert(#queue() == told, "told while still typing")
 -- Done typing, pointer away: stopped.
 box.scripts.OnEditFocusLost(box)
 assert(sent().t == "ui" and sent().f == false, "stopping not told")
+-- Closed while pointing at the box, the pointer moved off it while closed, then reopened:
+-- not typing.
+edges.IsMouseOver = function() return true end
+edges.scripts.OnEnter(edges)
+assert(sent().f == true, "pointing again not told")
+T3WoWFrame:Hide()
+edges.IsMouseOver = function() return false end
+rawset(box, "HasFocus", function() return false end)
+T3WoWFrame:Show()
+assert(sent().t == "ui" and sent().o == true and sent().f == false, "reopened still pointing")
 return "ok"
 `);
 });
