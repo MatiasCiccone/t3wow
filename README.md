@@ -19,7 +19,7 @@ The Flat and Classic themes and the compact thread list are in [`assets/screensh
 
 ## Set up
 
-1. Download `t3wow.exe` from the [latest release](https://github.com/MatiasCiccone/t3wow/releases/latest) (or build it with `npm run build:exe`, see Develop) and double-click it. It's a small native program (about 4 MB, nothing else to install) that lives in the system tray, next to the clock. Windows may warn about an unrecognized app the first time, since it isn't signed: **More info → Run anyway**.
+1. Download `t3wow.exe` from the [latest release](https://github.com/MatiasCiccone/t3wow/releases/latest) (or build it with `npm run build:exe`, see Develop; [Code signing policy](docs/code-signing-policy.md)) and double-click it. It's a small native program (about 4 MB, nothing else to install) that lives in the system tray, next to the clock. Windows may warn about an unrecognized app the first time, since it isn't signed: **More info → Run anyway**.
 2. It finds WoW: Forever (a running client, Battle.net's install record, or the usual folders; if it can't, its tray menu has **Choose WoW folder…**), puts the addon and its update slots into `Interface\AddOns`, and opens T3's sign-in page. The page opens by itself once per start; after that, **Sign in to T3…** in the tray menu opens it again, and choosing it while a sign-in is waiting starts that sign-in over.
 3. Approve the sign-in, and pick what the game may do under **What it may do** on T3's page:
    - **Read only**: the game shows your threads, but T3 refuses every message, answer, new thread, **Stop** and **Settle** from it. T3 starts here when you approve without a code, so change it. A T3 you reach at its T3 Connect address sends you to T3 Connect's page instead (app.t3.codes): sign in there with your T3 Connect account, and it starts with no level picked.
@@ -205,6 +205,23 @@ While the companion isn't running, the addon spaces its slot loads out (about on
 
 The addon uses only the documented addon API. The companion reads pixels in one corner of the WoW window, writes files in the AddOns folder, and, while the T3 WoW window is open and WoW is in front, checks whether Ctrl+V (Cmd+V on a Mac) is pressed (for pasting images); it never sends input to the game or reads its memory.
 
+## Uninstall
+
+On Windows:
+
+1. In the tray menu, turn off **Start with Windows**, then choose **Quit**.
+2. Remove the addon: run `t3wow.exe uninstall` from a terminal (it removes `Interface\AddOns\T3WoW` and its `T3WoW_S…` slot folders), or delete those folders yourself.
+3. Delete `t3wow.exe`, and the folder `%APPDATA%\t3wow`, which holds the settings, the encrypted sign-ins and the log.
+
+On a Mac:
+
+1. In the menu bar menu, turn off **Start at login** (it removes `~/Library/LaunchAgents/com.t3wow.companion.plist`), then choose **Quit**.
+2. Remove the addon: delete `Interface/AddOns/T3WoW` and the `T3WoW_S…` folders in WoW: Forever's `_forever_` folder.
+3. Move **T3 WoW** from Applications to the Trash, and delete `~/Library/Application Support/t3wow` (settings, sign-ins and their key, the log).
+4. Optionally, remove T3 WoW from **System Settings → Privacy & Security → Screen Recording** and **Input Monitoring** with **−**.
+
+The sign-ins stay valid on T3's side until they expire; T3 Code's settings can revoke them sooner.
+
 ## Troubleshooting
 
 - **"Waiting for the companion…"** or **"Companion not answering"**: is T3 WoW running in the tray? Is the game windowed? Is something covering the top-left corner? The tray's **Open log** shows what the companion sees.
@@ -282,7 +299,7 @@ The same zip is uploaded to the [CurseForge project](https://www.curseforge.com/
 
 ## Contributing
 
-Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report a security problem privately, as [SECURITY.md](SECURITY.md) says, not in a public issue. The [code signing policy](docs/code-signing-policy.md) says who signs `t3wow.exe` and what the companion sends over the network.
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report a security problem privately, as [SECURITY.md](SECURITY.md) says, not in a public issue. The [Code signing policy](docs/code-signing-policy.md) says who signs `t3wow.exe` and what the companion sends over the network.
 
 ## License
 

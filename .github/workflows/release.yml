@@ -333,6 +333,8 @@ jobs:
             echo
             echo "On Windows, download \`t3wow.exe\` and run it; it installs the addon and updates itself from here."
             echo
+            echo "Code signing policy: https://github.com/MatiasCiccone/t3wow/blob/main/docs/code-signing-policy.md"
+            echo
             echo "On a Mac with Apple Silicon (alpha), download \`t3wow-macos-arm64.zip\`, unzip it and move T3 WoW.app to Applications. The first time, open it, then allow it in System Settings > Privacy & Security (Open Anyway)."
           } > release/NOTES.md
 
