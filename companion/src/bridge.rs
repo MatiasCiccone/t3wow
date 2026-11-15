@@ -2465,10 +2465,10 @@ impl Bridge {
             match kind.as_str() {
                 "hello" | "ui" => {
                     self.window_open = command["o"] == true;
-                    // Ctrl+V is looked for only while you type in the message box or point at it (`f`, see `keys`).
-                    // An older addon doesn't say, so for it the window being open has to do.
-                    let typing = command["f"].as_bool().unwrap_or(true);
-                    (self.arm_keys)(self.window_open && typing);
+                    // Ctrl+V is looked for only while T3 WoW's window is open (see `keys`). An
+                    // older addon also says whether you're typing (`f`): no longer used, since
+                    // that news came too late for a Ctrl+V right after the click.
+                    (self.arm_keys)(self.window_open);
                 }
                 "open" => {
                     self.view = (!id.is_empty()).then(|| View { env: env.clone(), id: id.clone(), depth: 1 });

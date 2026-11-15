@@ -3183,7 +3183,7 @@ fn an_image_sent_with_no_words_is_only_its_picture_and_other_blank_messages_stay
 }
 
 #[test]
-fn ctrl_v_is_looked_for_only_while_you_type_in_the_message_box() {
+fn ctrl_v_is_looked_for_only_while_the_window_is_open() {
     let mut rig = Rig::new(60_000_000);
     let armed = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&armed);
@@ -3193,7 +3193,7 @@ fn ctrl_v_is_looked_for_only_while_you_type_in_the_message_box() {
         json!({ "o": true, "f": true }),
         json!({ "o": true, "f": false }),
         json!({ "o": false, "f": true }),
-        // An addon older than this doesn't say whether you're typing.
+        // This addon doesn't say whether you're typing; an older one does, and it doesn't matter.
         json!({ "o": true }),
         json!({ "o": false }),
     ];
@@ -3202,7 +3202,7 @@ fn ctrl_v_is_looked_for_only_while_you_type_in_the_message_box() {
         rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": s, "q": [{ "s": s, "t": "ui", "o": state["o"], "f": state["f"] }] }));
         rig.bridge.tick();
     }
-    assert_eq!(*armed.lock().unwrap(), [false, true, false, false, true, false]);
+    assert_eq!(*armed.lock().unwrap(), [true, true, true, false, true, false]);
 }
 
 #[test]
