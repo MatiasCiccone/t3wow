@@ -2982,10 +2982,12 @@ input:SetWidth(messageWidth() - 24)
 -- after the click would otherwise come before it looks.
 do
     local focused, pointing, said = false, false, nil
-    -- `force`: say it even if it hasn't changed (the window just opened).
+    -- `force`: say it even if it hasn't changed (the window just opened; where the pointer is
+    -- is looked at again, since it may have moved off the box while the window was closed).
     function UI.SayTyping(force)
         -- A window closing says so itself.
         if not frame:IsShown() then said = nil return end
+        if force then pointing = inputScroll:IsMouseOver() == true end
         local typing = focused or pointing
         if typing == said and not force then return end
         said = typing
