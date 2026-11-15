@@ -2,16 +2,17 @@
 //! "paste" from the game is only taken right after you pressed Ctrl+V (Cmd+V on a Mac) in
 //! WoW, which no addon can fake: the game gives addons no way to press keys.
 //!
-//! While you're typing in T3 WoW's message box or the pointer is on it (so a Ctrl+V right
-//! after the click is seen), and WoW is the window in front, a thread looks at two keys (Ctrl
-//! and V, on a Mac Cmd and V) about 60 times a second and counts each Ctrl+V. It doesn't look
-//! at any other key, and doesn't look at all otherwise.
+//! While T3 WoW's window is open in the game and WoW is the window in front, a thread looks at
+//! two keys (Ctrl and V, on a Mac Cmd and V) about 60 times a second and counts each Ctrl+V.
+//! It doesn't look at any other key, and doesn't look at all otherwise. (Only while typing in
+//! the message box was too late: the game's news of it takes up to a third of a second, so a
+//! Ctrl+V right after the click came before the look.)
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// The WoW client's process id (0: none found), from the screen capture.
 static WOW_PID: AtomicU32 = AtomicU32::new(0);
-/// You're typing in T3 WoW's message box.
+/// T3 WoW's window is open in the game.
 static ARMED: AtomicBool = AtomicBool::new(false);
 /// Ctrl+V presses seen in WoW, and when the last one was (epoch ms).
 static PRESSES: AtomicU64 = AtomicU64::new(0);
@@ -22,9 +23,9 @@ pub fn watch_process(pid: u32) {
     WOW_PID.store(pid, Ordering::Relaxed);
 }
 
-/// Look at keys only while you're typing in T3 WoW's message box or pointing at it.
-pub fn arm(typing: bool) {
-    ARMED.store(typing, Ordering::Relaxed);
+/// Look at keys only while T3 WoW's window is open in the game.
+pub fn arm(open: bool) {
+    ARMED.store(open, Ordering::Relaxed);
 }
 
 /// How many Ctrl+V presses were seen in WoW, and when the last one was (epoch ms).

@@ -2028,7 +2028,7 @@ function ctrlV(pasted)
   controlDown = false
   C_Timer.After = after
   if pasted then box.text = box.text .. pasted end
-  later()
+  if later then later() end
 end
 -- Cmd+V on a Mac (needs IsMetaKeyDown from metaDown).
 function cmdV(pasted)
@@ -2041,7 +2041,7 @@ function cmdV(pasted)
   metaDown = false
   C_Timer.After = after
   if pasted then box.text = box.text .. pasted end
-  later()
+  if later then later() end
 end
 function pasteChips()
   local chips = {}
@@ -2356,63 +2356,25 @@ return "ok"
 `);
 });
 
-test("the companion hears as soon as the pointer is on the message box, before the click", () => {
+test("the companion hears when the window opens and closes, not when you type", () => {
   run(`${CTRL_V}
 inboxWith(ENVS, { pi = true, threads = { THREAD } })
 UI.Select({ e = 2, id = "t1" })
 T3WoWFrame:Show()
-local box = composer()
-local edges = box.parent
-local before = #queue()
-edges.IsMouseOver = function() return true end
-edges.scripts.OnEnter(edges)
-assert(sent().t == "ui" and sent().o == true and sent().f == true, "pointing not told")
--- Onto the text, then clicked: nothing new to say.
-local told = #queue()
-edges.scripts.OnLeave(edges)
-box.scripts.OnEnter(box)
-box.scripts.OnEditFocusGained(box)
-assert(#queue() == told, "told again: " .. (#queue() - told))
--- The pointer leaves while still typing: still typing.
-edges.IsMouseOver = function() return false end
-box.scripts.OnLeave(box)
-assert(#queue() == told, "told while still typing")
--- Done typing, pointer away: stopped.
-box.scripts.OnEditFocusLost(box)
-assert(sent().t == "ui" and sent().f == false, "stopping not told")
--- Closed while pointing at the box, the pointer moved off it while closed, then reopened:
--- not typing.
-edges.IsMouseOver = function() return true end
-edges.scripts.OnEnter(edges)
-assert(sent().f == true, "pointing again not told")
 T3WoWFrame:Hide()
-edges.IsMouseOver = function() return false end
-rawset(box, "HasFocus", function() return false end)
+assert(sent().t == "ui" and sent().o == false, "closing not told")
 T3WoWFrame:Show()
-assert(sent().t == "ui" and sent().o == true and sent().f == false, "reopened still pointing")
-return "ok"
-`);
-});
-
-test("the companion hears when you start and stop typing in the message box", () => {
-  run(`${CTRL_V}
-inboxWith(ENVS, { pi = true, threads = { THREAD } })
-UI.Select({ e = 2, id = "t1" })
-T3WoWFrame:Show()
-local box = composer()
+assert(sent().t == "ui" and sent().o == true and sent().f == nil, "opening not told")
+-- Typing changes nothing for the companion: it looks for Ctrl+V while the window is open.
+local box, before = composer(), #queue()
 box.scripts.OnEditFocusGained(box)
-assert(sent().t == "ui" and sent().o == true and sent().f == true, "typing not told")
 box.scripts.OnEditFocusLost(box)
-assert(sent().t == "ui" and sent().o == true and sent().f == false, "stopping not told")
--- Opening the window says whether the box has the keyboard.
+assert(#queue() == before, "typing told")
+-- With a thread open but no text cursor in the box, Ctrl+V asks for nothing.
 rawset(box, "HasFocus", function() return false end)
-T3WoWFrame.scripts.OnShow(T3WoWFrame)
-assert(sent().t == "ui" and sent().o == true and sent().f == false, "opening didn't say")
--- A window closing says so itself: no second update for the box losing the keyboard.
-local before = #queue()
-T3WoWFrame.shown = false
-box.scripts.OnEditFocusLost(box)
-assert(#queue() == before, "told twice")
+ctrlV()
+cmdV()
+assert(#queue() == before, "pasted without the box focused")
 return "ok"
 `);
 });
