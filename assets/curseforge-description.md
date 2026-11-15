@@ -6,7 +6,7 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **This addon doesn't work on its own.** It needs the T3 WoW companion, t3wow.exe, running on the same Windows PC while you play. Addons can't talk to other programs, so the companion carries everything between the game and T3 Code. Without it, the window only says "Waiting for the companion…".
 
-**Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow-releases/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
+**Get it:** download t3wow.exe from https://github.com/MatiasCiccone/t3wow/releases/latest and run it. It installs this addon for you and keeps both up to date. See Setting up below.
 
 **On a Mac:** the companion is the T3 WoW app, which lives in the menu bar. See On a Mac below.
 
@@ -80,7 +80,7 @@ Type /t3, click the T3 WoW minimap button, or bind a key under Options → Keybi
 
 - Windows, with WoW: Forever in windowed or borderless windowed mode (exclusive fullscreen blocks screen capture).
 - T3 Code desktop 0.19.0, the stable release, running on the same PC or on another machine this PC can reach over the network (run t3wow.exe login --origin http://<host>:<port> once to point the companion at it). Threads on other machines also appear when you link those machines to T3.
-- The T3 WoW companion, t3wow.exe, from https://github.com/MatiasCiccone/t3wow-releases.
+- The T3 WoW companion, t3wow.exe, from https://github.com/MatiasCiccone/t3wow/releases/latest.
 
 ## Setting up
 
@@ -139,4 +139,4 @@ Each UI session has 200 updates, and the companion only spends one when somethin
 - If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu.
 - If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.19.0. When T3 Code is older, the companion's tray and the window's top line say to update it (in T3 Code, Settings > About > Check for Updates).
 
-T3 WoW is MIT licensed.
+T3 WoW is MIT licensed, and its source is on GitHub: https://github.com/MatiasCiccone/t3wow. Bug reports go to its Issues there.
