@@ -1,3 +1,6 @@
 node_modules/
 dist/
 companion/target/
+
+# Claude Code local state (worktrees, settings)
+.claude/
