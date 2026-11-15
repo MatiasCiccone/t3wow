@@ -2024,6 +2024,7 @@ function ctrlV(pasted)
   C_Timer.After = function(_, fn) later = fn end
   controlDown = true
   box.scripts.OnKeyDown(box, "V")
+  box.scripts.OnKeyUp(box, "V")
   controlDown = false
   C_Timer.After = after
   if pasted then box.text = box.text .. pasted end
@@ -2036,6 +2037,7 @@ function cmdV(pasted)
   C_Timer.After = function(_, fn) later = fn end
   metaDown = true
   box.scripts.OnKeyDown(box, "V")
+  box.scripts.OnKeyUp(box, "V")
   metaDown = false
   C_Timer.After = after
   if pasted then box.text = box.text .. pasted end
@@ -2318,6 +2320,66 @@ assert(not T3WoWDropdownList.shown, "Escape didn't close the list")
 assert(T3WoWFrame.shown, "Escape closed the window with the list")
 CloseSpecialWindows()
 assert(not T3WoWFrame.shown, "the next Escape didn't close the window")
+return "ok"
+`);
+});
+
+test("holding Ctrl+V asks for one image, not one per key repeat", () => {
+  run(`${CTRL_V}
+inboxWith(ENVS, { pi = true, threads = { THREAD } })
+UI.Select({ e = 2, id = "t1" })
+local box = composer()
+local function pastes() local n = 0 for _, m in ipairs(queue()) do if m.t == "paste" then n = n + 1 end end return n end
+local function down()
+  local later
+  local after = C_Timer.After
+  C_Timer.After = function(_, fn) later = fn end
+  controlDown = true
+  box.scripts.OnKeyDown(box, "V")
+  controlDown = false
+  C_Timer.After = after
+  if later then later() end
+end
+-- Held: the game repeats the key down every few hundredths of a second.
+down()
+for _ = 1, 10 do clock = clock + 0.05 down() end
+assert(pastes() == 1, "pastes while held: " .. pastes())
+-- Let go, then pressed again: another one.
+box.scripts.OnKeyUp(box, "V")
+down()
+assert(pastes() == 2, "after letting go: " .. pastes())
+-- Should the game not say V was let go, a moment without a repeat ends the press.
+clock = clock + 1
+down()
+assert(pastes() == 3, "after a pause: " .. pastes())
+return "ok"
+`);
+});
+
+test("the companion hears as soon as the pointer is on the message box, before the click", () => {
+  run(`${CTRL_V}
+inboxWith(ENVS, { pi = true, threads = { THREAD } })
+UI.Select({ e = 2, id = "t1" })
+T3WoWFrame:Show()
+local box = composer()
+local edges = box.parent
+local before = #queue()
+edges.IsMouseOver = function() return true end
+edges.scripts.OnEnter(edges)
+assert(sent().t == "ui" and sent().o == true and sent().f == true, "pointing not told")
+-- Onto the text, then clicked: nothing new to say.
+local told = #queue()
+edges.scripts.OnLeave(edges)
+box.scripts.OnEnter(box)
+box.scripts.OnEditFocusGained(box)
+assert(#queue() == told, "told again: " .. (#queue() - told))
+-- The pointer leaves while still typing: still typing.
+edges.IsMouseOver = function() return false end
+box.scripts.OnLeave(box)
+assert(#queue() == told, "told while still typing")
+-- Done typing, pointer away: stopped.
+box.scripts.OnEditFocusLost(box)
+assert(sent().t == "ui" and sent().f == false, "stopping not told")
 return "ok"
 `);
 });

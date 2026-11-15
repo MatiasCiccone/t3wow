@@ -2465,7 +2465,7 @@ impl Bridge {
             match kind.as_str() {
                 "hello" | "ui" => {
                     self.window_open = command["o"] == true;
-                    // Ctrl+V is looked for only while you type in the message box (see `keys`).
+                    // Ctrl+V is looked for only while you type in the message box or point at it (`f`, see `keys`).
                     // An older addon doesn't say, so for it the window being open has to do.
                     let typing = command["f"].as_bool().unwrap_or(true);
                     (self.arm_keys)(self.window_open && typing);

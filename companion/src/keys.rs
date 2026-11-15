@@ -2,9 +2,10 @@
 //! "paste" from the game is only taken right after you pressed Ctrl+V (Cmd+V on a Mac) in
 //! WoW, which no addon can fake: the game gives addons no way to press keys.
 //!
-//! While you're typing in T3 WoW's message box and WoW is the window in front, a thread
-//! looks at two keys (Ctrl and V, on a Mac Cmd and V) about 60 times a second and counts
-//! each Ctrl+V. It doesn't look at any other key, and doesn't look at all otherwise.
+//! While you're typing in T3 WoW's message box or the pointer is on it (so a Ctrl+V right
+//! after the click is seen), and WoW is the window in front, a thread looks at two keys (Ctrl
+//! and V, on a Mac Cmd and V) about 60 times a second and counts each Ctrl+V. It doesn't look
+//! at any other key, and doesn't look at all otherwise.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
@@ -21,7 +22,7 @@ pub fn watch_process(pid: u32) {
     WOW_PID.store(pid, Ordering::Relaxed);
 }
 
-/// Look at keys only while you're typing in T3 WoW's message box.
+/// Look at keys only while you're typing in T3 WoW's message box or pointing at it.
 pub fn arm(typing: bool) {
     ARMED.store(typing, Ordering::Relaxed);
 }
