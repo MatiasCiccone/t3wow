@@ -2976,16 +2976,42 @@ input:SetAutoFocus(false)
 input:SetFontObject(Skin.fonts.text)
 input:SetTextInsets(0, 0, 2, 2)
 input:SetWidth(messageWidth() - 24)
--- The companion looks for Ctrl+V (Cmd+V on a Mac) only while you're typing here, so it hears
--- when you are.
+-- The companion looks for Ctrl+V (Cmd+V on a Mac) only while you're typing here or the pointer
+-- is on the box, so it hears when either starts or stops. The pointer counts so that it hears
+-- before the click: the news takes up to a third of a second to reach it, and a Ctrl+V right
+-- after the click would otherwise come before it looks.
+do
+    local focused, pointing, said = false, false, nil
+    -- `force`: say it even if it hasn't changed (the window just opened).
+    function UI.SayTyping(force)
+        -- A window closing says so itself.
+        if not frame:IsShown() then said = nil return end
+        local typing = focused or pointing
+        if typing == said and not force then return end
+        said = typing
+        ns.Link.Send({ t = "ui", o = true, f = typing })
+    end
+    function UI.TypingFocus(on, force)
+        focused = on and true or false
+        UI.SayTyping(force)
+    end
+    local function pointer()
+        pointing = inputScroll:IsMouseOver() == true
+        UI.SayTyping()
+    end
+    -- Moving from the box's edges onto its text leaves one and enters the other.
+    for _, f in ipairs({ inputScroll, input }) do
+        f:HookScript("OnEnter", pointer)
+        f:HookScript("OnLeave", pointer)
+    end
+end
 input:SetScript("OnEditFocusGained", function()
     inputBox:SetColors(nil, "focus")
-    ns.Link.Send({ t = "ui", o = true, f = true })
+    UI.TypingFocus(true)
 end)
 input:SetScript("OnEditFocusLost", function()
     inputBox:SetColors(nil, "border")
-    -- A window closing says so itself.
-    if frame:IsShown() then ns.Link.Send({ t = "ui", o = true, f = false }) end
+    UI.TypingFocus(false)
     -- Not at once: a click on one of the picker's rows may be what took the focus.
     C_Timer.After(0.2, function()
         if not input:HasFocus() then UI.Picker.Close() end
@@ -3066,9 +3092,18 @@ do
         UI.Refresh()
     end
 
+    -- Held, V repeats: one paste per press. The next once V is let go, or (should the game not
+    -- say so) after a moment with no repeat.
+    local lastV
+    input:HookScript("OnKeyUp", function(_, key)
+        if key == "V" then lastV = nil end
+    end)
     input:SetScript("OnKeyDown", function(self, key)
         UI.Picker.Key(self, key)
         if key ~= "V" or not (IsControlKeyDown() or (IsMetaKeyDown and IsMetaKeyDown())) then return end
+        local now, repeated = GetTime(), lastV and GetTime() - lastV < 0.6
+        lastV = now
+        if repeated then return end
         -- Once the game has pasted: no text came in, so look for an image.
         local before = self:GetText()
         C_Timer.After(0, function()
@@ -5221,7 +5256,7 @@ end)
 
 frame:SetScript("OnShow", function()
     restoreLayout()
-    ns.Link.Send({ t = "ui", o = true, f = input:HasFocus() and true or false })
+    UI.TypingFocus(input:HasFocus() == true, true)
     scrollToEnd = true -- reopening the window also lands on the latest message
     UI.Refresh()
 end)
