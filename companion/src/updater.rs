@@ -18,8 +18,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// Releases live in their own public repository while the source stays private.
-const REPO: &str = "MatiasCiccone/t3wow-releases";
+// Releases are published in the source repository. Companions up to 0.10.0 read
+// MatiasCiccone/t3wow-releases instead, where releases went while this repository was private,
+// so the Release workflow publishes to both until that one is archived.
+const REPO: &str = "MatiasCiccone/t3wow";
 /// The most a program download may be: t3wow.exe, or the zipped app (the same program,
 /// compressed, plus a few kilobytes of Info.plist, icon and signature), both about 10 MB.
 const MAX_PROGRAM_BYTES: u64 = 64 * 1024 * 1024;
@@ -133,7 +135,8 @@ fn up_to_date_for(current: &str) -> String {
 }
 
 /// The newest release if it is newer than this companion. Ok(None): up to date, or no
-/// release can be seen (a private repository looks the same as one without releases).
+/// release can be seen (a repository GitHub doesn't show, such as a private one, looks the
+/// same as one without releases).
 pub fn check() -> Result<Option<Release>, String> {
     let url = format!("{}/repos/{}/releases/latest", api(), repo());
     let mut response = http().get(&url).header("accept", "application/vnd.github+json").call().map_err(|e| e.to_string())?;
@@ -320,8 +323,7 @@ fn check_download(data: &[u8], expected_sha: &str, kind: Kind) -> Result<(), Str
 }
 
 /// Where a Mac's menu bar sends you for a new release when `install` can't put it in place
-/// (a bare t3wow, not the app): the newest listed release's page, in the public releases
-/// repository (the source repository is private).
+/// (a bare t3wow, not the app): the newest listed release's page.
 #[cfg(target_os = "macos")]
 pub fn releases_page() -> String {
     format!("https://github.com/{}/releases/latest", repo())
@@ -591,9 +593,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_mac_is_sent_to_the_public_releases_page() {
+    fn a_mac_is_sent_to_the_releases_page() {
         if std::env::var("T3WOW_UPDATE_REPO").is_err() {
-            assert_eq!(releases_page(), "https://github.com/MatiasCiccone/t3wow-releases/releases/latest");
+            assert_eq!(releases_page(), "https://github.com/MatiasCiccone/t3wow/releases/latest");
         }
     }
 
