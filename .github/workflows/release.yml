@@ -1,13 +1,18 @@
 # Publishes a release when a version tag is pushed (git tag v0.4.0 && git push origin v0.4.0).
-# The source repository is private, so the release goes to the public
-# MatiasCiccone/t3wow-releases, which is what the companion's updater reads. It carries
-# t3wow.exe and the Mac app (t3wow-macos-arm64.zip), each with its SHA-256 and the SHA-256's
-# signature (once signing is set up), and the addon on its own (zipped, for CurseForge or a
-# manual install). Three jobs: build-windows (GitHub-hosted), build-macos (the self-hosted Mac
-# runner labelled t3wow-mac, so the release waits while that Mac is asleep or offline; it signs
-# the app with the project's certificate from the T3WOW_MACOS_CERT_P12 secret), and
-# publish, which signs both checksums and uploads everything once both builds are done. Publishing there needs the RELEASES_TOKEN secret: a
-# fine-grained token with Contents read and write on t3wow-releases only. Signing needs the
+# The release is published on this repository (MatiasCiccone/t3wow), which is what the
+# companion's updater reads. It carries t3wow.exe and the Mac app (t3wow-macos-arm64.zip), each
+# with its SHA-256 and the SHA-256's signature (once signing is set up), and the addon on its
+# own (zipped, for CurseForge or a manual install). Three jobs, all on GitHub-hosted runners:
+# build-windows, build-macos (Apple Silicon; it signs the app with the project's certificate
+# from the T3WOW_MACOS_CERT_P12 secret), and publish, which signs both checksums and uploads
+# everything once both builds are done. Publishing here uses the job's GITHUB_TOKEN, which is
+# why publish alone may write the repository's contents.
+# The bridge: companions up to 0.10.0 look for updates only on MatiasCiccone/t3wow-releases,
+# where releases went while this repository was private. So for a while every release is also
+# published there, with the RELEASES_TOKEN secret (a fine-grained token with Contents read and
+# write on t3wow-releases only). A few releases later, once those companions have updated to
+# one that reads this repository, t3wow-releases gets archived: delete the RELEASES_TOKEN
+# secret, and the bridge step skips itself with a note in the log. Signing needs the
 # T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
 # scripts/gen-signing-key.mjs), whose public half is in companion/src/updater/release_key.rs. Until both
 # are set up, releases go out unsigned with a warning (companions with the placeholder key
@@ -26,15 +31,15 @@ permissions:
   contents: read
 
 env:
-  RELEASES_REPO: MatiasCiccone/t3wow-releases
+  # The bridge (see above), for companions up to 0.10.0.
+  BRIDGE_REPO: MatiasCiccone/t3wow-releases
   CURSEFORGE_PROJECT: "1788778"
   # CurseForge's game version type for WoW Forever.
   CURSEFORGE_GAME_TYPE: "88568"
 
 jobs:
   build-windows:
-    # GitHub-hosted, unlike CI: the steps need PowerShell 7 (pwsh) and Git's bash, which the
-    # self-hosted runners' PC doesn't have.
+    # The steps need PowerShell 7 (pwsh) and Git's bash, which GitHub's Windows image has.
     runs-on: windows-latest
     env:
       # Authenticode signing (SSL.com eSigner) runs only once its secrets are set; see
@@ -70,18 +75,25 @@ jobs:
 
       # Once a release has gone out signed, an unsigned one means both the key and the secret
       # went missing (say, release_key.rs back to the placeholder and the secret deleted).
-      # Companions that require the signature would refuse it, so stop instead.
+      # Companions that require the signature would refuse it, so stop instead. The latest
+      # release is this repository's, or, before this repository has one, t3wow-releases'
+      # (public, so the job's token reads it).
       - name: Signed releases stay signed
         if: steps.key.outputs.signed != 'true'
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $latest = gh release list --repo $env:RELEASES_REPO --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName'
-          if ($LASTEXITCODE -ne 0) { throw "Couldn't list the releases on $env:RELEASES_REPO." }
-          if (-not $latest) { "No earlier release on $env:RELEASES_REPO."; exit 0 }
-          $assets = gh release view $latest --repo $env:RELEASES_REPO --json assets --jq '.assets[].name'
-          if ($LASTEXITCODE -ne 0) { throw "Couldn't read release $latest on $env:RELEASES_REPO." }
+          $latest = $null
+          foreach ($repo in @($env:GITHUB_REPOSITORY, $env:BRIDGE_REPO)) {
+            $latest = gh release list --repo $repo --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName'
+            if ($LASTEXITCODE -ne 0) { throw "Couldn't list the releases on $repo." }
+            if ($latest) { break }
+            "No earlier release on $repo."
+          }
+          if (-not $latest) { exit 0 }
+          $assets = gh release view $latest --repo $repo --json assets --jq '.assets[].name'
+          if ($LASTEXITCODE -ne 0) { throw "Couldn't read release $latest on $repo." }
           if ($assets -contains "t3wow.exe.sha256.sig") {
             "::error::$latest went out signed, so this release must be too: put back the release key (companion/src/updater/release_key.rs) and the T3WOW_SIGNING_KEY secret. See docs/release-signing.md."
             exit 1
@@ -154,9 +166,8 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    # The MacBook registered as a self-hosted runner (labels self-hosted, macOS, ARM64,
-    # t3wow-mac), building as its user: GitHub-hosted Macs count their minutes ten times.
-    runs-on: [self-hosted, t3wow-mac]
+    # GitHub-hosted, Apple Silicon: the app is built for arm64 (t3wow-macos-arm64.zip).
+    runs-on: macos-latest
     env:
       T3WOW_RELEASE: "1"
       # The project's self-signed certificate (docs/release-signing.md), by its SHA-1. It comes
@@ -167,8 +178,15 @@ jobs:
       MAC_CERT: ${{ secrets.T3WOW_MACOS_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          clean: false
+          node-version: 22
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       - run: npm ci
       - name: Tests (addon Lua and companion, on macOS)
@@ -272,6 +290,13 @@ jobs:
   publish:
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
+    # The release on this repository is made with the job's GITHUB_TOKEN.
+    permissions:
+      contents: write
+    env:
+      # The bridge to t3wow-releases runs while the RELEASES_TOKEN secret is set. 'true' or
+      # 'false': secrets can't appear in a step's if.
+      BRIDGE: ${{ secrets.RELEASES_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -293,8 +318,8 @@ jobs:
           node scripts/sign-release.mjs release/t3wow.exe.sha256
           node scripts/sign-release.mjs release/t3wow-macos-arm64.zip.sha256
 
-      # Only feat and fix subjects (without the prefix) go public: the rest (ci, chore,
-      # docs, refactor...) is the private repository's business.
+      # Only feat and fix subjects (without the prefix) go in: the notes are for the people who
+      # use T3 WoW, and the rest (ci, chore, docs, refactor...) is in the commit history.
       - name: Release notes (feat and fix subjects since the previous tag)
         shell: bash
         run: |
@@ -311,9 +336,32 @@ jobs:
             echo "On a Mac with Apple Silicon (alpha), download \`t3wow-macos-arm64.zip\`, unzip it and move T3 WoW.app to Applications. The first time, open it, then allow it in System Settings > Privacy & Security (Open Anyway)."
           } > release/NOTES.md
 
-      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+      - name: Publish the release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
-          repository: ${{ env.RELEASES_REPO }}
+          tag_name: ${{ github.ref_name }}
+          name: T3 WoW ${{ github.ref_name }}
+          body_path: release/NOTES.md
+          files: |
+            release/t3wow.exe
+            release/t3wow.exe.sha256
+            release/t3wow.exe.sha256.sig
+            release/t3wow-macos-arm64.zip
+            release/t3wow-macos-arm64.zip.sha256
+            release/t3wow-macos-arm64.zip.sha256.sig
+            release/T3WoW-${{ github.ref_name }}.zip
+
+      # The same release on t3wow-releases, for companions up to 0.10.0 (see the top of this
+      # file). Retired by deleting the RELEASES_TOKEN secret.
+      - name: Bridge retired
+        if: env.BRIDGE != 'true'
+        run: echo "::notice::No RELEASES_TOKEN secret, so the release isn't published to $BRIDGE_REPO too (the bridge for companions up to 0.10.0 is retired)."
+
+      - name: Publish to t3wow-releases (bridge)
+        if: env.BRIDGE == 'true'
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          repository: ${{ env.BRIDGE_REPO }}
           token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: T3 WoW ${{ github.ref_name }}
@@ -341,7 +389,7 @@ jobs:
           $version = $versions | Where-Object { $_.gameVersionTypeID -eq $env:CURSEFORGE_GAME_TYPE -and $_.apiVersion -eq $interface } | Select-Object -First 1
           if (-not $version) { throw "CurseForge has no WoW Forever version for interface ${interface}." }
           $changes = (Get-Content release/NOTES.md | Where-Object { $_ -notmatch '^On (Windows|a Mac)' }) -join "`n"
-          $changelog = "$changes`nThe addon needs the T3 WoW companion (t3wow.exe on Windows, T3 WoW.app on a Mac): https://github.com/$env:RELEASES_REPO/releases/latest"
+          $changelog = "$changes`nThe addon needs the T3 WoW companion (t3wow.exe on Windows, T3 WoW.app on a Mac): https://github.com/$env:GITHUB_REPOSITORY/releases/latest"
           $metadata = @{
             changelog = $changelog
             changelogType = "markdown"

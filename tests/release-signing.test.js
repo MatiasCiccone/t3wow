@@ -153,29 +153,82 @@ test("the release workflow signs the exe before hashing it, and the checksum aft
   }
 });
 
-test("the Mac app is built on the Mac runner, and its checksum is signed and published with the exe's", () => {
+const releaseJob = (name) => {
   const workflow = readText("../.github/workflows/release.yml");
-  const job = (name) => {
-    const at = workflow.indexOf(`\n  ${name}:\n`);
-    assert.notEqual(at, -1, `no ${name} job`);
-    const next = workflow.slice(at + 1).search(/\n  [a-z-]+:\n/);
-    return workflow.slice(at, next === -1 ? undefined : at + 1 + next);
-  };
-  // Not the PC's [self-hosted, t3wow] runners, which can't build for macOS.
-  assert.match(job("build-macos"), /runs-on: \[self-hosted, t3wow-mac\]/);
-  assert.match(job("build-macos"), /npm run build:app/);
-  assert.match(job("build-windows"), /runs-on: windows-latest/);
-  const publish = job("publish");
+  const at = workflow.indexOf(`\n  ${name}:\n`);
+  assert.notEqual(at, -1, `no ${name} job`);
+  const next = workflow.slice(at + 1).search(/\n  [a-z-]+:\n/);
+  return workflow.slice(at, next === -1 ? undefined : at + 1 + next);
+};
+// A step of a job, from its "- name:" line to the next step.
+const jobStep = (job, name) => {
+  const at = job.indexOf(`- name: ${name}\n`);
+  assert.notEqual(at, -1, `no "${name}" step`);
+  return job.slice(at).split(/\n      - /)[0];
+};
+
+test("the Mac app is built on GitHub's Apple Silicon runner, and its checksum is signed and published with the exe's", () => {
+  // GitHub-hosted runners only: no self-hosted runner on a public repository.
+  const workflow = readText("../.github/workflows/release.yml");
+  assert.doesNotMatch(workflow, /self-hosted/);
+  const mac = releaseJob("build-macos");
+  assert.match(mac, /runs-on: macos-latest\n/);
+  assert.match(mac, /npm run build:app/);
+  assert.match(mac, /rustup default stable/);
+  assert.match(mac, /actions\/setup-node@/);
+  assert.match(releaseJob("build-windows"), /runs-on: windows-latest/);
+  const publish = releaseJob("publish");
   assert.match(publish, /needs: \[build-windows, build-macos\]/);
   for (const sha of ["t3wow.exe.sha256", "t3wow-macos-arm64.zip.sha256"]) {
     assert.ok(publish.includes(`node scripts/sign-release.mjs release/${sha}\n`), sha);
   }
-  const files = publish.slice(publish.indexOf("files: |")).split("\n").map((line) => line.trim());
-  for (const file of ["t3wow.exe", "t3wow.exe.sha256", "t3wow.exe.sha256.sig", "t3wow-macos-arm64.zip", "t3wow-macos-arm64.zip.sha256", "t3wow-macos-arm64.zip.sha256.sig"]) {
-    assert.ok(files.includes(`release/${file}`), file);
+  // Both releases, here and on the bridge, carry every file.
+  for (const name of ["Publish the release", "Publish to t3wow-releases (bridge)"]) {
+    const step = jobStep(publish, name);
+    assert.match(step, /uses: softprops\/action-gh-release@/);
+    const files = step.slice(step.indexOf("files: |")).split("\n").map((line) => line.trim());
+    for (const file of ["t3wow.exe", "t3wow.exe.sha256", "t3wow.exe.sha256.sig", "t3wow-macos-arm64.zip", "t3wow-macos-arm64.zip.sha256", "t3wow-macos-arm64.zip.sha256.sig", "T3WoW-${{ github.ref_name }}.zip"]) {
+      assert.ok(files.includes(`release/${file}`), `${name}: ${file}`);
+    }
   }
-  // Signing happens once both builds are in, before the release is published.
+  // Signing happens once both builds are in, before either release is published.
   assert.ok(publish.indexOf("- name: Sign the checksum") < publish.indexOf("softprops/action-gh-release"));
+});
+
+test("a release is published here with the job's token, and on t3wow-releases only while RELEASES_TOKEN is set", () => {
+  const workflow = readText("../.github/workflows/release.yml");
+  // Only the publish job may write; every other job reads.
+  assert.match(workflow, /\npermissions:\n  contents: read\n/);
+  const publish = releaseJob("publish");
+  assert.match(publish, /\n    permissions:\n      contents: write\n/);
+  assert.equal(workflow.match(/contents: write/g).length, 1);
+  // This repository's release: the default token, no other repository.
+  const main = jobStep(publish, "Publish the release");
+  assert.doesNotMatch(main, /\n\s+(repository|token):/);
+  assert.doesNotMatch(main, /\n\s+if:/);
+  // The bridge: its own token, gated on that secret, with a note in the log when it's gone.
+  assert.match(publish, /BRIDGE: \$\{\{ secrets\.RELEASES_TOKEN != '' \}\}/);
+  assert.match(workflow, /BRIDGE_REPO: MatiasCiccone\/t3wow-releases\n/);
+  const bridge = jobStep(publish, "Publish to t3wow-releases (bridge)");
+  assert.match(bridge, /^- name: .+\n\s+if: env\.BRIDGE == 'true'\n/);
+  assert.match(bridge, /repository: \$\{\{ env\.BRIDGE_REPO \}\}/);
+  assert.match(bridge, /token: \$\{\{ secrets\.RELEASES_TOKEN \}\}/);
+  const retired = jobStep(publish, "Bridge retired");
+  assert.match(retired, /^- name: .+\n\s+if: env\.BRIDGE != 'true'\n\s+run: echo "::notice::No RELEASES_TOKEN secret/);
+  // RELEASES_TOKEN is the bridge's alone.
+  assert.equal(workflow.match(/secrets\.RELEASES_TOKEN/g).length, 2);
+  // The main release comes first, so a failing bridge never holds it back.
+  assert.ok(publish.indexOf("- name: Publish the release") < publish.indexOf("- name: Publish to t3wow-releases (bridge)"));
+  // CurseForge's changelog links to this repository's releases.
+  assert.match(jobStep(publish, "Upload the addon to CurseForge"), /https:\/\/github\.com\/\$env:GITHUB_REPOSITORY\/releases\/latest/);
+});
+
+test("signed releases stay signed: the check reads this repository's latest release, then t3wow-releases'", () => {
+  const check = jobStep(releaseJob("build-windows"), "Signed releases stay signed");
+  assert.match(check, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(check, /foreach \(\$repo in @\(\$env:GITHUB_REPOSITORY, \$env:BRIDGE_REPO\)\)/);
+  assert.match(check, /if \(\$latest\) \{ break \}/);
+  assert.match(check, /\$assets -contains "t3wow\.exe\.sha256\.sig"/);
 });
 
 test("the Mac app is signed with the certificate from a keychain made for the job, which is removed afterwards", () => {
