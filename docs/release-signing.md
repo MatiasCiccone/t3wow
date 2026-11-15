@@ -6,9 +6,9 @@ A T3 WoW release can be signed in two separate ways. They protect different thin
 | --- | --- | --- |
 | What gets signed | `t3wow.exe.sha256`, the release's checksum file | `t3wow.exe` itself |
 | Who checks it | the companion's updater, before it installs an update | Windows (SmartScreen, the file's Properties → Digital Signatures) |
-| What it stops | an update that someone other than this project's CI built, even if they can publish to `t3wow-releases` | the "Windows protected your PC / unrecognized app" warning, over time |
+| What it stops | an update that someone other than this project's CI built, even if they can publish a release | the "Windows protected your PC / unrecognized app" warning, over time |
 | Cost | free | about $10 a month, or more (see below) |
-| Status | built; waiting for the key ([set it up](#set-up-the-release-key)) | deferred until the source is open ([decision](#decision-november-2026)); the workflow step stays off without its secrets |
+| Status | built; waiting for the key ([set it up](#set-up-the-release-key)) | planned with SignPath Foundation once the repository is public ([SignPath Foundation](#signpath-foundation)); the eSigner step stays off without its secrets |
 
 ## The release key
 
@@ -41,7 +41,7 @@ Only the key itself, which only you can make, and only on your own PC:
 
 - **Public key: committed**, in `companion/src/updater/release_key.rs`, and compiled in as a constant. It isn't secret. Committing it means every build has it, a local `npm run build:exe` included; it shows in review like any other change; and the workflow can check the secret against it before building. Injecting it from a CI variable at build time instead would make local builds and CI builds behave differently, and a mistyped variable would ship companions that refuse every later update. It lives in its own file, not in `updater.rs`, so setting it never conflicts with work on the updater.
 - **Private key: a GitHub Actions repository secret**, `T3WOW_SIGNING_KEY`, which only the Release workflow reads. GitHub never shows a secret again and masks it in logs. Pull requests from forks don't get secrets. The other copies are your offline backups.
-- Optionally, move the secret to a [deployment environment](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment) named `release`, limited to `v*` tags, and add `environment: release` to the publish job, which signs the checksums: then only a tagged release can read it, not any workflow on any branch. Environments in private repositories need GitHub Pro or a paid plan.
+- Optionally, move the secret to a [deployment environment](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment) named `release`, limited to `v*` tags, and add `environment: release` to the publish job, which signs the checksums: then only a tagged release can read it, not any workflow on any branch. Environments and their protection rules are free on a public repository.
 
 ### Set up the release key
 
@@ -86,7 +86,7 @@ The same steps by hand, in PowerShell:
 
    Between this and the merge, a pushed tag stops at **Release key** (the secret without the public key). Nothing gets published that way; merge before tagging.
 
-6. Merge, then release as usual. In the Release run, **Release key** says "The release key is set and matches the companion's public key", and the release on `t3wow-releases` lists `t3wow.exe.sha256.sig`.
+6. Merge, then release as usual. In the Release run, **Release key** says "The release key is set and matches the companion's public key", and the release lists `t3wow.exe.sha256.sig` (on this repository, and on `t3wow-releases` while the bridge runs).
 
 7. Once you know a backup opens, you can delete the `.pem` from your PC: the workflow only needs the secret.
 
@@ -105,14 +105,14 @@ So nothing is stranded: every companion released so far updates to the first sig
 - the secret without the public key, or the public key without the secret: **Release key** fails;
 - neither, after a release that went out signed: **Signed releases stay signed** fails.
 
-What the transition can't do is protect companions that haven't updated yet: until a companion runs the first signed release, it trusts a matching SHA-256 from `t3wow-releases`, as it does today.
+What the transition can't do is protect companions that haven't updated yet: until a companion runs the first signed release, it trusts a matching SHA-256 from the repository it reads releases from (this one; `t3wow-releases` for companions up to 0.10.0), as it does today.
 
 ### Losing or replacing the key
 
 There's one key, and companions trust only it. Neither the scripts nor the companion support switching keys yet, so:
 
 - **Lost** (no backup, secret deleted): releases can't be signed with it again. Make a new key (`release_key.rs` back to `[0; 32]` first, then the steps above) and release. Companions built with the old key refuse that release, so their users have to download the new `t3wow.exe` by hand once; say so in the release notes.
-- **Leaked**: the same, as soon as possible. Until those companions are replaced, whoever has the key can sign an update they'd install, provided they can also publish to `t3wow-releases` (which takes `RELEASES_TOKEN` or your GitHub account).
+- **Leaked**: the same, as soon as possible. Until those companions are replaced, whoever has the key can sign an update they'd install, provided they can also publish a release where those companions look: on this repository (which takes a maintainer's account, or a workflow run with `contents: write`) or, for companions up to 0.10.0, on `t3wow-releases` (which takes `RELEASES_TOKEN` or your GitHub account).
 - **Planned rotation** would need the companion to accept a list of keys, and the workflow to sign with the old key a release that embeds the new one. That's a small change to make before it's needed, not now.
 
 ## Authenticode
@@ -140,8 +140,8 @@ Two more things to know:
 | [SSL.com](https://www.ssl.com/products/software-integrity/code-signing/iv/) IV certificate + [eSigner](https://www.ssl.com/guide/esigner-pricing-for-code-signing/) cloud signing (Tier 1, 20 signings a month) | individuals (government ID) | $309 ($129 + $180) | official action; the TOTP seed is a secret | **recommended outside the US and Canada** |
 | SSL.com IV with the key in your own Azure Key Vault Premium HSM, signed with AzureSignTool | individuals | about $265 the first year | OIDC, no TOTP seed | cheaper, but an afternoon of setup |
 | [Certum](https://shop.certum.eu/code-signing.html) Standard "in the Cloud" (SimplySign) | individuals | €209 | needs unofficial tools to get past its app-based codes | brittle in CI |
-| Certum Open Source | individuals with a public project | €49 | same as above | not eligible: the source must be public, and the certificate is revoked if used for software sold commercially |
-| [SignPath Foundation](https://signpath.org/terms) | OSI-licensed open-source projects with public source | free | good | not eligible while the source repository is private; the certificate names SignPath Foundation, not you |
+| Certum Open Source | individuals with a public project | €49 | same as above | possible once the source is public; the certificate is revoked if used for software sold commercially |
+| [SignPath Foundation](https://signpath.org/terms) | OSI-licensed open-source projects with public source | free | good | **the plan**: apply once the repository is public ([SignPath Foundation](#signpath-foundation)); the certificate names SignPath Foundation, not you |
 | OV/EV on a USB token (DigiCert, Sectigo, GlobalSign…) | OV: organizations, some individuals; EV: organizations | $220–$600 | the token must be plugged into the machine that signs | no CI without a self-hosted runner; EV buys nothing for SmartScreen now |
 
 Rules that apply to all of them:
@@ -152,7 +152,7 @@ Rules that apply to all of them:
 
 ### Recommendation
 
-For a solo developer with a private source repository:
+For a solo developer with a private source repository (as this one was when this was written; for the public repository, see [SignPath Foundation](#signpath-foundation)):
 
 1. **If you live in the US or Canada: Azure Artifact Signing Basic.** It's the cheapest option, with Microsoft's own action, and nothing to renew by hand. One caveat, as of November 2026: Microsoft has acknowledged a bug, not yet fixed, that shows extra SmartScreen warnings for some files signed after it rotated its intermediate certificates ([issue #128](https://github.com/Azure/artifact-signing-action/issues/128)). The suggested workaround is to [submit each release to Microsoft](https://www.microsoft.com/wdsi/filesubmission).
 2. **Anywhere else (Argentina included): an SSL.com IV certificate with eSigner, about $309 a year.** Working for a US company doesn't make you eligible for Artifact Signing as an individual: validation uses your own ID and your Azure billing address. SSL.com's IV certificate is for individuals with a government ID, and eSigner signs in its cloud HSM from GitHub Actions with no hardware. SSL.com doesn't list country limits, but ask them before buying whether they validate individuals in your country. This is what `release.yml` is wired for.
@@ -166,9 +166,11 @@ For a solo developer with a private source repository:
 - the eSigner step in `release.yml` stays off (it only warns), since its secrets aren't set;
 - the release key is set up regardless: it's free, and it's what protects updates.
 
+With the source public, the plan is SignPath Foundation (below).
+
 ### After open-sourcing
 
-Revisit with these two, both of which need the source to be public:
+The two options that need the source to be public:
 
 - **[SignPath Foundation](https://signpath.org/terms), free.** It signs with its own certificate, so Windows shows "SignPath Foundation" as the publisher, not you. Conditions:
   - every component under an OSI-approved license, with no proprietary parts;
@@ -180,6 +182,22 @@ Revisit with these two, both of which need the source to be public:
 - **Certum Open Source Code Signing, €49 a year.** Issued to you as a natural person, with "Open Source Developer" in the certificate. Its key is in Certum's cloud (SimplySign), whose codes come from a phone app, so CI needs unofficial tools. It gets revoked if used on software sold commercially.
 
 SignPath is the better fit if its conditions are acceptable: free, and made for CI. Either one replaces the eSigner step (and its test) in `release.yml`. The paid options above stay open if neither works out.
+
+### SignPath Foundation
+
+The plan: once the repository is public, apply to [SignPath Foundation](https://signpath.org/) for free Authenticode signing of `t3wow.exe`. Until it approves the project, `t3wow.exe` goes out without an Authenticode signature, as now, and the eSigner step stays off. Once approved, a separate change replaces the eSigner step in `release.yml` with SignPath's.
+
+What the application needs, and where this project stands:
+
+| SignPath asks for | Here |
+| --- | --- |
+| An OSI-approved license for the whole project, with no proprietary parts | MIT ([LICENSE](../LICENSE)); the addon's fonts are under the SIL Open Font License 1.1 (see the README's License section) |
+| The source in a public repository | https://github.com/MatiasCiccone/t3wow, once it's made public |
+| MFA for every maintainer, on GitHub and on SignPath | to turn on, and check, for each member before applying |
+| Builds from GitHub Actions, with origin verification: SignPath checks that what it signs was built by this repository's workflow, on a GitHub-hosted runner, from the commit it names | `build-windows` in `release.yml` runs on `windows-latest`; the signing step would submit `t3wow.exe` through SignPath's GitHub Action |
+| A code signing policy on the project's site, with the team's roles and a privacy statement | [docs/code-signing-policy.md](code-signing-policy.md), linked from the README |
+
+SignPath's own pages are the authority on these; where they and this table differ, theirs win.
 
 ### Set up Authenticode
 
@@ -229,7 +247,7 @@ One-time setup in the Azure portal (the [quickstart](https://learn.microsoft.com
 5. Create an app registration (service principal) with a client secret, and give it **Artifact Signing Certificate Profile Signer** on the account. Owner and Contributor can't sign.
 6. Add repository variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE` (`gh variable set …`) and the secret `AZURE_CLIENT_SECRET`.
 
-A client secret is the simplest login here. OIDC (federated credentials, no secret) would need one credential per tag, or a GitHub environment (a paid plan for private repositories), or Entra's flexible federated credentials, still in preview.
+A client secret is the simplest login here. OIDC (federated credentials, no secret) would need one credential per tag, or a GitHub environment (free on a public repository), or Entra's flexible federated credentials, still in preview.
 
 Then, in `release.yml`, replace the eSigner step with this one, and gate it and **Check the Authenticode signature** on `vars.AZURE_SIGNING_ACCOUNT != ''` instead of `env.AUTHENTICODE == 'true'` (repository variables can be tested in `if:`). Update the test that checks the order to the new step name.
 
@@ -279,7 +297,7 @@ It is free, and it does only that. It isn't an Apple Developer ID: it has no Tea
 
 ### How release.yml uses it
 
-In the `build-macos` job, on the self-hosted Mac runner:
+In the `build-macos` job, on GitHub's macOS runner:
 
 - **Mac signing certificate** fails the release when the variable names a certificate but the secret is missing (or the reverse), rather than signing ad hoc: one ad hoc release after a signed one would cost every Mac user their Screen Recording grant. With neither, it warns and signs ad hoc.
 - **Signing keychain** decodes the `.p12` into the job's temporary folder, makes a keychain there with a random password generated in the job (masked, never printed), imports the `.p12` with `-T /usr/bin/codesign`, deletes the `.p12`, runs `security set-key-partition-list -S apple-tool:,apple:,codesign:` so codesign can use the key without a dialog, and puts the keychain at the front of the user's search list. `build:app` is then told to look for the identity in that keychain only (`T3WOW_CODESIGN_KEYCHAIN`, codesign's `--keychain`).
@@ -313,10 +331,10 @@ Then set the two secrets from the new `.p12` (`base64 -i "T3 WoW Self-Signed.p12
 ## Checklist for the next release
 
 - [ ] Release key: run `bash scripts/release-signing-wizard.sh`, merge its pull request, confirm `T3WOW_SIGNING_KEY` is set.
-- [ ] Authenticode: skipped until the source is open (see [Decision](#decision-november-2026)). The "Authenticode not set up" warning in the run is expected.
-- [ ] Mac app: `T3WOW_MACOS_CERT_P12`, `T3WOW_MACOS_CERT_PASSWORD` and the `T3WOW_CODESIGN_IDENTITY` variable are set, and the t3wow-mac runner is online.
+- [ ] Authenticode: skipped until SignPath Foundation approves the project (see [SignPath Foundation](#signpath-foundation)). The "Authenticode not set up" warning in the run is expected.
+- [ ] Mac app: `T3WOW_MACOS_CERT_P12`, `T3WOW_MACOS_CERT_PASSWORD` and the `T3WOW_CODESIGN_IDENTITY` variable are set.
 - [ ] Bump the version in the three files and push the tag.
 - [ ] In the run: **Release key** says the key matches.
-- [ ] On `t3wow-releases`: `t3wow.exe.sha256.sig` is there.
+- [ ] On the release (and on `t3wow-releases` while the bridge runs): `t3wow.exe.sha256.sig` is there.
 - [ ] In the run: **The app is this version** passed, so the Mac app's requirement names the certificate.
 - [ ] From a 0.5.0 companion, **Update to x.y.z** installs it. After the update, a forged release (for instance, the same release with its `.sig` removed, on a test repository through `T3WOW_UPDATE_REPO` in a debug build) is refused.
