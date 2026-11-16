@@ -97,6 +97,7 @@ mod shortcut {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
     use std::ptr::{null, null_mut};
+    use std::ptr::NonNull;
     use windows_sys::core::{GUID, HRESULT};
     use windows_sys::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 
@@ -195,17 +196,17 @@ mod shortcut {
         std::thread::spawn(move || unsafe {
             check(CoInitializeEx(null(), COINIT_APARTMENTTHREADED as _), "starting COM")?;
             let result = (|| {
-                let mut link = null_mut();
-                check(CoCreateInstance(&CLSID_SHELL_LINK, null_mut(), CLSCTX_INPROC_SERVER, &IID_ISHELL_LINK_W, &mut link), "making a shell link")?;
-                if link.is_null() {
-                    return Err("making a shell link gave nothing".to_string());
-                }
+                // Option<NonNull> is laid out as a pointer, with None for null: the out
+                // parameters land in one, and only a pointer COM gave is ever used.
+                let mut link: Option<NonNull<c_void>> = None;
+                let out = (&mut link as *mut Option<NonNull<c_void>>).cast();
+                check(CoCreateInstance(&CLSID_SHELL_LINK, null_mut(), CLSCTX_INPROC_SERVER, &IID_ISHELL_LINK_W, out), "making a shell link")?;
+                let link = link.ok_or("making a shell link gave nothing")?.as_ptr();
                 let unknown = &**(link as *mut *const Unknown);
-                let mut file = null_mut();
-                let result = check((unknown.query_interface)(link, &IID_IPERSIST_FILE, &mut file), "IPersistFile").and_then(|()| {
-                    if file.is_null() {
-                        return Err("IPersistFile gave nothing".to_string());
-                    }
+                let mut file: Option<NonNull<c_void>> = None;
+                let out = (&mut file as *mut Option<NonNull<c_void>>).cast();
+                let result = check((unknown.query_interface)(link, &IID_IPERSIST_FILE, out), "IPersistFile").and_then(|()| {
+                    let file = file.ok_or("IPersistFile gave nothing")?.as_ptr();
                     let result = work(link, file);
                     ((**(file as *mut *const Unknown)).release)(file);
                     result
