@@ -2047,6 +2047,158 @@ return "ok"
 `);
 });
 
+// The player, as the fade reads it: moving (speed), on a flight path, in combat.
+const PLAYER = `
+speed, onTaxi, inCombat = 0, false, false
+function GetUnitSpeed(unit) return unit == "player" and speed or 0 end
+function UnitOnTaxi() return onTaxi end
+function InCombatLockdown() return inCombat end
+function UnitAffectingCombat() return inCombat end`;
+// Nobody typing in the window, the pointer off it.
+const FADE_HELPERS = `
+rawset(composer(), "HasFocus", function() return false end)
+rawset(T3WoWSearch, "HasFocus", function() return false end)
+function alpha() return T3WoWFrame:GetAlpha() end
+function fadeCheck(text)
+  for _, f in ipairs(frames) do
+    if f.kind == "CheckButton" and rawget(f, "label") and f.label.text == text then return f end
+  end
+end
+`;
+
+test("Settings has Fade window: Off at first, then Dim or Hide, with when to fade", () => {
+  run(`${FADE_HELPERS}
+UI.ShowSettings()
+assert(menuTexts("T3WoWFadeMenu") == "Off|Dim|Hide", menuTexts("T3WoWFadeMenu"))
+assert(shown("T3WoWFadeMenu") == "Off", shown("T3WoWFadeMenu"))
+assert(menuEntries("T3WoWFadeMenu")[1].checked, "Off isn't checked")
+local moving, combat = fadeCheck("While moving"), fadeCheck("In combat")
+assert(moving and combat, "no While moving or In combat check")
+assert(moving.get() == true and combat.get() == true, "both should start on")
+assert(not moving.enabled and not combat.enabled, "the checks should be greyed out while Off")
+pick("T3WoWFadeMenu", "Dim")
+assert(T3WoWDB.settings.fade == "dim" and shown("T3WoWFadeMenu") == "Dim", "Dim not saved or shown")
+assert(moving.enabled and combat.enabled, "the checks should turn on with Dim")
+combat.GetChecked = function() return false end
+combat.scripts.OnClick(combat)
+assert(T3WoWDB.settings.fadeCombat == false, "In combat not saved")
+pick("T3WoWFadeMenu", "Hide")
+assert(T3WoWDB.settings.fade == "hide", "Hide not saved")
+return "ok"
+`, { before: PLAYER });
+});
+
+test("Fade window off (the default) leaves the window as it is while moving and in combat", () => {
+  run(`${FADE_HELPERS}
+speed, inCombat = 7, true
+tick(2)
+assert(alpha() == 1, "faded with the setting off: " .. alpha())
+return "ok"
+`, { before: PLAYER });
+});
+
+test("Dim fades the window while you move and brings it back when you stop, but not on a flight path", () => {
+  run(`${FADE_HELPERS}
+T3WoWDB.settings.fade = "dim"
+speed = 7
+tick(0.25)
+assert(alpha() > 0.35 and alpha() < 1, "should fade over a moment, not at once: " .. alpha())
+tick(1)
+assert(alpha() == 0.35, "not dimmed: " .. alpha())
+assert(T3WoWFrame:IsShown(), "dimming hid the window")
+speed = 0
+tick(0.5)
+assert(alpha() == 1, "didn't come back: " .. alpha())
+speed, onTaxi = 20, true
+tick(1)
+assert(alpha() == 1, "a flight path dimmed it: " .. alpha())
+-- While moving off, moving doesn't dim it.
+onTaxi, T3WoWDB.settings.fadeMoving = false, false
+tick(1)
+assert(alpha() == 1, "dimmed with While moving off: " .. alpha())
+return "ok"
+`, { before: PLAYER });
+});
+
+test("Hide makes the window invisible in combat, without hiding it, and it comes back after", () => {
+  run(`${FADE_HELPERS}
+T3WoWDB.settings.fade = "hide"
+local sentBefore = #queue()
+inCombat = true
+tick(1)
+assert(alpha() == 0, "not invisible in combat: " .. alpha())
+assert(T3WoWFrame:IsShown() and #queue() == sentBefore, "the window was hidden, or the companion told it closed")
+-- Pointing at it brings it back while you point.
+T3WoWFrame.IsMouseOver = function() return true end
+tick(0.5)
+assert(alpha() == 1, "pointing at it didn't bring it back: " .. alpha())
+T3WoWFrame.IsMouseOver = function() return false end
+tick(1)
+assert(alpha() == 0, "didn't fade again: " .. alpha())
+-- A dropdown list open over the window keeps it whole.
+UI.ShowSettings()
+T3WoWFadeMenu.scripts.OnClick(T3WoWFadeMenu, "LeftButton")
+assert(T3WoWDropdownList.shown, "the list didn't open")
+tick(0.5)
+assert(alpha() == 1, "faded behind an open dropdown: " .. alpha())
+T3WoWDropdownList:Hide()
+tick(1)
+assert(alpha() == 0, "didn't fade once the list closed: " .. alpha())
+inCombat = false
+tick(0.5)
+assert(alpha() == 1, "didn't come back after combat: " .. alpha())
+T3WoWDB.settings.fadeCombat = false
+inCombat = true
+tick(1)
+assert(alpha() == 1, "hid with In combat off: " .. alpha())
+return "ok"
+`, { before: PLAYER });
+});
+
+test("the window doesn't fade while you type in it, and keeps what you typed", () => {
+  run(`${FADE_HELPERS}
+inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Fix the build", s = "completed", set = false, at = time(), p = "" } } })
+UI.Select({ e = 1, id = "t1" })
+T3WoWDB.settings.fade = "hide"
+typeText("half a message")
+rawset(composer(), "HasFocus", function() return true end)
+inCombat = true
+tick(1)
+assert(alpha() == 1, "faded while typing: " .. alpha())
+assert(typed() == "half a message", "the message box lost its text")
+rawset(composer(), "HasFocus", function() return false end)
+rawset(T3WoWSearch, "HasFocus", function() return true end)
+tick(1)
+assert(alpha() == 1, "faded while searching: " .. alpha())
+rawset(T3WoWSearch, "HasFocus", function() return false end)
+tick(1)
+assert(alpha() == 0, "didn't fade once typing stopped: " .. alpha())
+assert(typed() == "half a message", "fading cleared the message box")
+return "ok"
+`, { before: PLAYER });
+});
+
+test("opened mid-fight, the window shows whole until the fight ends, then fades in the next", () => {
+  run(`${FADE_HELPERS}
+T3WoWDB.settings.fade = "dim"
+UI.Toggle()
+inCombat = true
+UI.Toggle()
+tick(1)
+assert(alpha() == 1, "opened mid-fight but faded: " .. alpha())
+inCombat = false
+tick(0.5)
+inCombat = true
+tick(1)
+assert(alpha() == 0.35, "the next fight didn't dim it: " .. alpha())
+-- Closed faded and opened again: whole at once.
+UI.Toggle()
+UI.Toggle()
+assert(alpha() == 1, "reopened faded: " .. alpha())
+return "ok"
+`, { before: PLAYER });
+});
+
 test("after an update installed while the game ran, the window says to restart instead of breaking", () => {
   const out = runGame(`
 UI.Toggle()

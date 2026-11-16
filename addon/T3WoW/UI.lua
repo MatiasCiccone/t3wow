@@ -4491,6 +4491,8 @@ end
 local DEFAULTS = {
     toasts = true, chat = true, sound = true, duration = 8, maxToasts = 4, approvalOpensT3 = false,
     onCompleted = true, onWaiting = true, onFailed = true, onStopped = false,
+    -- Fading the window while you move or fight: off until you pick Dim or Hide.
+    fade = "off", fadeMoving = true, fadeCombat = true,
 }
 local EVENT_SETTING = {
     completed = "onCompleted", idle = "onCompleted", rolled_back = "onCompleted",
@@ -4788,6 +4790,77 @@ Skin.Box(settingsPanel, { shape = "panel", fill = "bg", ring = "border", ringLay
 settingsPanel:EnableMouse(true)
 settingsPanel:Hide()
 
+-- ---------------------------------------------------------------- fading while you play
+
+-- In Settings, the window can dim or go invisible while you move or are in combat, and come
+-- back when you stop or leave combat. Only its alpha changes: Show and Hide would tell the
+-- companion the window closed and lose what Escape and the popups expect, and SetAlpha is
+-- allowed in combat. It stays whole while you point at it, type in it (the message box or
+-- the search box keep their text and the cursor) or have one of its popups open, and when
+-- you open it while moving or fighting it waits for you to stop before it fades. A flight
+-- path doesn't count as moving.
+UI.Fade = {
+    MODES = { "off", "dim", "hide" },
+    NAMES = { off = "Off", dim = "Dim", hide = "Hide" },
+    LEVEL = { dim = 0.35, hide = 0 }, -- the window's alpha while faded
+    OUT = 0.4, IN = 0.15, -- seconds to fade out, and to come back
+    POPUPS = { "T3WoWDropdownList", "T3WoWPictureZoom", "T3WoWPermissions" }, -- on UIParent, not the window
+    alpha = 1,
+    held = false, -- opened while moving or fighting: no fading until that stops
+}
+
+function UI.Fade.Moving()
+    if UnitOnTaxi and UnitOnTaxi("player") then return false end
+    return GetUnitSpeed ~= nil and (GetUnitSpeed("player") or 0) > 0
+end
+
+function UI.Fade.InCombat()
+    if InCombatLockdown and InCombatLockdown() then return true end
+    return UnitAffectingCombat ~= nil and UnitAffectingCombat("player") and true or false
+end
+
+-- Whether the setting says to fade right now: you're doing something it's on for.
+function UI.Fade.Busy()
+    local s = settings()
+    if s.fade ~= "dim" and s.fade ~= "hide" then return false end
+    return (s.fadeMoving and UI.Fade.Moving()) or (s.fadeCombat and UI.Fade.InCombat()) or false
+end
+
+-- The alpha the window is heading for.
+function UI.Fade.Target()
+    if not UI.Fade.Busy() then
+        UI.Fade.held = false
+        return 1
+    end
+    if UI.Fade.held then return 1 end
+    if input:HasFocus() or (search and search:HasFocus()) then return 1 end
+    if frame:IsMouseOver() or (settingsPanel:IsShown() and settingsPanel:IsMouseOver()) then return 1 end
+    -- An open dropdown list, picture or permissions popup: you're using the window.
+    for _, name in ipairs(UI.Fade.POPUPS) do
+        if _G[name] and _G[name]:IsShown() then return 1 end
+    end
+    return UI.Fade.LEVEL[settings().fade]
+end
+
+-- Every frame while the window shows: a step toward the target alpha.
+function UI.Fade.Step(delta)
+    local target, alpha = UI.Fade.Target(), UI.Fade.alpha
+    if alpha == target then return end
+    if alpha < target then
+        alpha = math.min(target, alpha + delta / UI.Fade.IN)
+    else
+        alpha = math.max(target, alpha - delta / UI.Fade.OUT)
+    end
+    UI.Fade.alpha = alpha
+    frame:SetAlpha(alpha)
+end
+
+-- Opening the window shows it whole, even mid-fight.
+function UI.Fade.Opened()
+    UI.Fade.alpha, UI.Fade.held = 1, UI.Fade.Busy()
+    frame:SetAlpha(1)
+end
+
 do
     local settingsTitle = settingsPanel:CreateFontString(nil, "OVERLAY")
     settingsTitle:SetFontObject(Skin.fonts.title)
@@ -4818,6 +4891,7 @@ do
         label:SetFontObject(Skin.fonts.text)
         label:SetPoint("LEFT", check, "RIGHT", 8, 0)
         label:SetText(text)
+        check.label = label
         check.get = get or function() return settings()[key] end
         check.set = set or function(value) settings()[key] = value end
         check:SetScript("OnClick", function(self)
@@ -4876,6 +4950,39 @@ do
         settings().compact = value
         UI.Refresh()
     end)
+
+    -- Fading the window while you move or fight (UI.Fade, below): Off, Dim or Hide, and when.
+    fieldLabel("Fade window")
+    -- On UI.Fade, not locals: this block already holds nearly all of the chunk's 200.
+    UI.Fade.menu = dropdown(settingsPanel, "T3WoWFadeMenu", 150, {
+        entries = function()
+            local list = {}
+            for _, mode in ipairs(UI.Fade.MODES) do list[#list + 1] = { text = UI.Fade.NAMES[mode], value = mode } end
+            return list
+        end,
+        isSelected = function(mode)
+            local saved = T3WoWDB and T3WoWDB.settings
+            return (saved and saved.fade or "off") == mode
+        end,
+        pick = function(mode)
+            settings().fade = mode
+            UI.Fade.RefreshControls()
+        end,
+    })
+    placeDropdown(UI.Fade.menu)
+    layoutY = layoutY - 34
+    UI.Fade.checks = { checkbox("While moving", "fadeMoving"), checkbox("In combat", "fadeCombat") }
+    -- Moving and combat only matter once the window fades.
+    function UI.Fade.RefreshControls()
+        local mode = settings().fade
+        UI.Fade.menu:SetLabel(UI.Fade.NAMES[mode] or UI.Fade.NAMES.off)
+        local on = mode == "dim" or mode == "hide"
+        for _, check in ipairs(UI.Fade.checks) do
+            check:SetEnabled(on)
+            check:SetAlpha(on and 1 or 0.4)
+            check.label:SetAlpha(on and 1 or 0.5)
+        end
+    end
     layoutY = layoutY - 8
 
     sectionLabel("Notifications")
@@ -5007,6 +5114,7 @@ do
         end
         refreshThemeControls()
         refreshToastControls()
+        UI.Fade.RefreshControls()
     end)
     settingsPanel:SetScript("OnHide", function() setAnchorUnlocked(false) end)
 
@@ -5321,6 +5429,7 @@ end)
 
 frame:SetScript("OnShow", function()
     restoreLayout()
+    UI.Fade.Opened()
     -- The companion looks for Ctrl+V (Cmd+V on a Mac) only while this window is open.
     ns.Link.Send({ t = "ui", o = true })
     scrollToEnd = true -- reopening the window also lands on the latest message
@@ -5341,6 +5450,7 @@ end)
 local ticker = 0
 frame:SetScript("OnUpdate", function(_, delta)
     UI.History.Land()
+    UI.Fade.Step(delta)
     ticker = ticker + delta
     if ticker < 1 then return end
     ticker = 0

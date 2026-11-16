@@ -72,7 +72,7 @@ end
 -- getters answer 0 (sizes, scroll ranges).
 frames = {}
 local function frame(kind, name)
-  local f = { scripts = {}, shown = true, text = "", enabled = true, kind = kind, name = name }
+  local f = { scripts = {}, shown = true, text = "", enabled = true, kind = kind, name = name, alpha = 1 }
   function f:SetScript(event, fn) self.scripts[event] = fn end
   function f:GetScript(event) return self.scripts[event] end
   function f:HookScript(event, fn)
@@ -100,6 +100,8 @@ local function frame(kind, name)
   function f:Insert(text) self.text = self.text .. text end
   function f:GetCursorPosition() return #self.text end
   function f:SetEnabled(on) self.enabled = on end
+  function f:SetAlpha(a) self.alpha = a end
+  function f:GetAlpha() return self.alpha end
   function f:EnableMouse(on) self.mouse = on end
   function f:GetFontString() return fontString() end
   function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
