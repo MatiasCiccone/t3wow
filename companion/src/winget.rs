@@ -197,9 +197,15 @@ mod shortcut {
             let result = (|| {
                 let mut link = null_mut();
                 check(CoCreateInstance(&CLSID_SHELL_LINK, null_mut(), CLSCTX_INPROC_SERVER, &IID_ISHELL_LINK_W, &mut link), "making a shell link")?;
+                if link.is_null() {
+                    return Err("making a shell link gave nothing".to_string());
+                }
                 let unknown = &**(link as *mut *const Unknown);
                 let mut file = null_mut();
                 let result = check((unknown.query_interface)(link, &IID_IPERSIST_FILE, &mut file), "IPersistFile").and_then(|()| {
+                    if file.is_null() {
+                        return Err("IPersistFile gave nothing".to_string());
+                    }
                     let result = work(link, file);
                     ((**(file as *mut *const Unknown)).release)(file);
                     result
@@ -283,7 +289,9 @@ mod tests {
         fs::write(&exe, b"exe").unwrap();
         let lnk = dir.join(SHORTCUT);
         shortcut::create(&lnk, &exe, "T3 Code inside World of Warcraft: Forever").unwrap();
-        assert!(same_path(&shortcut::target(&lnk).unwrap(), &exe));
+        // Canonical on both sides: a temp folder can be a short 8.3 path (C:\Users\RUNNER~1\â€¦),
+        // and the shell link gives the long one.
+        assert_eq!(fs::canonicalize(shortcut::target(&lnk).unwrap()).unwrap(), fs::canonicalize(&exe).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 }
