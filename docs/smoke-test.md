@@ -33,7 +33,7 @@
 | `capture.rs`, `codec.rs`, `Codec.lua` | Long messages, an answer to a question, Stop: commands of every size get through |
 | `slots.rs`, `Link.lua`, signals | `/t3 probe`; a long session (`/t3 status` counts the 200 updates); WoW running when the addon files change: the window's top line says to restart WoW; the AddOns list in the game shows T3 WoW as one entry, with no slot rows under it |
 | `render.rs`, pictures | A page and an embedded image (`![alt](C:\path\image.png)`); clicking a picture |
-| `clip.rs`, `keys.rs` | Ctrl+V in **New Thread** too; Ctrl+V outside the box pastes nothing |
+| `clip.rs`, `keys.rs` | Ctrl+V in **New Thread** too; Ctrl+V outside the box pastes nothing; an image picked with **Win+V** |
 | `UI.lua`, `Theme.lua` | All three themes and **Compact thread list** in Settings; `npm run screenshots` and compare |
 | `.toc`, interface version | Tray **Match WoW's interface version…**, then the AddOns list shows nothing out of date |
 | `tray.rs`, `dialog.rs`, `app.rs` | Every menu item the change touched, and its notification |

@@ -7,6 +7,10 @@
 //! It doesn't look at any other key, and doesn't look at all otherwise. (Only while typing in
 //! the message box was too late: the game's news of it takes up to a third of a second, so a
 //! Ctrl+V right after the click came before the look.)
+//!
+//! Windows' clipboard history (Win+V) pastes the item you pick by pressing Ctrl+V for you,
+//! holding Ctrl about 50 ms and tapping V in less than one look's time: so on Windows a key
+//! counts as down when it's held now or was pressed since the last look.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
@@ -60,10 +64,25 @@ impl Chord {
     }
 }
 
-/// Whether Ctrl+V is held. The keys aren't read at all unless WoW is in front.
+/// Whether Ctrl+V is held. The keys aren't read at all unless WoW is in front; then both are
+/// read on every look, so neither keeps a press from long ago (`pressed_since`) for the other
+/// to meet: a Ctrl+A a minute ago and a v typed now aren't a Ctrl+V.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn ctrl_v_held(in_front: bool, v: impl Fn() -> bool, ctrl: impl Fn() -> bool) -> bool {
-    in_front && v() && ctrl()
+    if !in_front {
+        return false;
+    }
+    let (v, ctrl) = (v(), ctrl());
+    v && ctrl
+}
+
+/// A key's state from GetAsyncKeyState: the high bit, held down now; the low bit, pressed
+/// since the last look. The low bit catches a press quicker than a look: Win+V's Ctrl+V, or
+/// a fast tap. (It's shared with any other program that reads the same key, so it can come
+/// up empty; a held press still counts by the high bit.)
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pressed_since(state: u16) -> bool {
+    state & 0x8001 != 0
 }
 
 /// Starts the thread that counts Ctrl+V presses (once, however often it is called).
@@ -96,8 +115,7 @@ fn start() {
                     GetWindowThreadProcessId(GetForegroundWindow(), &mut owner);
                     owner == pid
                 };
-                // The high bit: held down now.
-                let held = |key: u16| unsafe { GetAsyncKeyState(key as i32) } as u16 & 0x8000 != 0;
+                let held = |key: u16| pressed_since(unsafe { GetAsyncKeyState(key as i32) } as u16);
                 if chord.look(ctrl_v_held(in_front, || held(VK_V), || held(VK_CONTROL)), in_front) {
                     LAST_AT.store(crate::config::now_ms(), Ordering::SeqCst);
                     PRESSES.fetch_add(1, Ordering::SeqCst);
@@ -249,6 +267,8 @@ mod tests {
         assert_eq!(reads.get(), 0, "read a key with WoW in the background");
         assert!(ctrl_v_held(true, || read(true), || read(true)));
         assert!(!ctrl_v_held(true, || read(false), || read(true)));
+        // In front, both are read on every look, V down or not.
+        assert_eq!(reads.get(), 4);
     }
 
     #[test]
@@ -264,6 +284,25 @@ mod tests {
         assert_eq!(presses_in(&[UP_IN_WOW, DOWN_ELSEWHERE, DOWN_IN_WOW, DOWN_IN_WOW]), [false, false, false, false]);
         // Released in the other window doesn't count as released in WoW either.
         assert_eq!(presses_in(&[(false, false), DOWN_IN_WOW, UP_IN_WOW, DOWN_IN_WOW]), [false, false, false, true]);
+    }
+
+    /// What GetAsyncKeyState answered for Ctrl and V in each look at a Win+V paste on this PC
+    /// (Windows 11, clipboard history): Ctrl held for a few looks, V only ever seen by the bit
+    /// that says it was pressed since the last look. Before the low bit counted, no press.
+    #[test]
+    fn a_win_v_paste_counts_as_a_ctrl_v() {
+        const UP: u16 = 0;
+        const HELD: u16 = 0x8000;
+        const TAPPED: u16 = 0x0001;
+        // (V, Ctrl) per look; WoW in front throughout (the history panel doesn't take it).
+        let looks = [(UP, UP), (UP, HELD), (UP, HELD), (UP, HELD), (TAPPED, HELD), (UP, HELD), (UP, UP)];
+        let mut chord = Chord::default();
+        let counted: Vec<bool> = looks.iter().map(|&(v, ctrl)| chord.look(ctrl_v_held(true, || pressed_since(v), || pressed_since(ctrl)), true)).collect();
+        assert_eq!(counted, [false, false, false, false, true, false, false]);
+        // Win+V itself (V with the Windows key, no Ctrl) is no press.
+        let mut chord = Chord::default();
+        let counted: Vec<bool> = [(UP, UP), (TAPPED, UP), (UP, UP)].iter().map(|&(v, ctrl)| chord.look(ctrl_v_held(true, || pressed_since(v), || pressed_since(ctrl)), true)).collect();
+        assert_eq!(counted, [false, false, false]);
     }
 
     /// Once a v typed in WoW came through, the keys aren't hidden, and macOS isn't asked
