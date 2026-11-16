@@ -88,6 +88,33 @@ function PullRequests.SetLink(link, pr)
     PullRequests.Fit(link)
 end
 
+-- The open thread's pull requests by number ("#12", or "!12" for a merge request), set as
+-- its conversation is drawn: a message that names one shows it as a link (Mono).
+PullRequests.inView = {}
+function PullRequests.SetInView(prs)
+    PullRequests.inView = {}
+    for _, pr in ipairs(type(prs) == "table" and prs or {}) do
+        if type(pr) == "table" and type(pr.n) == "string" then PullRequests.inView[pr.n] = pr end
+    end
+end
+
+-- Where the open thread's next pull request is named in s from init on: its start, its end
+-- and the pull request, or nil. A number counts on its own, not inside a word, a path or
+-- a link (repo#12, a/b#12, &#12;, #12a), though right after a color code it does (bold).
+function PullRequests.FindMention(s, init)
+    if next(PullRequests.inView) == nil then return end
+    local pos = init or 1
+    while true do
+        local a, b, number = s:find("([#!]%d+)", pos)
+        if not a then return end
+        local pr = PullRequests.inView[number]
+        local before, after = s:sub(a - 1, a - 1), s:sub(b + 1, b + 1)
+        local afterColor = a > 10 and s:sub(a - 10, a - 1):find("^|c%x%x%x%x%x%x%x%x$") ~= nil
+        if pr and (afterColor or not before:find("[%w_/&#!]")) and not after:find("[%w_]") then return a, b, pr end
+        pos = b + 1
+    end
+end
+
 local inbox
 -- { env = envId, id = threadId } or { new = true, env = envId, project = projectId or nil,
 -- worktree = true to start it in a new worktree, and what you picked of pv, m (provider and
@@ -1705,11 +1732,30 @@ do
             until e >= #s
             return e
         end
+        -- The color a piece of text starts in: its run's, or one a color code in an earlier
+        -- piece began (bold cut over two lines), until a |r ends it.
+        local active
+        local function colorAfter(s)
+            local plain, pos = s:gsub("||", ""), 1
+            while true do
+                local a, b, tag = plain:find("|([cr])", pos)
+                if not a then return end
+                if tag == "r" then
+                    active, pos = nil, b + 1
+                else
+                    local code = plain:match("^|c%x%x%x%x%x%x%x%x", a)
+                    if code then active = code end
+                    pos = code and a + #code or b + 1
+                end
+            end
+        end
         local function put(s, mono, color)
             local lead, body = s:match("^( *)(.-) *$")
             if body ~= "" then
                 local fs = take(mono and "mono" or "text", mono and monoRun or textRun)
-                fs:SetText(color and (color .. body .. "|r") or body)
+                local start = not mono and active or ""
+                fs:SetText(color and (color .. start .. body .. "|r") or (start .. body))
+                if not mono then colorAfter(body) end
                 local size = mono and monoSize or textSize
                 fs:SetPoint("TOPLEFT", holder, "TOPLEFT", x + #lead * space[mono] + (mono and CHIP or 0),
                     -row * lineHeight - floor((lineHeight - size) / 2))
@@ -1741,12 +1787,47 @@ do
                 s = s:gsub("^ +", "")
             end
         end
+        -- A pull request the message names: its number, colored by its state and opening it
+        -- when clicked, as in the header, on its line or the next.
+        local function flowMention(pr)
+            local w = math.ceil(measure(Skin.fonts.text, pr.n)) + 2
+            if x > 0 and x + w > width then x, row = 0, row + 1 end
+            local link = take("mention", function()
+                local b = PullRequests.NewLink(messageChild, function() return selected.env, selected.id end)
+                b.label:SetFontObject(Skin.fonts.text)
+                -- Over the message's own button, which copies it.
+                b:SetFrameLevel(messageChild:GetFrameLevel() + 3)
+                b.box, b.chip = false, false
+                return b
+            end)
+            PullRequests.SetLink(link, pr)
+            link:SetWidth(w)
+            link:SetHeight(lineHeight)
+            link:SetPoint("TOPLEFT", holder, "TOPLEFT", x, -row * lineHeight)
+            x = x + w
+        end
+        -- Prose, with the pull requests it names as links.
+        local function flowProse(s)
+            local color
+            local c, inner = s:match("^(|c%x%x%x%x%x%x%x%x)(.*)|r$")
+            if c then color, s = c, inner end
+            local pos = 1
+            while true do
+                local a, b, pr = PullRequests.FindMention(s, pos)
+                if not a then break end
+                flowRun(color and (color .. s:sub(pos, a - 1) .. "|r") or s:sub(pos, a - 1), false)
+                flowMention(pr)
+                pos = b + 1
+            end
+            flowRun(color and (color .. s:sub(pos) .. "|r") or s:sub(pos), false)
+            active = nil
+        end
         local firstLine = true
         for line in (text .. "\n"):gmatch("(.-)\n") do
             if not firstLine then x, row = 0, row + 1 end
             firstLine = false
             for plain, code in (line .. "\1\2"):gmatch("(.-)\1(.-)\2") do
-                flowRun(plain, false)
+                flowProse(plain)
                 flowRun((code:gsub("\1", "")), true)
             end
         end
@@ -1783,7 +1864,7 @@ do
         local first, last
         for _, seg in ipairs(segments) do
             local region, inset
-            if type(seg) == "string" and seg:find("\1", 1, true) then
+            if type(seg) == "string" and (seg:find("\1", 1, true) or PullRequests.FindMention(seg)) then
                 region, inset = inlineBlock(seg, room), 0
             elseif type(seg) == "string" then
                 region, inset = take("prose", prose), 0
@@ -1829,6 +1910,8 @@ local function placeMessage(fs, text, mine, segments)
     local full = messageWidth() - 8
     fs:SetFontObject(Skin.fonts.text)
     fs.bubble:SetShown(mine)
+    -- Naming one of the thread's pull requests, it is laid out run by run, the link a run.
+    if type(segments) ~= "table" and PullRequests.FindMention(text) then segments = { text } end
     if type(segments) == "table" and #segments > 0 then
         local first, last, width = Mono.Place(segments, mine)
         if first then
@@ -2822,6 +2905,7 @@ function renderView()
         end
     end
     UI.Work.live = nil
+    PullRequests.SetInView(nil)
     Mono.Release()
     Pictures.Release()
     Handoff.Release()
@@ -2874,6 +2958,7 @@ function renderView()
         return
     end
     UI.Work.Take(view)
+    PullRequests.SetInView(view.prs)
     flowStart(0)
     if view.more then
         earlier:SetPoint("TOP", messageChild, "TOP", 0, 0)
