@@ -35,6 +35,8 @@ mod token_key;
 #[cfg(any(windows, target_os = "macos"))]
 mod tray;
 mod updater;
+#[cfg(windows)]
+mod winget;
 mod wow;
 
 use config::Config;
@@ -272,6 +274,11 @@ fn command(args: Args) -> Result<(), String> {
             println!("Restart WoW (a full restart, not /reload) so the game sees the new files.");
         }
         "uninstall" => {
+            // First: a winget install has its shortcut even when WoW was never found.
+            #[cfg(windows)]
+            if let Some(lnk) = winget::remove_shortcut() {
+                println!("Removed the Start menu shortcut ({}).", lnk.display());
+            }
             let slots = Slots::for_wow(&wow_dir(&args, &config)?, &interface);
             slots.uninstall().map_err(|e| e.to_string())?;
             println!("Removed the T3WoW addon and its slots. Your sign-in stays in {}", Config::file().display());
@@ -359,6 +366,8 @@ fn main() {
             }
             log::line(&format!("T3 WoW companion {} starting", crate::VERSION));
             updater::clean_up();
+            #[cfg(windows)]
+            winget::on_start();
             let app = app::App::new();
             let worker = app.clone();
             std::thread::Builder::new().name("companion".into()).spawn(move || app::run(worker)).expect("worker thread");

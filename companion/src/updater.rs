@@ -113,7 +113,7 @@ fn http() -> ureq::Agent {
     )
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -355,8 +355,29 @@ pub fn install(release: &Release, step: &dyn Fn(Step)) -> Result<(), String> {
     if !cfg!(windows) {
         return Err(NOT_INSTALLABLE.into());
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    update_exe(&exe, &release.version, || fetch_checked(release, step), |from, to| fs::rename(from, to))
+    let exe = real_exe().map_err(|e| e.to_string())?;
+    update_exe(&exe, &release.version, || fetch_checked(release, step), |from, to| fs::rename(from, to))?;
+    // A tray update restarts the companion, which does this too; `t3wow.exe update` doesn't.
+    #[cfg(windows)]
+    crate::winget::sync(&exe, &release.version);
+    Ok(())
+}
+
+/// The running exe's file. With Developer Mode on, winget starts t3wow.exe through a link it
+/// makes on PATH: an update replaces the file the link points to, not the link.
+pub fn real_exe() -> io::Result<PathBuf> {
+    resolve_link(std::env::current_exe()?)
+}
+
+fn resolve_link(exe: PathBuf) -> io::Result<PathBuf> {
+    if !fs::symlink_metadata(&exe)?.file_type().is_symlink() {
+        return Ok(exe);
+    }
+    let target = fs::read_link(&exe)?;
+    Ok(match exe.parent() {
+        Some(dir) if target.is_relative() => dir.join(target),
+        _ => target,
+    })
 }
 
 /// Downloads this system's program from the release and checks it against the release's
@@ -488,22 +509,31 @@ pub fn clean_up() {
         bundle::clean_up_at(&app, &bundle::lock_path());
         return;
     }
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = real_exe() {
         clean_up_at(&exe);
     }
 }
 
-/// Skipped while an update runs: its files aren't leftovers yet.
+/// Skipped while an update runs: its files aren't leftovers yet. The tray runs this as it
+/// starts, as the only companion, so the exe on disk is the one running and the update's
+/// record of it (`<exe>.version`) has done its job. It removes the lock too, which leaves
+/// nothing but the exe in its folder: `winget uninstall` removes the folder only when it's
+/// empty, and its PATH entry with it.
 fn clean_up_at(exe: &Path) {
-    let (Ok(_lock), Some(dir), Some(name)) = (try_lock(exe), exe.parent(), exe.file_name()) else { return };
+    let lock_file = sibling(exe, "update-lock");
+    let (Ok(lock), Some(dir), Some(name)) = (try_lock(exe), exe.parent(), exe.file_name()) else { return };
     let name = name.to_string_lossy();
-    let (old, new) = (format!("{name}.old"), format!("{name}.new"));
+    let (old, new, version) = (format!("{name}.old"), format!("{name}.new"), format!("{name}.version"));
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
-        if file.starts_with(&old) || file.starts_with(&new) {
+        if file.starts_with(&old) || file.starts_with(&new) || file == version {
             let _ = fs::remove_file(entry.path());
         }
     }
+    // Removed while still held, so no update can take it between the two; one that opens it
+    // in that moment stops with "another update is already running" or can't create it.
+    let _ = fs::remove_file(&lock_file);
+    drop(lock);
 }
 
 #[cfg(test)]
@@ -788,7 +818,31 @@ mod tests {
         assert_eq!(fs::read(dir.join(&left[0])).unwrap(), b"old exe");
         fs::write(dir.join("t3wow.exe.new"), b"from 0.4.1").unwrap();
         clean_up_at(&exe);
-        assert!(leftovers(&dir).is_empty());
+        // Nothing but the exe, so `winget uninstall` can remove the folder.
+        let names: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["t3wow.exe"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_exe_started_through_a_link_updates_the_file_the_link_points_to() {
+        let (dir, exe) = exe_dir("link");
+        let link = dir.join("link.exe");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&exe, &link);
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&exe, &link);
+        if made.is_err() {
+            // Windows makes links only with Developer Mode or as an administrator.
+            eprintln!("skipped: can't make a link here");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        assert_eq!(resolve_link(link.clone()).unwrap(), exe);
+        assert_eq!(resolve_link(exe.clone()).unwrap(), exe);
+        update_exe(&resolve_link(link.clone()).unwrap(), "9.0.0", || Ok(b"new exe".to_vec()), |from, to| fs::rename(from, to)).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+        assert_eq!(fs::read(&link).unwrap(), b"new exe");
         let _ = fs::remove_dir_all(&dir);
     }
 
