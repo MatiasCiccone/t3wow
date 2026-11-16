@@ -44,8 +44,8 @@ test("a release is signed only with the key whose public half the companion embe
   assert.throws(() => releaseKey(pem, "const RELEASE_PUBLIC_KEY: [u8; 32] = [0; 32];"), /placeholder/);
   assert.throws(() => releaseKey("", keyFileWith(raw)), /T3WOW_SIGNING_KEY is not set/);
   assert.throws(() => releaseKey("not a pem", keyFileWith(raw)), /isn't a private key/);
-  const rsa = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ format: "pem", type: "pkcs8" });
-  assert.throws(() => releaseKey(rsa, keyFileWith(raw)), /not Ed25519/);
+  const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "pem", type: "pkcs8" });
+  assert.throws(() => releaseKey(ec, keyFileWith(raw)), /not Ed25519/);
 });
 
 test("release_key.rs holds the placeholder or a 32-byte key, and updater.rs uses it", () => {
