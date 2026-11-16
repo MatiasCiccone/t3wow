@@ -20,6 +20,8 @@ The Flat and Classic themes and the compact thread list are in [`assets/screensh
 ## Set up
 
 1. Download `t3wow.exe` from the [latest release](https://github.com/MatiasCiccone/t3wow/releases/latest) (or build it with `npm run build:exe`, see Develop; [Code signing policy](docs/code-signing-policy.md)) and double-click it. It's a small native program (about 4 MB, nothing else to install) that lives in the system tray, next to the clock. Windows may warn about an unrecognized app the first time, since it isn't signed: **More info → Run anyway**.
+
+   **Or with winget**, which skips that warning: in a terminal, run `winget install MatiasCiccone.T3WoW`, then open a new terminal and run `t3wow`. It's the same `t3wow.exe`, kept in winget's own folder, and it still updates itself (winget's list follows its updates). From the first update that brings this, a winget install also gets a **T3 WoW** entry in the Start menu. `winget upgrade --all` leaves it alone; `winget upgrade MatiasCiccone.T3WoW` updates it like the tray does, once T3 WoW is quit.
 2. It finds WoW: Forever (a running client, Battle.net's install record, or the usual folders; if it can't, its tray menu has **Choose WoW folder…**), puts the addon and its update slots into `Interface\AddOns`, and opens T3's sign-in page. The page opens by itself once per start; after that, **Sign in to T3…** in the tray menu opens it again, and choosing it while a sign-in is waiting starts that sign-in over.
 3. Approve the sign-in, and pick what the game may do under **What it may do** on T3's page:
    - **Read only**: the game shows your threads, but T3 refuses every message, answer, new thread, **Stop** and **Settle** from it. T3 starts here when you approve without a code, so change it. A T3 you reach at its T3 Connect address sends you to T3 Connect's page instead (app.t3.codes): sign in there with your T3 Connect account, and it starts with no level picked.
@@ -62,7 +64,7 @@ Plain `http://` over your LAN works, but it sends the sign-in token across the n
 - `login` signs in again. `--origin <url>` points the companion at a T3 on another machine, and `--origin local` goes back to the T3 on this PC once it's running, as the tray's **T3 server** menu does (but always through the browser). The new T3 is saved only once its sign-in succeeds: a failed or cancelled sign-in leaves the companion on the T3 it had. A running companion picks up the new T3 and sign-in within 30 seconds, and the game window then shows only the new T3's threads.
 - `status` checks the addon install and the T3 connection, and says when that T3 runs an older T3 Code than this release is made for. `status --origin <url>` (or `local`) checks that T3 with its own saved sign-in, without switching to it. Other commands don't take `--origin`.
 - `update` downloads and installs the newest release, with the same checks as the tray. It doesn't restart a companion running in the tray: quit it from its menu and start it again. Only one update runs at a time; a second one stops with "another update is already running".
-- `uninstall` removes the addon.
+- `uninstall` removes the addon, and the Start menu entry a winget install adds.
 
 ## On a Mac
 
@@ -217,8 +219,8 @@ The addon uses only the documented addon API. The companion reads pixels in one 
 On Windows:
 
 1. In the tray menu, turn off **Start with Windows**, then choose **Quit**.
-2. Remove the addon: run `t3wow.exe uninstall` from a terminal (it removes `Interface\AddOns\T3WoW` and its `T3WoW_S…` slot folders), or delete those folders yourself.
-3. Delete `t3wow.exe` and the files next to it whose names start with `t3wow.exe.` (the updater's `t3wow.exe.update-lock` and `t3wow.exe.version`, and any `t3wow.exe.old-…` or `t3wow.exe.new…` an update left), then the folder `%APPDATA%\t3wow`, which holds the settings, the encrypted sign-ins, the log and the page-drawing browser profile.
+2. Remove the addon: run `t3wow.exe uninstall` from a terminal (it removes `Interface\AddOns\T3WoW` and its `T3WoW_S…` slot folders, and the Start menu entry a winget install adds), or delete those folders yourself.
+3. Installed with winget: run `winget uninstall MatiasCiccone.T3WoW` (it removes `t3wow.exe` and its folder), delete **T3 WoW** from the Start menu if it's still there, then the folder `%APPDATA%\t3wow` (below). Otherwise: delete `t3wow.exe` and the files next to it whose names start with `t3wow.exe.` (the updater's `t3wow.exe.update-lock` and `t3wow.exe.version`, and any `t3wow.exe.old-…` or `t3wow.exe.new…` an update left), then the folder `%APPDATA%\t3wow`, which holds the settings, the encrypted sign-ins, the log and the page-drawing browser profile.
 
 On a Mac:
 
@@ -265,7 +267,7 @@ npm run screenshots # redraws assets/screenshots from the addon's code (needs Ch
 
 `cargo test -- --ignored` in `companion/` also runs the test that draws with the real Edge (Windows with Edge or Chrome only).
 
-**Live tests** (`npm run test:live`) check the companion and the addon against the real T3 the companion is signed in to (`t3wow.exe login` first). Run them before every release, and after every T3 Code update as part of [moving to a new T3 Code release](docs/t3-update.md). They take a minute or two and start a few short agent runs on the cheapest model T3 offers (Haiku when there is one; `T3WOW_LIVE_MODEL=<provider>/<model>` picks another). The runs go in their own T3 project, **T3 WoW live tests**, which the first run creates in an empty folder (`%APPDATA%	3wow\live-tests`), and their threads are archived at the end. Four checks:
+**Live tests** (`npm run test:live`) check the companion and the addon against the real T3 the companion is signed in to (`t3wow.exe login` first). Run them before every release, and after every T3 Code update as part of [moving to a new T3 Code release](docs/t3-update.md). They take a minute or two and start a few short agent runs on the cheapest model T3 offers (Haiku when there is one; `T3WOW_LIVE_MODEL=<provider>/<model>` picks another). The runs go in their own T3 project, **T3 WoW live tests**, which the first run creates in an empty folder (`%APPDATA%\t3wow\live-tests`), and their threads are archived at the end. Four checks:
 
 - The T3 tools the companion calls, and `html_render`, whose input it reads, take the inputs it was made for (`companion/tests/fixtures/t3-tools.json`). A new, removed or changed input fails and is named; after acting on it, `T3WOW_LIVE_UPDATE_TOOLS=1 npm run test:live` records the new T3's tools.
 - Every call the companion makes is answered in the shape the unit tests' `FakeT3` answers it. If T3 renames or drops a field, this fails and names it: fix the fake, and the unit tests then show what in the companion needs to change. Fields T3 sends only sometimes are listed in `OPTIONAL` in `companion/src/bridge/tests/live.rs`.
@@ -298,6 +300,7 @@ This code signing is separate from the release key below, which the updater chec
 - `T3WOW_MACOS_CERT_P12` and `T3WOW_MACOS_CERT_PASSWORD`: the Mac app's certificate, base64 of its `.p12`, and the `.p12`'s password. Without them the app is signed ad hoc.
 - `T3WOW_CODESIGN_IDENTITY` (a variable, not a secret): that certificate's SHA-1. With only one of the certificate and the variable set, the release fails ([The Mac app's certificate](docs/release-signing.md#the-mac-apps-certificate)).
 - `CURSEFORGE_TOKEN`: a CurseForge API token, for the upload below.
+- `WINGET_TOKEN`: a classic token with the `public_repo` scope, which sends each release to winget: a pull request to [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) (package `MatiasCiccone.T3WoW`) from that account's fork, made with [Komac](https://github.com/russellbanks/Komac). Microsoft's moderators review it, so winget gets the release some hours to a day or two after GitHub. Without the secret, or until winget-pkgs has the package, the workflow skips this and says so in the log.
 - `RELEASES_TOKEN`: only for the bridge to `t3wow-releases`, a fine-grained token with Contents read and write on that repository alone. Without it the workflow skips that publish and says so in the log; deleting it is how the bridge is retired.
 
 Authenticode signing of `t3wow.exe` is optional: the workflow signs it with SSL.com eSigner only once the `ESIGNER_USERNAME`, `ESIGNER_PASSWORD`, `ESIGNER_CREDENTIAL_ID` and `ESIGNER_TOTP_SECRET` secrets are set, and warns otherwise (see [Set up Authenticode](docs/release-signing.md#set-up-authenticode)).
