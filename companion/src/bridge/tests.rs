@@ -3071,9 +3071,7 @@ fn paste_rig(start_ms: i64, w: u32, h: u32, png_bytes: usize) -> (Rig, Arc<Mutex
     let presses = Arc::new(Mutex::new((0u64, 0i64)));
     let read = Arc::clone(&presses);
     rig.bridge.presses = Box::new(move || *read.lock().unwrap());
-    rig.bridge.clipboard = Box::new(move || {
-        Ok(Some(Clipped { png: vec![7; png_bytes], bitmap: Bitmap { width: w, height: h, rgba: vec![200; (w * h * 4) as usize] } }))
-    });
+    rig.bridge.clipboard = Box::new(move || Ok(vec![Clipped { png: vec![7; png_bytes], bitmap: Bitmap { width: w, height: h, rgba: vec![200; (w * h * 4) as usize] } }]));
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "im": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
     rig.bridge.tick();
     (rig, presses)
@@ -3386,6 +3384,38 @@ fn a_failed_upload_sends_nothing_and_says_why() {
 }
 
 #[test]
+fn image_files_copied_together_paste_together_as_many_as_fit() {
+    let (mut rig, presses) = paste_rig(55_500_000, 4, 4, 100);
+    let image = |w: u32| Clipped { png: vec![1; 10], bitmap: Bitmap { width: w, height: 2, rgba: vec![0; (w * 2 * 4) as usize] } };
+    let last_note = |rig: &Rig| str_of(&rig.bridge.snapshot()["notes"].as_array().unwrap().last().unwrap()["x"]).to_string();
+    // Three files copied in Explorer: three images, in the order copied, from one Ctrl+V.
+    rig.bridge.clipboard = Box::new(move || Ok(vec![image(1), image(2), image(3)]));
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 2, "t": "paste", "d": "new" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 2), json!({ "s": 2, "ok": true }));
+    let widths: Vec<Value> = rig.bridge.snapshot()["att"].as_array().unwrap().iter().map(|a| a["w"].clone()).collect();
+    assert_eq!(widths, [json!(1), json!(2), json!(3)]);
+    assert_eq!(last_note(&rig), "3 images pasted.");
+    // Seven more: five fit, and the window says the rest didn't.
+    rig.bridge.clipboard = Box::new(move || Ok((0..7).map(|_| image(4)).collect()));
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "paste", "d": "new" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(MAX_PASTED));
+    assert_eq!(last_note(&rig), "5 of the 7 images pasted: a message takes 8 at most.");
+    // Copied files of which none is an image: the reason, not "no image".
+    rig.bridge.clipboard = Box::new(|| Err("the copied file isn't an image (PNG, JPEG, GIF, BMP or TIFF)".into()));
+    press(&rig, &presses);
+    rig.advance(100);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 4, "t": "paste", "d": "mac:t1" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 4)["x"], "the copied file isn't an image (PNG, JPEG, GIF, BMP or TIFF)");
+}
+
+#[test]
 fn pastes_stop_at_eight_need_an_image_and_follow_the_tray_setting() {
     let (mut rig, presses) = paste_rig(55_000_000, 4, 4, 100);
     for s in 2..=10 {
@@ -3397,7 +3427,7 @@ fn pastes_stop_at_eight_need_an_image_and_follow_the_tray_setting() {
     assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(MAX_PASTED));
     assert_eq!(outcome(&rig, 10)["x"], "a message takes 8 images at most");
 
-    rig.bridge.clipboard = Box::new(|| Ok(None));
+    rig.bridge.clipboard = Box::new(|| Ok(Vec::new()));
     press(&rig, &presses);
     rig.advance(100);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 11, "t": "paste", "d": "mac:t1" }] }));
@@ -3450,7 +3480,7 @@ fn pasted_images_go_with_the_sign_in_and_the_game_process_they_came_from() {
 fn without_pictures_in_the_game_a_paste_still_works_with_no_small_picture() {
     let mut rig = Rig::new(57_000_000);
     rig.bridge.presses = Box::new(|| (1, 57_000_050));
-    rig.bridge.clipboard = Box::new(|| Ok(Some(Clipped { png: vec![1; 10], bitmap: Bitmap { width: 2, height: 2, rgba: vec![0; 16] } })));
+    rig.bridge.clipboard = Box::new(|| Ok(vec![Clipped { png: vec![1; 10], bitmap: Bitmap { width: 2, height: 2, rgba: vec![0; 16] } }]));
     rig.advance(100);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "paste", "d": "new" }] }));
     rig.bridge.tick();

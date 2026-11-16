@@ -962,8 +962,8 @@ pub struct Bridge {
     scan: Option<ScanCache>,
     /// Pictures that couldn't be drawn, why, and when (tried again after PICTURE_RETRY_MS).
     picture_errors: HashMap<String, (String, i64)>,
-    /// Reads the image on the clipboard (`clip::read_image`); replaced in tests.
-    pub clipboard: Box<dyn Fn() -> Result<Option<Clipped>, String> + Send>,
+    /// Reads the images on the clipboard (`clip::read_images`); replaced in tests.
+    pub clipboard: Box<dyn Fn() -> Result<Vec<Clipped>, String> + Send>,
     /// Ctrl+V presses seen in WoW, and when the last was (`keys::presses`); replaced in tests.
     pub presses: Box<dyn Fn() -> (u64, i64) + Send>,
     /// Turns the look for Ctrl+V on or off (`keys::arm`); replaced in tests.
@@ -2053,7 +2053,7 @@ impl Bridge {
             details: Vec::new(),
             scan: None,
             picture_errors: HashMap::new(),
-            clipboard: Box::new(clip::read_image),
+            clipboard: Box::new(clip::read_images),
             presses: Box::new(crate::keys::presses),
             arm_keys: Box::new(crate::keys::arm),
             keys_hidden: Box::new(crate::keys::keys_hidden),
@@ -2720,12 +2720,24 @@ impl Bridge {
                 "paste" if !str_of(&command["d"]).is_empty() => {
                     let draft = str_of(&command["d"]).to_string();
                     self.check_paste_press()?;
-                    if self.drafts.get(&draft).map_or(0, Vec::len) >= MAX_PASTED {
+                    let room = MAX_PASTED.saturating_sub(self.drafts.get(&draft).map_or(0, Vec::len));
+                    if room == 0 {
                         return Err(T3Error::Other(format!("a message takes {MAX_PASTED} images at most")));
                     }
-                    let clipped = (self.clipboard)().map_err(T3Error::Other)?.ok_or_else(|| T3Error::Other(NO_IMAGE.into()))?;
-                    self.stage(draft, clipped);
-                    self.note("Image pasted.");
+                    // One image copied, or image files copied in Explorer: as many as fit.
+                    let images = (self.clipboard)().map_err(T3Error::Other)?;
+                    if images.is_empty() {
+                        return Err(T3Error::Other(NO_IMAGE.into()));
+                    }
+                    let (copied, staged) = (images.len(), images.len().min(room));
+                    for clipped in images.into_iter().take(room) {
+                        self.stage(draft.clone(), clipped);
+                    }
+                    self.note(&match (staged, copied > staged) {
+                        (1, false) => "Image pasted.".to_string(),
+                        (n, false) => format!("{n} images pasted."),
+                        (n, true) => format!("{n} of the {copied} images pasted: a message takes {MAX_PASTED} at most."),
+                    });
                     acked = true;
                 }
                 "unpaste" => {
@@ -4948,7 +4960,7 @@ impl Bridge {
         out.insert("auth".into(), json!(self.auth_error.as_deref().or(self.sign_in_read_only.then(|| crate::app::shown(READ_ONLY_LINE)))));
         // This companion pastes images (the game offers Ctrl+V, on a Mac Cmd+V, for them), and
         // the ones pasted so far, by the message they go with (left out when there are none).
-        // Windows and macOS can read the clipboard (`clip::read_image`).
+        // Windows and macOS can read the clipboard (`clip::read_images`).
         #[cfg(any(windows, target_os = "macos"))]
         out.insert("pi".into(), json!(true));
         let pasted: Vec<Value> = self
