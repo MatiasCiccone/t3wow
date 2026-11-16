@@ -502,6 +502,12 @@ function Skin.ScrollBar(scroll)
     for _, region in ipairs({ bar:GetRegions() }) do
         if region ~= thumb and region.IsObjectType and region:IsObjectType("Texture") then region:SetAlpha(0) end
     end
+    -- With nothing to scroll the template keeps the thumb drawn, a bare knob beside a short
+    -- message. Marked hideable, it hides the bar until there's something to scroll
+    -- (ScrollFrame_OnScrollRangeChanged); it was made before this mark, so hide it now too.
+    -- The bar sits outside the scroll frame, so the text's width is the same either way.
+    scroll.scrollBarHideable = true
+    bar:SetShown(math.floor(scroll:GetVerticalScrollRange() or 0) > 0)
     bar.t3Skinned = true
     scrollBars[#scrollBars + 1] = bar
     Skin.UpdateScrollBar(bar)

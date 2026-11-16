@@ -449,13 +449,23 @@ function M:GetScrollChild() return self.child end
 function M:GetVerticalScrollRange()
   local c = self.child
   if not c then return 0 end
+  -- A multi-line edit box is as tall as its text, as in the game.
+  if c.kind == "EditBox" and c.multi then
+    local inset = c.insets or { 0, 0, 0, 0 }
+    local h = stringHeight(c, math.max(1, (c.width or 0) - inset[1] - inset[2])) + inset[3] + inset[4]
+    if c.height ~= h then c.height = h; dirty() end
+  end
   return math.max(0, (c.height or 0) - self:GetHeight())
 end
+-- As the game's ScrollFrame_OnScrollRangeChanged: with something to scroll the bar shows,
+-- thumb and all. With nothing to scroll it hides only on a frame marked scrollBarHideable;
+-- otherwise it stays as it was, its thumb still drawn.
 local function syncBar(s)
   local bar = s.ScrollBar
   if bar then
-    bar.min, bar.max, bar.value = 0, s:GetVerticalScrollRange(), s.vscroll or 0
-    if bar.thumb then bar.thumb.shown = bar.max > 0 end
+    local range = math.floor(s:GetVerticalScrollRange())
+    bar.min, bar.max, bar.value = 0, range, s.vscroll or 0
+    if range > 0 then bar:Show() elseif s.scrollBarHideable then bar:Hide() end
   end
 end
 function M:UpdateScrollChildRect() syncBar(self) end
@@ -496,7 +506,6 @@ function CreateFrame(kind, name, parent, template)
     bar.ScrollDownButton = new("Button", bar)
     f.ScrollBar = bar
     f.scrollBarTemplate = true
-    bar.thumb.shown = false
   end
   return f
 end

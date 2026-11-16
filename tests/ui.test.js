@@ -674,6 +674,49 @@ return "ok"
 `);
 });
 
+// The scroll frame template as the game builds it: a bar beside the frame, and
+// ScrollFrame_OnScrollRangeChanged, which with nothing to scroll hides the bar only on a
+// frame marked scrollBarHideable and otherwise leaves it, its thumb still drawn.
+const SCROLL_TEMPLATE = `
+local createFrame = CreateFrame
+function CreateFrame(kind, name, parent, template)
+  local f = createFrame(kind, name, parent)
+  if template == "UIPanelScrollFrameTemplate" then
+    local bar = createFrame("Slider")
+    function bar:GetRegions() end
+    f.ScrollBar = bar
+    f:SetScript("OnScrollRangeChanged", function(self, _, yrange)
+      if math.floor(yrange) > 0 then bar:Show() elseif self.scrollBarHideable then bar:Hide() end
+    end)
+  end
+  return f
+end
+`;
+
+test("the message box shows its scroll bar only while its text is too long to fit", () => {
+  run(`
+inboxWith(ENVS, { threads = { { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" } } })
+UI.Select({ e = 1, id = "t1" })
+local scroll = composer().parent
+local bar = scroll.ScrollBar
+assert(bar, "the message box isn't in a scroll frame")
+assert(not bar.shown, "a scroll bar beside an empty message box")
+-- The game says so as the text grows past the box, and as it fits again.
+scroll.scripts.OnScrollRangeChanged(scroll, 0, 48)
+assert(bar.shown, "no scroll bar for text past the box")
+scroll.scripts.OnScrollRangeChanged(scroll, 0, 0)
+assert(not bar.shown, "the scroll bar stayed once the text fit")
+-- So does every other scroll bar in the window: none shows with nothing to scroll.
+for _, f in ipairs(frames) do
+  if f.kind == "ScrollFrame" and rawget(f, "ScrollBar") then
+    f.scripts.OnScrollRangeChanged(f, 0, 0)
+    assert(not f.ScrollBar.shown, "a scroll bar with nothing to scroll")
+  end
+end
+return "ok"
+`, { before: SCROLL_TEMPLATE });
+});
+
 test("An agent-launched thread with no known launcher keeps out of Open, as in T3's sidebar", () => {
   run(`
 local function count(label)
