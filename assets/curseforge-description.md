@@ -64,6 +64,7 @@ The window comes in three themes with the same layout. Only the colors, fonts an
 Right-click the minimap button, type /t3 settings, or press the gear at the bottom left of the window.
 
 - **Theme** picks T3, Flat or Classic, and **Compact thread list** fits each thread on one line. Both apply at once.
+- **Fade window** dims the window (**Dim**) or makes it invisible (**Hide**) while you move, while you're in combat, or both, and brings it back when you stop. It starts at **Off**. It stays whole while you type in it or point at it.
 - Turn the line in chat, the sound and the on-screen notification on or off.
 - **Stay on screen** sets how long a notification stays up: 5, 8, 15 or 30 seconds, or until you click it.
 - **At most** sets how many notifications stay on screen at once, from 1 to 10. The oldest one closes to make room, and a newer notification for the same thread replaces the old one.

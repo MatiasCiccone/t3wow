@@ -81,7 +81,8 @@ if not compact then
   settle(0.25)
   _G.T3WoWSettings:ClearAllPoints()
   _G.T3WoWSettings:SetPoint("TOPLEFT", _G.T3WoWFrame, "TOPRIGHT", 16, 0)
-  T3WoWDB.settings.toastPoint = { "TOPLEFT", "TOPLEFT", 980, -612 }
+  -- The notifications go just under Settings, which starts level with the window's top.
+  T3WoWDB.settings.toastPoint = { "TOPLEFT", "TOPLEFT", 980, -(24 + math.floor(_G.T3WoWSettings:GetHeight()) + 10) }
   UI.Alert({ e = "vps", id = "t6", t = "Sign release checksums", s = "failed" })
   UI.Alert({ e = "local", id = "t1", t = "Add a pricing page", s = "completed" })
   UI.Alert({ e = "local", id = "t3", t = "Set up landing page assets", s = "approval" })

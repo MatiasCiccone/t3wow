@@ -117,9 +117,9 @@ function tgas() {
 }
 
 const SCENES = {
-  "theme-t3": { W: 1324, H: 873, cap: "The T3 theme." },
-  "theme-flat": { W: 1324, H: 873, cap: "The Flat theme, with Roboto Condensed standing in for the game's Arial Narrow." },
-  "theme-classic": { W: 1324, H: 873, cap: "The Classic theme, with Marcellus standing in for Friz Quadrata and Roboto Condensed for Arial Narrow." },
+  "theme-t3": { W: 1324, H: 960, cap: "The T3 theme." },
+  "theme-flat": { W: 1324, H: 960, cap: "The Flat theme, with Roboto Condensed standing in for the game's Arial Narrow." },
+  "theme-classic": { W: 1324, H: 960, cap: "The Classic theme, with Marcellus standing in for Friz Quadrata and Roboto Condensed for Arial Narrow." },
   "compact-list": { W: 988, H: 658, cap: "The T3 theme with Compact thread list." },
 };
 
