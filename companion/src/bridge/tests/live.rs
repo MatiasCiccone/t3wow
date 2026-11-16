@@ -351,14 +351,19 @@ impl Live {
     }
 
     /// Saves every update written so far for the replay, and marks this point to check there:
-    /// the latest update, once it shows thread `id` open with each of `texts` (in any case),
-    /// which the replay then looks for in the agent's messages.
+    /// the latest update, once it shows thread `id` open with each of `texts` (in any case)
+    /// in one of the agent's messages, which is where the replay looks for them.
     fn checkpoint(&mut self, label: &str, id: &str, texts: &[&str], buttons: &[&str]) {
+        // The message itself, as written for the game: a text found anywhere in the update
+        // (your prompt, another thread's title) would pass before the reply is written, which
+        // can be up to ROUTINE_GAP_MS after the run's end is.
         let shows = |live: &Live| {
             let inboxes = live.inboxes.lock().unwrap();
             let last = inboxes.written.last().map(String::as_str).unwrap_or("");
-            let last = last.to_lowercase();
-            live.snapshot()["view"]["id"] == id && last.contains("view={") && texts.iter().all(|t| last.contains(&t.to_lowercase()))
+            let view = live.snapshot()["view"].clone();
+            let replies: Vec<&Value> = view["items"].as_array().into_iter().flatten().filter(|i| i["r"] == "a").collect();
+            let written = |t: &&str| replies.iter().any(|i| str_of(&i["x"]).to_lowercase().contains(&t.to_lowercase()) && last.contains(&to_lua(i)));
+            view["id"] == id && last.contains("view={") && texts.iter().all(written)
         };
         self.wait(&format!("an update for the game with {label}"), STATE_TIMEOUT, shows);
         let file = self.save_inboxes();
