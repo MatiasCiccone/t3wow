@@ -61,7 +61,8 @@ function widths() {
   const dom = chrome(["--dump-dom", pathToFileURL(file).href]);
   const m = dom.match(/<pre id="out">(.*?)<\/pre>/s);
   if (!m || !m[1]) throw new Error("measure failed: " + dom.slice(-400));
-  const json = m[1].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  // &amp; last, so an escaped "&lt;" in the text stays "&lt;".
+  const json = m[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   const data = JSON.parse(json);
   for (const k in data) { if (!data[k].ok) throw new Error(`font ${k} failed to load`); delete data[k].ok; }
   writeFileSync(cache, JSON.stringify(data));
