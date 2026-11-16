@@ -761,7 +761,7 @@ pub fn run(app: Arc<App>) {
     let interface = client_interface.clone().unwrap_or(interface);
 
     // 2. The addon files: put back what's missing, install or update the addon.
-    let slots = Slots::for_wow(&wow_dir, &interface);
+    let slots = Slots::for_wow(&wow_dir, &interface).with_key(Config::load().game_key);
     let mut restart: Option<RestartNote> = put_back(&app, &slots, false);
     #[cfg(target_os = "macos")]
     if let Some(note) = client_interface.and_then(|found| follow_game_version(&slots, &found)) {
@@ -824,6 +824,7 @@ pub fn run(app: Arc<App>) {
     );
     let config = Config::load();
     bridge.set_trust(config.trust());
+    bridge.set_game_key(config.game_key_bytes());
     bridge.set_sign_in_read_only(config.sign_in_read_only(&key));
     bridge.set_provider_caches(local_provider_caches());
     bridge.set_t3_settings(local_t3_settings());
@@ -932,6 +933,10 @@ pub fn run(app: Arc<App>) {
             // A hand edit of config.json (or `run`, which has no tray) counts too.
             let config = Config::load();
             bridge.set_trust(config.trust());
+            // A key the start couldn't read (config.json busy at that moment) still arrives.
+            if let Some(key) = config.game_key_bytes() {
+                bridge.set_game_key(Some(key));
+            }
             bridge.set_sign_in_read_only(config.sign_in_read_only(&config.server_key()));
             let found = t3::target();
             let token = found.as_ref().and_then(|t| t.token.clone()).unwrap_or_default();

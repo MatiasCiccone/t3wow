@@ -1,0 +1,7 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+	<!-- Loads Key.lua, which the companion writes with the key that signs this install's
+	     commands (see Codec.Sign). The open tag keeps addon managers from following it, so
+	     the addon's fingerprint stays the same on every PC. Without the file (an install
+	     the companion hasn't written it for yet), nothing is signed. -->
+	<Script file="Key.lua"></Script>
+</Ui>

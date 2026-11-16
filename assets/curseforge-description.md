@@ -107,10 +107,12 @@ While the app reads the game, macOS counts that as sharing the screen and mutes 
 
 ## Trust and streaming
 
-Any addon you install can draw the same strip of squares T3 WoW draws, and the companion can't tell them apart. With the default setting, another addon could message your threads or start a new thread with any task, with the access you granted T3 when you signed in. The companion's tray menu has **Commands from the game**:
+Any addon you install can draw the same strip of squares T3 WoW draws. So T3 WoW signs every strip with a key the companion makes for your install, and the companion follows an unsigned strip only for reading. The first time, restart WoW once after the companion has installed the addon: until then the window says "Restart WoW to send from the game".
 
-- **Full** (the default): everything the window offers.
-- **No new threads**: everything but starting threads.
+Signing stops another addon from drawing commands of its own, but not one written to work T3 WoW's own window from its code: what it sends that way is signed like your own messages. The companion's tray menu has **Commands from the game**:
+
+- **Full**: everything the window offers, including starting threads with any task, with the access you granted T3 when you signed in. An install from an earlier release keeps this.
+- **No new threads** (where a new install starts): everything but starting threads. Choose Full to start threads from the game.
 - **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Scripts, Stop, Settle, Snooze or Wake).
 
 It applies at once. The window greys out what the setting blocks and says why. Install addons you trust, or pick a stricter setting.
@@ -136,7 +138,7 @@ Each UI session has 200 updates, and the companion only spends one when somethin
 
 - If you see "Waiting for the companion…", check that T3 WoW is running in the tray, that the game is windowed, and that nothing covers the top-left corner. **Open log** in the tray menu shows what the companion sees.
 - If you see "Slot addons blocked", enable the T3 WoW slot addons in the AddOns list at character select (the list in the game hides them). If a game patch changed the interface version, choose Match WoW's interface version in the companion's tray menu, then restart WoW.
-- If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu.
+- If a button is greyed out and the window says it's off, check Commands from the game in the companion's tray menu. If it says to restart WoW, restart it: the game loads the key that signs its commands only when it starts.
 - If something behaves oddly after a T3 Code update, check your T3 Code version: T3 WoW is developed and tested against 0.19.0. When T3 Code is older, the companion's tray and the window's top line say to update it (in T3 Code, Settings > About > Check for Updates).
 
 T3 WoW is MIT licensed, and its source is on GitHub: https://github.com/MatiasCiccone/t3wow. Bug reports go to its Issues there.

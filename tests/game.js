@@ -184,13 +184,15 @@ const STUB_UI = `ns.UI = {
 // return value comes back as a string. T3WoWDB starts as `db` (a Lua table literal), and
 // `before` runs ahead of the addon's files (to give the game an API it doesn't have here).
 // theme: false leaves Theme.lua out, as a game started before an update added it would.
-export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }`, before = "", theme = true } = {}) {
+// key: the hex Key.lua would put in the addon's namespace (none: no Key.lua, nothing signed).
+export function runGame(script, { ui = false, db = `{ client = "c1", seq = 0, queue = {} }`, before = "", theme = true, key } = {}) {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
   const load = (name) => `assert(load(${JSON.stringify(read(name))}, "${name}"))("T3WoW", ns)`;
   const chunk = `${GAME}
 ${before}
 local ns = {}
+${key ? `ns.key = "${key}"` : ""}
 ${ui ? "" : STUB_UI}
 ${load("Codec.lua")}
 ${ui && theme ? load("Theme.lua") : ""}

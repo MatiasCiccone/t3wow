@@ -354,12 +354,18 @@ impl SlotWriter for FakeSlots {
     }
 }
 
+/// The key the rig's addon signs its frames with (Key.lua's, in the game).
+const TEST_KEY: &[u8] = &[0x5a; 32];
+
 struct Rig {
     bridge: Bridge,
     t3: Arc<FakeT3>,
     written: Arc<Mutex<Written>>,
     clock: Arc<Mutex<i64>>,
     opened: Arc<Mutex<Vec<String>>>,
+    /// What `frame` signs with: TEST_KEY, as T3 WoW does; None, as another addon's strip
+    /// (or an addon that loaded no key) is drawn.
+    signer: Option<&'static [u8]>,
 }
 
 impl Rig {
@@ -377,7 +383,8 @@ impl Rig {
         bridge.on_capture(CaptureMessage::Wow(Some("123@1".into())));
         // The keys come through, whatever this Mac's Input Monitoring says.
         bridge.keys_hidden = Box::new(|| false);
-        Rig { bridge, t3, written, clock, opened }
+        bridge.set_game_key(Some(TEST_KEY.to_vec()));
+        Rig { bridge, t3, written, clock, opened, signer: Some(TEST_KEY) }
     }
 
     fn advance(&self, ms: i64) {
@@ -389,7 +396,10 @@ impl Rig {
     }
 
     fn frame(&mut self, value: Value) {
-        let cells = crate::codec::encode_frame(1, &value.to_string());
+        let cells = match self.signer {
+            Some(key) => crate::codec::encode_signed_frame(1, &value.to_string(), key),
+            None => crate::codec::encode_frame(1, &value.to_string()),
+        };
         let at = *self.clock.lock().unwrap();
         self.bridge.on_capture(CaptureMessage::Strip(cells, at));
     }
@@ -2289,6 +2299,63 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
     assert!(rig.bridge.snapshot()["trust"].is_null());
+}
+
+#[test]
+fn a_frame_not_signed_with_the_addons_key_can_only_read() {
+    let changes = ["t3_thread_send", "t3_thread_launch", "t3_thread_organize", "t3_thread_interrupt"];
+    let count = |rig: &Rig| -> usize { changes.iter().map(|tool| rig.t3.calls_to(tool).len()).sum() };
+    let refused = |rig: &Rig, sent: &[(u64, &'static str)]| -> Vec<&'static str> {
+        let out = rig.bridge.snapshot()["out"].as_array().cloned().unwrap_or_default();
+        sent.iter().filter(|(s, _)| out.iter().any(|o| o["s"] == *s && o["ok"] == false && o["x"] == UNSIGNED_REASON)).map(|(_, t)| *t).collect()
+    };
+    // Another addon's strip (or T3 WoW in a game started before the key existed), with the
+    // tray at Full: everything that changes T3 is refused, looking still works.
+    for signer in [None, Some(&[0x11u8; 32][..])] {
+        let mut rig = Rig::new(29_500_000);
+        rig.signer = signer;
+        let sent = every_kind(&mut rig, "ui1");
+        assert_eq!(refused(&rig, &sent), vec!["send", "new", "settle", "unsettle", "stop", "answer"], "signed with {signer:?}");
+        assert_eq!(count(&rig), 0);
+        assert!(rig.t3.calls_to("t3_pending_request").iter().all(|a| a["action"] != "respond"), "no answer goes out");
+        assert_eq!(rig.opened(), vec!["t3code://threads/local/t1"], "t3 still brings T3 to the front");
+        assert_eq!(rig.bridge.snapshot()["view"]["id"], "t1", "open still opens");
+        assert_eq!(rig.bridge.snapshot()["ack"], 14, "refused commands are acked like any other");
+        assert_eq!(rig.bridge.snapshot()["uns"], 1, "the window is told to restart WoW");
+        assert!(rig.slot(1).contains("uns=1"), "{}", rig.slot(1));
+
+        // Signed again (WoW restarted with the key): the next command runs, and the window hears it.
+        rig.signer = Some(TEST_KEY);
+        rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [{ "s": 1, "t": "send", "id": "t1", "m": "now" }] }));
+        rig.bridge.tick();
+        assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+        assert!(rig.bridge.snapshot()["uns"].is_null());
+    }
+
+    // A companion without a key (config.json couldn't be read or saved) has nothing to check
+    // against: even T3 WoW's own frames only read, rather than every frame passing.
+    let mut rig = Rig::new(29_550_000);
+    rig.bridge.set_game_key(None);
+    let sent = every_kind(&mut rig, "ui1");
+    assert_eq!(refused(&rig, &sent), vec!["send", "new", "settle", "unsettle", "stop", "answer"]);
+    assert_eq!(count(&rig), 0);
+}
+
+#[test]
+fn a_long_command_with_a_part_that_isnt_signed_can_only_read() {
+    let mut rig = Rig::new(29_600_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "hello" }] }));
+    rig.bridge.tick();
+    let command = json!({ "s": 2, "t": "send", "id": "t1", "m": "x".repeat(4000) });
+    let parts = cut(&command, 2500);
+    assert_eq!(parts.len(), 2);
+    send_parts(&mut rig, part_frame(1, 2, 2, false, "ui1", &parts[0]));
+    // The second part as another addon would draw it, unsigned.
+    let header = json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "p": 1, "pt": { "i": 2, "n": 2, "s": 2 } });
+    send_parts(&mut rig, crate::codec::encode_part_frame(2, &header.to_string(), &parts[1]));
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_send").is_empty());
+    assert_eq!(outcome(&rig, 2), json!({ "s": 2, "ok": false, "x": UNSIGNED_REASON }));
 }
 
 #[test]
@@ -4692,7 +4759,7 @@ fn part_frame(index: usize, count: usize, s: u64, zlib: bool, session: &str, byt
         pt["z"] = json!(1);
     }
     let header = json!({ "k": "c1", "u": session, "n": 0, "l": 1, "p": 1, "pt": pt });
-    crate::codec::encode_part_frame(index as u16, &header.to_string(), bytes)
+    crate::codec::encode_signed_part_frame(index as u16, &header.to_string(), bytes, TEST_KEY)
 }
 
 fn send_parts(rig: &mut Rig, cells: Vec<u8>) {
@@ -4710,11 +4777,15 @@ fn long_commands_drawn_by_the_addon_arrive_whole_and_once() {
     let fixture: Value = serde_json::from_str(include_str!("../../tests/fixtures/parts.json")).unwrap();
     for long in fixture["long"].as_array().unwrap() {
         let mut rig = Rig::new(40_000_000);
-        // Round and round, as the game draws them until the ack, and starting anywhere.
+        // Round and round, as the game draws them until the ack, and starting anywhere. The
+        // fixture's frames were drawn by an addon without a key: they go in as signed ones.
         for _ in 0..3 {
             for frame in long["frames"].as_array().unwrap().iter().rev() {
-                let cells = frame["cells"].as_str().unwrap().bytes().map(|b| b - b'0').collect();
-                send_parts(&mut rig, cells);
+                let cells: Vec<u8> = frame["cells"].as_str().unwrap().bytes().map(|b| b - b'0').collect();
+                let decoded = crate::codec::decode_cells(&cells).unwrap();
+                let header: Value = serde_json::from_str(&decoded.payload).unwrap();
+                let at = *rig.clock.lock().unwrap();
+                rig.bridge.on_frame(&header, decoded.part, true, at);
             }
         }
         rig.bridge.tick();

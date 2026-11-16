@@ -360,6 +360,8 @@ SlashCmdList.T3WOW = function(message)
             s.inboxAge and string.format("%ds ago", s.inboxAge) or "never"))
         print(string.format("|cff8f8fffT3|r signals noticed this session: %d%s (%d checks so far)", s.signalsSeen,
             s.signalAge and string.format(", last %ds ago", s.signalAge) or "", s.fontStrings or 0))
+        print("|cff8f8fffT3|r " .. (s.signed and "commands are signed with this install's key"
+            or "commands aren't signed: no key loaded (WoW started before the companion wrote it, or it's gone: restart WoW)"))
         if s.signalCheck then print("|cff8f8fffT3|r signals off: " .. s.signalCheck .. "; checking for updates on a timer instead") end
         if s.loadError then print("|cff8f8fffT3|r slot load error: " .. tostring(s.loadError)) end
         if #s.recentAlerts == 0 then

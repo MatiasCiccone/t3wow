@@ -706,6 +706,10 @@ const MAX_LONG_JSON: usize = 64_000;
 /// Stands in for a long command whose parts joined into nothing readable.
 const GARBLED: &str = "garbled";
 const GARBLED_REASON: &str = "T3 WoW couldn't read that long message: send it again";
+/// Why a command from a frame that isn't signed with this install's key is refused, when
+/// it would change T3. Another addon can draw a strip but can't sign it; T3 WoW's own
+/// frames go unsigned when the game started before the companion wrote the key.
+const UNSIGNED_REASON: &str = "not signed by T3 WoW: restart WoW so it loads the key the companion wrote";
 
 /// The parts seen so far of the long command the game is drawing. The game sends one at a
 /// time, so this is all that's kept, whatever another addon draws on the strip.
@@ -713,6 +717,8 @@ struct LongCommand {
     from: (String, String, u64),
     zlib: bool,
     parts: Vec<Option<Vec<u8>>>,
+    /// Whether every part so far came in a signed frame.
+    signed: bool,
 }
 
 /// The command in a long command's joined bytes.
@@ -885,9 +891,9 @@ pub struct Bridge {
     /// Machines whose threads were listed at least once since the companion started.
     listed_envs: HashSet<String>,
     /// Commands waiting to run: client key, the UI session they came in, the stamp of the
-    /// sign-in the game drew them under (none from an older addon), the command, and when
-    /// the frame that brought it was read.
-    commands: VecDeque<(String, String, Option<String>, Value, i64)>,
+    /// sign-in the game drew them under (none from an older addon), the command, when the
+    /// frame that brought it was read, and whether that frame was signed.
+    commands: VecDeque<(String, String, Option<String>, Value, i64, bool)>,
     /// Per client key, the highest command queued to run but not yet run (not saved: a
     /// command only counts as done once it ran).
     queued: HashMap<String, u64>,
@@ -936,6 +942,12 @@ pub struct Bridge {
     write_failures: u32,
     /// The tray's "Commands from the game": what the game may make T3 do.
     trust: Trust,
+    /// The key the addon signs its frames with (Key.lua); None (config.json couldn't be
+    /// read or saved): nothing counts as signed, so the game can only read.
+    game_key: Option<Vec<u8>>,
+    /// The game's latest frame wasn't signed with the key: it gets only what Read-only
+    /// allows, and the window says to restart WoW.
+    unsigned: bool,
     /// Draws pictures for the game (None: no browser to draw with, so no pictures).
     painter: Option<Box<dyn Painter>>,
     /// The game's addon can show pictures this UI session (its frames say `im`).
@@ -2032,6 +2044,8 @@ impl Bridge {
             write_error: None,
             write_failures: 0,
             trust: Trust::Full,
+            game_key: None,
+            unsigned: false,
             painter: None,
             images_ok: false,
             cards_ok: false,
@@ -2067,6 +2081,11 @@ impl Bridge {
         self.t3_settings = file;
         self.script_settings = None;
         self.snooze_presets = None;
+    }
+
+    /// The key the addon signs its frames with: from then on, only signed frames may change T3.
+    pub fn set_game_key(&mut self, key: Option<Vec<u8>>) {
+        self.game_key = key;
     }
 
     pub fn set_trust(&mut self, trust: Trust) {
@@ -2273,7 +2292,8 @@ impl Bridge {
             CaptureMessage::Strip(cells, at) => {
                 if let Some(frame) = decode_cells(&cells) {
                     if let Ok(header) = serde_json::from_str::<Value>(&frame.payload) {
-                        self.on_frame(&header, frame.part, at);
+                        let signed = self.game_key.as_ref().is_some_and(|key| frame.signed_with(key));
+                        self.on_frame(&header, frame.part, signed, at);
                     }
                 }
             }
@@ -2298,28 +2318,29 @@ impl Bridge {
 
     /// Keeps one part of a long command (`pt` says which). When that was the last one
     /// missing, returns the whole command.
-    fn take_part(&mut self, k: &str, u: &str, pt: &Value, part: Vec<u8>, seen: u64) -> Option<Value> {
+    fn take_part(&mut self, k: &str, u: &str, pt: &Value, part: Vec<u8>, signed: bool, seen: u64) -> Option<(Value, bool)> {
         let (s, index, count) = (pt["s"].as_u64()?, pt["i"].as_u64()?, pt["n"].as_u64()?);
         if s <= seen || count > MAX_PARTS || index == 0 || index > count {
             return None;
         }
         let (from, zlib) = ((k.to_string(), u.to_string(), s), pt["z"] == 1);
         if self.long_command.as_ref().is_none_or(|long| long.from != from || long.zlib != zlib || long.parts.len() as u64 != count) {
-            self.long_command = Some(LongCommand { from, zlib, parts: vec![None; count as usize] });
+            self.long_command = Some(LongCommand { from, zlib, parts: vec![None; count as usize], signed: true });
         }
         let long = self.long_command.as_mut()?;
         long.parts[index as usize - 1] = Some(part);
+        long.signed &= signed;
         if long.parts.iter().any(Option::is_none) {
             return None;
         }
         let long = self.long_command.take()?;
         let body: Vec<u8> = long.parts.into_iter().flatten().flatten().collect();
-        Some(read_long_command(&body, zlib, s))
+        Some((read_long_command(&body, zlib, s), long.signed))
     }
 
     /// A frame from the game's strip, read at `at` (epoch ms), with the raw bytes of a part
-    /// of a long command if it has one.
-    pub fn on_frame(&mut self, frame: &Value, part: Option<Vec<u8>>, at: i64) {
+    /// of a long command if it has one, and whether it was signed with the addon's key.
+    pub fn on_frame(&mut self, frame: &Value, part: Option<Vec<u8>>, signed: bool, at: i64) {
         let (Some(k), Some(u)) = (frame["k"].as_str(), frame["u"].as_str()) else { return };
         // An addon that can show pictures says so in every frame.
         let images_ok = frame["im"] == 1;
@@ -2398,16 +2419,25 @@ impl Bridge {
             }
             self.link.polling = Some(polling);
         }
+        if signed == self.unsigned {
+            self.unsigned = !signed;
+            self.log(if self.unsigned {
+                "The game's frames aren't signed with the addon's key: commands from it can only read until WoW restarts"
+            } else {
+                "The game's frames are signed with the addon's key"
+            });
+        }
         let seen = self.link.acked.get(k).copied().unwrap_or(0).max(self.queued.get(k).copied().unwrap_or(0));
-        let long = part.and_then(|part| self.take_part(k, u, &frame["pt"], part, seen));
-        for command in frame["q"].as_array().into_iter().flatten().chain(long.iter()) {
+        let long = part.and_then(|part| self.take_part(k, u, &frame["pt"], part, signed, seen));
+        let queued = frame["q"].as_array().into_iter().flatten().map(|command| (command, signed));
+        for (command, signed) in queued.chain(long.iter().map(|(command, signed)| (command, *signed))) {
             let s = command["s"].as_u64().unwrap_or(0);
             if s <= seen {
                 continue;
             }
             let entry = self.queued.entry(k.to_string()).or_insert(0);
             *entry = (*entry).max(s);
-            self.commands.push_back((k.to_string(), u.to_string(), frame["lid"].as_str().map(str::to_string), command.clone(), at));
+            self.commands.push_back((k.to_string(), u.to_string(), frame["lid"].as_str().map(str::to_string), command.clone(), at, signed));
         }
         self.save_state();
     }
@@ -2424,7 +2454,7 @@ impl Bridge {
 
     /// Runs one command from the game. Returns its outcome for the game, if it has one to
     /// know: a failure (so the window can put the text back), or the thread a "new" started.
-    fn run(&mut self, client_key: &str, login: Option<&str>, command: Value) -> Option<Value> {
+    fn run(&mut self, client_key: &str, login: Option<&str>, command: Value, signed: bool) -> Option<Value> {
         // No machine named: the server's own.
         let env = match str_of(&command["e"]) {
             "" => self.local_env_id.clone().unwrap_or_default(),
@@ -2446,7 +2476,13 @@ impl Bridge {
             self.log(&format!("{kind} from the game {OTHER_LOGIN}"));
             return Some(json!({ "s": command["s"], "ok": false, "x": OTHER_LOGIN }));
         }
-        // Any addon can draw commands, so the tray setting decides what the game may do.
+        // Any addon can draw commands, but only T3 WoW can sign them: an unsigned one may
+        // only read.
+        if !signed && !Trust::ReadOnly.allows(&kind) {
+            self.log(&format!("{kind} from the game {UNSIGNED_REASON}"));
+            return Some(json!({ "s": command["s"], "ok": false, "x": UNSIGNED_REASON }));
+        }
+        // Then the tray setting decides what the game may do.
         if !self.trust.allows(&kind) {
             let reason = format!("blocked by {} ({})", crate::app::shown(TRUST_SETTING), self.trust.label());
             self.log(&format!("{kind} from the game {reason}"));
@@ -4942,6 +4978,10 @@ impl Bridge {
         if let Some(code) = self.trust.code() {
             out.insert("trust".into(), json!(code));
         }
+        // The game's frames aren't signed: it can only read until WoW restarts with the key.
+        if self.unsigned {
+            out.insert("uns".into(), json!(1));
+        }
         // The addon version on disk, so the game can say when it needs a restart of WoW to
         // load newer files (left out when unknown).
         if let Some(version) = self.slots.addon_version() {
@@ -4981,6 +5021,7 @@ impl Bridge {
             "out": data["out"],
             "auth": data["auth"],
             "trust": data["trust"],
+            "uns": data["uns"],
             "av": data["av"],
             "t3u": data["t3u"],
             "att": data["att"],
@@ -5128,10 +5169,10 @@ impl Bridge {
     /// Runs the game's queued commands. Each counts as done (acked) once it ran, and only
     /// for the UI session it came from: a newer session counts afresh.
     fn run_commands(&mut self) {
-        while let Some((client_key, session, login, command, seen_at)) = self.commands.pop_front() {
+        while let Some((client_key, session, login, command, seen_at, signed)) = self.commands.pop_front() {
             let s = command["s"].as_u64().unwrap_or(0);
             self.command_seen_at = seen_at;
-            let outcome = self.run(&client_key, login.as_deref(), command);
+            let outcome = self.run(&client_key, login.as_deref(), command, signed);
             if Some(session.as_str()) == self.link.ui_session.as_deref() && Some(client_key.as_str()) == self.link.client_key.as_deref() {
                 let entry = self.link.acked.entry(client_key).or_insert(0);
                 *entry = (*entry).max(s);

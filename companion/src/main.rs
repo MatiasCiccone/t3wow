@@ -265,7 +265,7 @@ fn command(args: Args) -> Result<(), String> {
             // on a fresh Mac install no Config.wtf has saved it yet.
             #[cfg(target_os = "macos")]
             let interface = if args.interface.is_some() { interface } else { wow::interface_version(&dir).map_or(interface, |found| found.interface) };
-            let slots = Slots::for_wow(&dir, &interface);
+            let slots = Slots::for_wow(&dir, &interface).with_key(config.game_key.clone());
             slots.install().map_err(|e| e.to_string())?;
             Config::update(|c| c.interface = Some(interface.clone()));
             println!("Installed the T3WoW addon and its reply slots into {}.", slots.addons_dir.display());
@@ -344,6 +344,9 @@ fn command(args: Args) -> Result<(), String> {
 
 fn main() {
     let args = parse_args();
+    // The addon's signing key, and a first start's "Commands from the game", before
+    // anything reads the settings.
+    Config::prepare();
     match args.command.as_deref() {
         // Double-clicked: the tray app (on a Mac, the menu bar app).
         None => {

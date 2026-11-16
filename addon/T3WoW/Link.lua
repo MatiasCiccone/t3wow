@@ -15,6 +15,11 @@ local _, ns = ...
 local Codec = ns.Codec
 local Link = {}
 ns.Link = Link
+-- The key that signs every frame (Key.lua, which the companion writes, puts it in ns as hex).
+-- Kept here alone, out of the namespace and the saved variables, and never drawn: an addon
+-- that draws a strip of its own can't sign it, so the companion won't let it change T3.
+local key = Codec.KeyFromHex(ns.key)
+ns.key = nil
 
 local SLOT_COUNT, SIGNAL_COUNT = 200, 4000
 -- From this many updates used, the window says to Reload UI soon.
@@ -223,7 +228,7 @@ local function renderPart(header, command)
         -- command, so the update's ack can't be from before this UI session and drop it.
         header.pt = { s = command.s }
         frameSeq = frameSeq + 1
-        renderStrip(Codec.Encode(frameSeq, Codec.Json(header)))
+        renderStrip(Codec.Encode(frameSeq, Codec.Json(header), key))
         return true
     end
     if not state.longOk then
@@ -243,7 +248,7 @@ local function renderPart(header, command)
     end
     header.pt = { s = long.s, i = long.index, n = #long.parts, z = long.z and 1 or nil }
     frameSeq = frameSeq + 1
-    renderStrip(Codec.EncodePart(frameSeq, Codec.Json(header), long.parts[long.index]))
+    renderStrip(Codec.EncodePart(frameSeq, Codec.Json(header), long.parts[long.index], key))
     return true
 end
 
@@ -279,7 +284,7 @@ function Link.Render()
         return Link.Render()
     end
     frameSeq = frameSeq + 1
-    renderStrip(Codec.Encode(frameSeq, payload))
+    renderStrip(Codec.Encode(frameSeq, payload, key))
 end
 
 function Link.Send(command)
@@ -761,5 +766,6 @@ function Link.Status()
         fontStrings = state.fontStrings,
         signalAge = state.lastSignalAt and (GetTime() - state.lastSignalAt) or nil,
         recentAlerts = state.recentAlerts,
+        signed = key ~= nil,
     }
 end

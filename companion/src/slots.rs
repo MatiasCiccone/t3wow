@@ -57,6 +57,7 @@ pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("T3WoW.toc", include_bytes!("../../addon/T3WoW/T3WoW.toc")),
     ("Bindings.xml", include_bytes!("../../addon/T3WoW/Bindings.xml")),
     ("Codec.lua", include_bytes!("../../addon/T3WoW/Codec.lua")),
+    ("Key.xml", include_bytes!("../../addon/T3WoW/Key.xml")),
     ("Theme.lua", include_bytes!("../../addon/T3WoW/Theme.lua")),
     ("UI.lua", include_bytes!("../../addon/T3WoW/UI.lua")),
     ("Link.lua", include_bytes!("../../addon/T3WoW/Link.lua")),
@@ -129,6 +130,22 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+/// Written next to the addon's files with this install's key (Key.xml loads it): the addon
+/// signs its frames with it, so the companion can tell them from another addon's strip.
+/// Not shipped, so each install has its own.
+pub const KEY_FILE: &str = "Key.lua";
+
+fn key_lua(key: &str) -> String {
+    [
+        "-- Written by the T3 WoW companion: the key this addon signs its commands with, so the",
+        "-- companion can tell them from another addon's. Don't share it.",
+        "local _, ns = ...",
+        &format!("ns.key = \"{key}\""),
+        "",
+    ]
+    .join("\n")
+}
+
 /// A 2x2 white 32-bit TGA, the smallest texture the game is sure to accept.
 fn tiny_tga() -> Vec<u8> {
     let mut out = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0x28];
@@ -174,6 +191,8 @@ pub struct Slots {
     font: Option<Vec<u8>>,
     /// A second font for the probe's valid2.ttf.
     alt_font: Option<Vec<u8>>,
+    /// The key for Key.lua, as 64 hex digits (None: Key.lua is left as it is).
+    key: Option<String>,
 }
 
 impl Slots {
@@ -191,7 +210,14 @@ impl Slots {
     /// With the given fonts instead of this PC's (tests use fixture bytes, so they run anywhere).
     fn with_fonts(addons_dir: impl Into<PathBuf>, interface: &str, font: Option<Vec<u8>>, alt_font: Option<Vec<u8>>) -> Slots {
         let addons_dir = addons_dir.into();
-        Slots { addon_dir: addons_dir.join(ADDON), addons_dir, interface: interface.to_string(), font, alt_font }
+        Slots { addon_dir: addons_dir.join(ADDON), addons_dir, interface: interface.to_string(), font, alt_font, key: None }
+    }
+
+    /// With the key the addon signs its frames with (`Config::game_key`), which installs and
+    /// repairs write as Key.lua.
+    pub fn with_key(mut self, key: Option<String>) -> Slots {
+        self.key = key;
+        self
     }
 
     /// For other modules' tests: they run anywhere, with or without Windows' fonts.
@@ -339,6 +365,18 @@ impl Slots {
                 moved += 1;
             }
         }
+        // The key, written again when it isn't this one (a key made anew): an existing file
+        // is read again on /reload, a new one only once WoW restarts.
+        if let Some(key) = &self.key {
+            let file = self.addon_dir.join(KEY_FILE);
+            let wanted = key_lua(key);
+            if fs::read_to_string(&file).ok().as_deref() != Some(wanted.as_str()) {
+                if !file.exists() {
+                    created += 1;
+                }
+                write_whole(&file, wanted.as_bytes())?;
+            }
+        }
         Ok((created, moved))
     }
 
@@ -409,6 +447,7 @@ impl Slots {
         let img = self.addon_dir.join("img");
         let toc_file = |n: u32| self.addons_dir.join(slot_name(n)).join(format!("{}.toc", slot_name(n)));
         let xml_file = |n: u32| self.addons_dir.join(slot_name(n)).join("Slot.xml");
+        let key = self.key.as_ref().map(|_| self.addon_dir.join(KEY_FILE));
         [
             self.addon_dir.join(format!("{ADDON}.toc")),
             sig.join(signal_file(1)),
@@ -422,6 +461,7 @@ impl Slots {
             xml_file(SLOT_COUNT),
         ]
         .iter()
+        .chain(key.iter())
         .any(|path| !path.exists())
     }
 
@@ -689,6 +729,37 @@ mod tests {
         let finished = slots.repair().unwrap();
         assert_eq!((finished.created, finished.slots_moved), (0, 1));
         assert_eq!(fs::read(slot_toc_file(&dir, 8)).unwrap(), fs::read(slot_toc_file(&dir, 1)).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_key_is_written_as_key_lua_and_put_back_like_any_addon_file() {
+        let dir = temp_dir("key");
+        let key = "0f".repeat(32);
+        let slots = fixture_slots(&dir, "16001").with_key(Some(key.clone()));
+        slots.install().unwrap();
+        let file = dir.join(ADDON).join(KEY_FILE);
+        let lua = fs::read_to_string(&file).unwrap();
+        assert!(lua.contains(&format!("ns.key = \"{key}\"")), "{lua}");
+        // Key.xml loads it, with the open tag addon managers don't follow.
+        let toc = fs::read_to_string(dir.join(ADDON).join("T3WoW.toc")).unwrap();
+        assert!(toc.lines().any(|l| l == "Key.xml") && !toc.contains(KEY_FILE));
+        assert!(fs::read_to_string(dir.join(ADDON).join("Key.xml")).unwrap().contains("<Script file=\"Key.lua\"></Script>"));
+        assert!(!slots.missing_files());
+        fs::remove_file(&file).unwrap();
+        assert!(slots.missing_files());
+        assert_eq!(slots.repair().unwrap().created, 1);
+        assert_eq!(fs::read_to_string(&file).unwrap(), lua);
+        // A new key replaces the old one in place.
+        let other = fixture_slots(&dir, "16001").with_key(Some("a1".repeat(32)));
+        assert_eq!(other.repair().unwrap().created, 0);
+        assert!(fs::read_to_string(&file).unwrap().contains(&"a1".repeat(32)));
+        // Without a key, Key.lua is neither needed nor touched.
+        let keyless = fixture_slots(&dir, "16001");
+        fs::remove_file(&file).unwrap();
+        assert!(!keyless.missing_files());
+        keyless.repair().unwrap();
+        assert!(!file.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

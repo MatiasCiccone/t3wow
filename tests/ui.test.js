@@ -56,6 +56,7 @@ function inboxWith(envs, extra)
   data.att, data.pi = extra and extra.att, extra and extra.pi
   data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
   data.snz = extra and extra.snz
+  data.uns = extra and extra.uns
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -546,6 +547,31 @@ inboxWith(ENVS, {})
 assert(find("Button", "Start").enabled, "Start still off")
 click("Start")
 assert(sent().t == "new", tostring(sent().t))
+return "ok"
+`);
+});
+
+test("while the companion says this game's commands aren't signed, what changes T3 is greyed out and says to restart WoW", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "running", set = false, at = time(), p = "" }
+local view = { e = 1, id = "t1", t = "Thread", s = "running", items = { { r = "a", x = "Hi" } } }
+inboxWith(ENVS, { threads = { thread }, view = view, uns = 1 })
+UI.Select(thread)
+assert(not find("Button", "Send").enabled, "Send enabled while unsigned")
+assert(not find("Button", "Stop").enabled, "Stop enabled while unsigned")
+assert(showing("Restart WoW to send from the game"), "the top line doesn't say to restart WoW")
+typeText("please fix it")
+local before = #queue()
+click("Send")
+assert(#queue() == before, "sent while unsigned")
+assert(typed() == "please fix it", typed())
+assert(showing("Sending messages from the game is off until you restart WoW"), "no reason given")
+click("New Thread")
+assert(not find("Button", "Start").enabled, "Start enabled while unsigned")
+assert(showing("Starting threads from the game is off until you restart WoW"), "no reason in the composer")
+-- Signed again (the companion leaves the field out): Start works.
+inboxWith(ENVS, {})
+assert(find("Button", "Start").enabled, "Start still off")
 return "ok"
 `);
 });
