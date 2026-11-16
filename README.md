@@ -211,13 +211,13 @@ On Windows:
 
 1. In the tray menu, turn off **Start with Windows**, then choose **Quit**.
 2. Remove the addon: run `t3wow.exe uninstall` from a terminal (it removes `Interface\AddOns\T3WoW` and its `T3WoW_S…` slot folders), or delete those folders yourself.
-3. Delete `t3wow.exe`, and the folder `%APPDATA%\t3wow`, which holds the settings, the encrypted sign-ins and the log.
+3. Delete `t3wow.exe` and the files next to it whose names start with `t3wow.exe.` (the updater's `t3wow.exe.update-lock` and `t3wow.exe.version`, and any `t3wow.exe.old-…` or `t3wow.exe.new…` an update left), then the folder `%APPDATA%\t3wow`, which holds the settings, the encrypted sign-ins, the log and the page-drawing browser profile.
 
 On a Mac:
 
 1. In the menu bar menu, turn off **Start at login** (it removes `~/Library/LaunchAgents/com.t3wow.companion.plist`), then choose **Quit**.
 2. Remove the addon: delete `Interface/AddOns/T3WoW` and the `T3WoW_S…` folders in WoW: Forever's `_forever_` folder.
-3. Move **T3 WoW** from Applications to the Trash, and delete `~/Library/Application Support/t3wow` (settings, sign-ins and their key, the log).
+3. Move **T3 WoW** from Applications to the Trash, along with any `T3 WoW.app.new-…` or `T3 WoW.app.old-…` an interrupted update left beside it, and delete `~/Library/Application Support/t3wow` (settings, sign-ins and their key, the log, the update lock).
 4. Optionally, remove T3 WoW from **System Settings → Privacy & Security → Screen Recording** and **Input Monitoring** with **−**.
 
 The sign-ins stay valid on T3's side until they expire; T3 Code's settings can revoke them sooner.
