@@ -912,6 +912,68 @@ return "ok"
 `);
 });
 
+test("a message naming one of the thread's pull requests shows it as a link colored by its state, opening it when clicked", () => {
+  run(`
+-- The links drawn in the conversation (the header's have no box field).
+local function mentions()
+  local found = {}
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and f.shown and rawget(f, "pr") and rawget(f, "box") == false then found[#found + 1] = f end
+  end
+  return found
+end
+local function mention(number)
+  for _, f in ipairs(mentions()) do if f.pr.n == number then return f end end
+end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread } })
+UI.Select(thread)
+local TEXT = "Opened #46 after #41. Not #9, repo#46, a/b#41, #460 or #46a."
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = TEXT } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(#mentions() == 0, "a link with no pull requests on the thread")
+assert(showing("^" .. TEXT:gsub("%p", "%%%0") .. "$"), "the message isn't one string as before")
+
+view.prs = {
+  { n = "#41", s = "merged", u = "https://github.com/o/r/pull/41" },
+  { n = "#46", s = "open", u = "https://github.com/o/r/pull/46" },
+  { n = "!7", s = "open" },
+}
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(#mentions() == 2, "not the two it names on their own: " .. #mentions())
+assert(mention("#46").label.text == "|cff40c040#46|r", "#46 isn't shown open: " .. mention("#46").label.text)
+assert(mention("#41").label.text == "|cffa371f7#41|r", "#41 isn't shown merged")
+assert(showing("^Opened$") and showing("^after$") and showing("^%. Not #9, repo#46, a/b#41, #460 or #46a%.$"), "the text around them went")
+mention("#46").scripts.OnClick(mention("#46"), "LeftButton")
+assert(sent().t == "pr" and sent().id == "t1" and sent().u == "https://github.com/o/r/pull/46", "didn't ask to open it")
+
+-- Yours too, a merge request, one with code, and one in bold; with no page it can't be clicked.
+view.items = {
+  { r = "u", x = "Is !7 in?" },
+  { r = "a", x = "See x in #41", g = { "See \\1x\\2 in #41" } },
+  { r = "a", x = "|cffffffff#46|r is up" },
+}
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(#mentions() == 3, "not one link a message: " .. #mentions())
+assert(mention("!7").enabled == false, "one with no web page can be clicked")
+assert(showing("^x$"), "the code went")
+
+-- Merged since: the link follows.
+view.prs[2] = { n = "#46", s = "merged", u = "https://github.com/o/r/pull/46" }
+inboxWith(ENVS, { threads = { thread }, view = view })
+assert(mention("#46").label.text == "|cffa371f7#46|r", "the link didn't follow its state")
+
+-- Another thread, with none: no links left over.
+local other = { e = 1, id = "t2", t = "Other", s = "completed", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread, other } })
+UI.Select(other)
+inboxWith(ENVS, { threads = { thread, other }, view = { e = 1, id = "t2", t = "Other", s = "completed", items = { { r = "a", x = "About #46" } } } })
+assert(#mentions() == 0, "the last thread's links stayed")
+assert(showing("^About #46$"), "the text isn't plain")
+return "ok"
+`);
+});
+
 test("a thread's saved scripts are listed, say the agent runs them, and picking one asks for it", () => {
   run(`
 local NAME, menu = "T3WoWScriptsMenu", T3WoWScriptsMenu
