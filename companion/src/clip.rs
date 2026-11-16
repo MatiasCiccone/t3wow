@@ -1,10 +1,12 @@
 //! Images pasted in the game: the game can't read the clipboard, so when you press Ctrl+V
 //! (Cmd+V on a Mac) in its message box with an image copied, the companion reads it here (a
 //! screenshot from Snipping Tool or macOS's Cmd+Ctrl+Shift+4, an image copied in a browser or
-//! an editor) and keeps it as a PNG to send with the message, plus a small picture for the
-//! game to show above the box.
+//! an editor, or on Windows image files copied in Explorer) and keeps it as a PNG to send with
+//! the message, plus a small picture for the game to show above the box.
 
 use crate::render::{decode_png, Bitmap};
+#[cfg(any(windows, test))]
+use std::path::{Path, PathBuf};
 
 /// T3 takes images up to this size.
 pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
@@ -15,6 +17,12 @@ pub const THUMB_HEIGHT: u32 = 80;
 const THUMB_MAX_WIDTH: u32 = 240;
 /// The widest large picture of a pasted image (a 1024-wide texture loads in the game).
 const PREVIEW_MAX_WIDTH: u32 = 1024;
+/// Images read at most from copied files at once (a message takes 8).
+#[cfg(any(windows, test))]
+const MAX_FILES: usize = 8;
+/// A copied file larger than this isn't read.
+#[cfg(any(windows, test))]
+const MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
 
 /// An image read from the clipboard: the PNG to send and the pixels to draw it from.
 pub struct Clipped {
@@ -22,33 +30,96 @@ pub struct Clipped {
     pub bitmap: Bitmap,
 }
 
-/// The image on the clipboard, None if it holds none.
+/// The images on the clipboard: the one image copied, or the image files copied in Explorer
+/// (none: it holds no image).
 #[cfg(windows)]
-pub fn read_image() -> Result<Option<Clipped>, String> {
-    let win::Copied { png, dib } = win::read()?;
+pub fn read_images() -> Result<Vec<Clipped>, String> {
+    let win::Copied { png, dib, files } = win::read()?;
     // A PNG as it was copied keeps its transparency and needs no encoding; one that doesn't
     // decode falls back to the bitmap Windows keeps next to it.
     if let Some(png) = png {
         if let Ok(bitmap) = decode_png(&png) {
-            return fit_upload(Some(png), bitmap).map(Some);
+            return fit_upload(Some(png), bitmap).map(|c| vec![c]);
         }
     }
     match dib {
-        Some(dib) => fit_upload(None, dib_bitmap(&dib)?).map(Some),
-        None => Ok(None),
+        Some(dib) => fit_upload(None, dib_bitmap(&dib)?).map(|c| vec![c]),
+        None => image_files(&files, win::decode_file),
     }
 }
 
-/// The image on a Mac's clipboard (the general pasteboard), None if it holds none.
+/// The image on a Mac's clipboard (the general pasteboard), none if it holds none.
 #[cfg(target_os = "macos")]
-pub fn read_image() -> Result<Option<Clipped>, String> {
+pub fn read_images() -> Result<Vec<Clipped>, String> {
     let copied = mac::read();
-    pick(copied, mac::tiff_png)
+    pick(copied, mac::tiff_png).map(|c| c.into_iter().collect())
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn read_image() -> Result<Option<Clipped>, String> {
-    Ok(None)
+pub fn read_images() -> Result<Vec<Clipped>, String> {
+    Ok(Vec::new())
+}
+
+/// The paths in a CF_HDROP (files copied in Explorer): a DROPFILES header, whose first field
+/// is where the list starts and whose fifth says whether it's UTF-16 (always, from Explorer)
+/// or ANSI; then the paths, each ending in a 0, and a 0 after the last.
+#[cfg(any(windows, test))]
+fn dropped_files(drop: &[u8]) -> Vec<PathBuf> {
+    let u32_at = |i: usize| drop.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let (Some(start), Some(wide)) = (u32_at(0), u32_at(16)) else {
+        return Vec::new();
+    };
+    let list = drop.get(start as usize..).unwrap_or_default();
+    let names: Vec<String> = if wide != 0 {
+        let units: Vec<u16> = list.as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b)).collect();
+        units.split(|&u| u == 0).take_while(|name| !name.is_empty()).map(String::from_utf16_lossy).collect()
+    } else {
+        list.split(|&b| b == 0).take_while(|name| !name.is_empty()).map(|name| String::from_utf8_lossy(name).into_owned()).collect()
+    };
+    names.into_iter().map(PathBuf::from).collect()
+}
+
+/// Copied files as images, in the order copied: each image file T3 WoW can read (a PNG as it
+/// is; JPEG, GIF, BMP and TIFF by `decode`, the system's decoder), other files left out.
+/// Files of which none is such an image are an error saying why, not "no image".
+#[cfg(any(windows, test))]
+fn image_files(files: &[PathBuf], decode: impl Fn(&Path) -> Result<Bitmap, String>) -> Result<Vec<Clipped>, String> {
+    let mut images = Vec::new();
+    let mut refused = None;
+    for path in files {
+        if images.len() == MAX_FILES {
+            break;
+        }
+        match image_file(path, &decode) {
+            Ok(image) => images.push(image),
+            Err(error) => refused = refused.or(Some(error)),
+        }
+    }
+    match refused {
+        Some(error) if images.is_empty() => Err(error),
+        _ => Ok(images),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn image_file(path: &Path, decode: impl Fn(&Path) -> Result<Bitmap, String>) -> Result<Clipped, String> {
+    let size = std::fs::metadata(path).map_err(|_| "the copied file is gone".to_string())?.len();
+    if size > MAX_FILE_BYTES {
+        return Err("the copied file is too large".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read the copied file: {e}"))?;
+    let tiff = bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*");
+    let size = crate::render::sniff(&bytes).map(|(_, w, h)| (w, h));
+    if size.is_none() && !tiff {
+        return Err("the copied file isn't an image (PNG, JPEG, GIF, BMP or TIFF)".into());
+    }
+    if size.is_some_and(|(w, h)| w as u64 * h as u64 > MAX_PIXELS) {
+        return Err("the copied image is too large".into());
+    }
+    if let Ok(bitmap) = decode_png(&bytes) {
+        return fit_upload(Some(bytes), bitmap);
+    }
+    fit_upload(None, decode(path)?)
 }
 
 /// What a Mac's clipboard holds: an image as a PNG and as a TIFF (screenshots copy both,
@@ -64,7 +135,7 @@ struct MacCopied {
 /// The image to send from a Mac's clipboard: the PNG as it was copied when it reads (it
 /// keeps its transparency and needs no encoding), else the TIFF, made a PNG by `tiff_png`
 /// (macOS's own decoder). A file copied in Finder brings only its icon as a TIFF, which isn't
-/// the image you meant: that is no image, as a file copied in Explorer is on Windows.
+/// the image you meant: that is no image (on Windows, `image_files` reads the files copied).
 #[cfg(any(target_os = "macos", test))]
 fn pick(copied: MacCopied, tiff_png: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>) -> Result<Option<Clipped>, String> {
     if let Some(png) = copied.png {
@@ -230,10 +301,15 @@ pub fn dib_bitmap(dib: &[u8]) -> Result<Bitmap, String> {
 #[cfg(windows)]
 mod win {
     use std::ptr::null_mut;
+    use windows_sys::Win32::Graphics::GdiPlus::{
+        BitmapData, GdipBitmapLockBits, GdipBitmapUnlockBits, GdipCreateBitmapFromFile, GdipDisposeImage, GdipGetImageHeight, GdipGetImageWidth, GdipGetPropertyItem,
+        GdipGetPropertyItemSize, GdipImageRotateFlip, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpImage, ImageLockModeRead, Ok as GDIPLUS_OK, PropertyItem, Rect,
+    };
     use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW};
     use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
     const CF_DIB: u32 = 8;
+    const CF_HDROP: u32 = 15;
 
     /// Closes the clipboard when dropped.
     struct Open;
@@ -264,10 +340,11 @@ mod win {
         }
     }
 
-    /// What the clipboard holds as a PNG and as a bitmap (neither: no image).
+    /// What the clipboard holds as a PNG, as a bitmap and as copied files (none: no image).
     pub struct Copied {
         pub png: Option<Vec<u8>>,
         pub dib: Option<Vec<u8>>,
+        pub files: Vec<std::path::PathBuf>,
     }
 
     pub fn read() -> Result<Copied, String> {
@@ -288,7 +365,104 @@ mod win {
             let name: Vec<u16> = "PNG".encode_utf16().chain(Some(0)).collect();
             let png_format = RegisterClipboardFormatW(name.as_ptr());
             let png = if png_format != 0 { data(png_format) } else { None };
-            Ok(Copied { png, dib: data(CF_DIB) })
+            let files = data(CF_HDROP).map(|drop| super::dropped_files(&drop)).unwrap_or_default();
+            Ok(Copied { png, dib: data(CF_DIB), files })
+        }
+    }
+
+    /// GDI+ (on every Windows), started for one decode and shut down when dropped.
+    struct GdiPlus(usize);
+    impl Drop for GdiPlus {
+        fn drop(&mut self) {
+            unsafe { GdiplusShutdown(self.0) };
+        }
+    }
+
+    /// A GDI+ image, disposed of (and its file let go) when dropped.
+    struct Image(*mut GpBitmap);
+    impl Drop for Image {
+        fn drop(&mut self) {
+            unsafe { GdipDisposeImage(self.0.cast()) };
+        }
+    }
+
+    /// PixelFormat32bppARGB: rows of B, G, R, A bytes.
+    const ARGB: i32 = 0x0026_200a;
+    /// PropertyTagOrientation: how the camera was held (EXIF's 1 to 8).
+    const ORIENTATION: u32 = 0x0112;
+
+    /// An image file as RGBA, by GDI+: JPEG, GIF (its first frame), BMP, TIFF and PNG, turned
+    /// the way the camera says it was held.
+    pub fn decode_file(path: &std::path::Path) -> Result<super::Bitmap, String> {
+        use std::os::windows::ffi::OsStrExt;
+        let bad = || "the copied image is in a format T3 WoW can't read".to_string();
+        unsafe {
+            let mut token = 0usize;
+            let input = GdiplusStartupInput { GdiplusVersion: 1, ..Default::default() };
+            if GdiplusStartup(&mut token, &input, null_mut()) != GDIPLUS_OK {
+                return Err(bad());
+            }
+            let _gdiplus = GdiPlus(token);
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut bitmap = null_mut();
+            if GdipCreateBitmapFromFile(wide.as_ptr(), &mut bitmap) != GDIPLUS_OK || bitmap.is_null() {
+                return Err(bad());
+            }
+            // Dropped before `_gdiplus`, so disposed of before GDI+ shuts down.
+            let image = Image(bitmap);
+            upright(image.0.cast());
+            let (mut width, mut height) = (0u32, 0u32);
+            GdipGetImageWidth(image.0.cast(), &mut width);
+            GdipGetImageHeight(image.0.cast(), &mut height);
+            if width == 0 || height == 0 {
+                return Err(bad());
+            }
+            if width as u64 * height as u64 > super::MAX_PIXELS {
+                return Err("the copied image is too large".into());
+            }
+            let rect = Rect { X: 0, Y: 0, Width: width as i32, Height: height as i32 };
+            let mut locked = BitmapData::default();
+            if GdipBitmapLockBits(image.0, &rect, ImageLockModeRead as u32, ARGB, &mut locked) != GDIPLUS_OK || locked.Scan0.is_null() {
+                return Err(bad());
+            }
+            let (w, h) = (width as usize, height as usize);
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                let row = (locked.Scan0 as *const u8).offset(y as isize * locked.Stride as isize);
+                for p in std::slice::from_raw_parts(row, w * 4).as_chunks::<4>().0 {
+                    rgba.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+                }
+            }
+            GdipBitmapUnlockBits(image.0, &mut locked);
+            Ok(super::Bitmap { width, height, rgba })
+        }
+    }
+
+    /// Turns a photo the way its EXIF orientation says (GDI+ doesn't on its own).
+    unsafe fn upright(image: *mut GpImage) {
+        unsafe {
+            let mut size = 0u32;
+            if GdipGetPropertyItemSize(image, ORIENTATION, &mut size) != GDIPLUS_OK || (size as usize) < std::mem::size_of::<PropertyItem>() + 2 {
+                return;
+            }
+            // u64s, so the item lands aligned.
+            let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+            let item = buffer.as_mut_ptr().cast::<PropertyItem>();
+            if GdipGetPropertyItem(image, ORIENTATION, size, item) != GDIPLUS_OK || (*item).value.is_null() || (*item).length < 2 {
+                return;
+            }
+            // EXIF's 2 to 8, as GDI+'s RotateFlipType.
+            let turn = match *(*item).value.cast::<u16>() {
+                2 => 4,
+                3 => 2,
+                4 => 6,
+                5 => 5,
+                6 => 1,
+                7 => 7,
+                8 => 3,
+                _ => return,
+            };
+            GdipImageRotateFlip(image, turn);
         }
     }
 }
@@ -486,6 +660,126 @@ mod tests {
         assert!(pick(copied, |_| Ok(b"still not a png".to_vec())).is_err());
     }
 
+    /// A CF_HDROP as Explorer puts it on the clipboard: DROPFILES (where the list starts,
+    /// a point, two flags: the second, UTF-16), then each path and a 0, and a 0 to end.
+    fn drop_list(paths: &[&str], wide: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&20u32.to_le_bytes());
+        out.extend_from_slice(&[0; 12]);
+        out.extend_from_slice(&u32::from(wide).to_le_bytes());
+        for path in paths {
+            if wide {
+                path.encode_utf16().chain(Some(0)).for_each(|u| out.extend_from_slice(&u.to_le_bytes()));
+            } else {
+                out.extend(path.bytes().chain(Some(0)));
+            }
+        }
+        out.extend_from_slice(if wide { &[0, 0] } else { &[0] });
+        out
+    }
+
+    #[test]
+    fn files_copied_in_explorer_are_read_from_the_drop_list() {
+        let paths = ["C:\\Users\\you\\Pictures\\shot 1.png", "D:\\été.jpg"];
+        let want: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        assert_eq!(dropped_files(&drop_list(&paths, true)), want);
+        assert_eq!(dropped_files(&drop_list(&["C:\\a.png"], false)), vec![PathBuf::from("C:\\a.png")]);
+        // Cut short, or a list that starts past the end: no files, nothing read past it.
+        assert!(dropped_files(&[20, 0, 0]).is_empty());
+        let mut far = drop_list(&paths, true);
+        far[0] = 200;
+        assert!(dropped_files(&far).is_empty());
+    }
+
+    /// A folder of its own for one test's files.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("t3wow-clip-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn copied_image_files_paste_as_images_and_other_files_are_left_out() {
+        let dir = scratch("files");
+        let shot = Bitmap { width: 2, height: 1, rgba: [RED, BLUE].concat() };
+        let photo = Bitmap { width: 1, height: 1, rgba: GREEN.to_vec() };
+        let (png, jpeg, notes) = (dir.join("shot.png"), dir.join("photo.jpg"), dir.join("notes.txt"));
+        std::fs::write(&png, png_of(&shot)).unwrap();
+        // A JPEG's start, to the frame header that gives its size (1 x 1).
+        std::fs::write(&jpeg, [0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1, 3]).unwrap();
+        std::fs::write(&notes, "not a picture").unwrap();
+        let decode = |path: &Path| {
+            assert_eq!(path, jpeg, "a PNG went to the system's decoder");
+            Ok(photo.clone())
+        };
+        let images = image_files(&[png.clone(), notes.clone(), jpeg.clone()], decode).unwrap();
+        assert_eq!(images.len(), 2);
+        // The PNG goes as it is; the JPEG as a PNG of what the decoder read.
+        assert_eq!(images[0].png, std::fs::read(&png).unwrap());
+        assert_eq!(images[0].bitmap, shot);
+        assert_eq!(decode_png(&images[1].png).unwrap(), photo);
+        // Only files that aren't images, or are gone: say why, not "no image".
+        let error = image_files(std::slice::from_ref(&notes), |_| unreachable!()).err().unwrap();
+        assert!(error.contains("isn't an image"), "{error}");
+        assert!(image_files(&[dir.join("gone.png")], |_| unreachable!()).is_err());
+        // A file the decoder can't read says so.
+        let error = image_files(std::slice::from_ref(&jpeg), |_| Err("the copied image is in a format T3 WoW can't read".into())).err().unwrap();
+        assert!(error.contains("can't read"), "{error}");
+        // No more images than a message takes are read, and other files don't count.
+        let many = vec![png.clone(); MAX_FILES + 3];
+        assert_eq!(image_files(&many, |_| unreachable!()).unwrap().len(), MAX_FILES);
+        let mixed: Vec<PathBuf> = std::iter::repeat_n(notes.clone(), MAX_FILES).chain(std::iter::repeat_n(png.clone(), MAX_FILES)).collect();
+        assert_eq!(image_files(&mixed, |_| unreachable!()).unwrap().len(), MAX_FILES);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A small JPEG (4 x 2, all one green), as Windows' own encoder writes it.
+    #[cfg(windows)]
+    const GREEN_JPEG: &[u8] = include_bytes!("../tests/fixtures/green-4x2.jpg");
+
+    /// GDI+ reads a JPEG, turns it the way an EXIF orientation says, and reads a BMP file.
+    #[test]
+    #[cfg(windows)]
+    fn windows_reads_jpeg_and_bmp_files() {
+        let dir = scratch("gdiplus");
+        let jpeg = dir.join("green.jpg");
+        std::fs::write(&jpeg, GREEN_JPEG).unwrap();
+        let bitmap = win::decode_file(&jpeg).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (4, 2));
+        for p in bitmap.rgba.as_chunks::<4>().0 {
+            assert!(p[0] < 16 && (184..=216).contains(&p[1]) && p[2] < 16 && p[3] == 255, "not green: {p:?}");
+        }
+
+        // The same photo with EXIF orientation 6 (taken with the camera turned): 2 x 4.
+        let mut exif = vec![0xff, 0xe1, 0, 34];
+        exif.extend_from_slice(b"Exif\0\0II*\0\x08\0\0\0\x01\0");
+        exif.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
+        let turned: Vec<u8> = [&GREEN_JPEG[..2], &exif, &GREEN_JPEG[2..]].concat();
+        std::fs::write(&jpeg, turned).unwrap();
+        let bitmap = win::decode_file(&jpeg).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (2, 4));
+
+        // A BMP file: a file header before the same bitmap the clipboard holds.
+        let pixels = [RED, GREEN, BLUE, WHITE, RED, GREEN];
+        let body = dib(3, 2, 24, false, &pixels);
+        let mut bmp = b"BM".to_vec();
+        bmp.extend_from_slice(&(14 + body.len() as u32).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&body);
+        let file = dir.join("pixels.bmp");
+        std::fs::write(&file, bmp).unwrap();
+        let images = image_files(&[file], win::decode_file).unwrap();
+        assert_eq!(decode_png(&images[0].png).unwrap().rgba, pixels.concat());
+
+        // Not an image GDI+ knows: an error, not a crash.
+        let odd = dir.join("odd.jpg");
+        std::fs::write(&odd, [0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1, 3]).unwrap();
+        assert!(win::decode_file(&odd).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// macOS turns a real TIFF into a PNG with the same pixels.
     #[test]
     #[cfg(target_os = "macos")]
@@ -551,7 +845,7 @@ mod tests {
         let want = std::env::var("T3WOW_CLIP_SIZE").expect("set T3WOW_CLIP_SIZE to the copied image's size, like 120x80");
         let copied = mac::read();
         println!("on the clipboard: PNG {:?} bytes, TIFF {:?} bytes, file {}", copied.png.as_ref().map(Vec::len), copied.tiff.as_ref().map(Vec::len), copied.file);
-        let clipped = read_image().unwrap().expect("no image on the clipboard");
+        let clipped = read_images().unwrap().into_iter().next().expect("no image on the clipboard");
         assert_eq!(format!("{}x{}", clipped.bitmap.width, clipped.bitmap.height), want);
         assert_eq!(decode_png(&clipped.png).unwrap().width, clipped.bitmap.width);
         println!("read {want}: {} bytes of PNG, top-left pixel {:?}", clipped.png.len(), &clipped.bitmap.rgba[..4]);
@@ -559,12 +853,15 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    #[ignore = "reads the real clipboard: copy an image of T3WOW_CLIP_SIZE (\"WxH\") first"]
+    #[ignore = "reads the real clipboard: copy an image, or image files in Explorer, of T3WOW_CLIP_SIZE (\"WxH\", several with commas) first"]
     fn reads_an_image_copied_on_this_pc() {
         let want = std::env::var("T3WOW_CLIP_SIZE").expect("set T3WOW_CLIP_SIZE to the copied image's size, like 120x80");
-        let clipped = read_image().unwrap().expect("no image on the clipboard");
-        assert_eq!(format!("{}x{}", clipped.bitmap.width, clipped.bitmap.height), want);
-        assert_eq!(decode_png(&clipped.png).unwrap().width, clipped.bitmap.width);
-        println!("read {want}: {} bytes of PNG, top-left pixel {:?}", clipped.png.len(), &clipped.bitmap.rgba[..4]);
+        let images = read_images().unwrap();
+        let sizes: Vec<String> = images.iter().map(|c| format!("{}x{}", c.bitmap.width, c.bitmap.height)).collect();
+        assert_eq!(sizes.join(","), want, "no image on the clipboard, or not the ones copied");
+        for clipped in images {
+            assert_eq!(decode_png(&clipped.png).unwrap().width, clipped.bitmap.width);
+            println!("read {}x{}: {} bytes of PNG, top-left pixel {:?}", clipped.bitmap.width, clipped.bitmap.height, clipped.png.len(), &clipped.bitmap.rgba[..4]);
+        }
     }
 }

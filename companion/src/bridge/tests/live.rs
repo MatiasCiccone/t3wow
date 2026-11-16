@@ -191,7 +191,7 @@ impl Live {
         let clipboard: Arc<Mutex<Option<Clipped>>> = Arc::new(Mutex::new(None));
         let presses = Arc::new(Mutex::new((0u64, 0i64)));
         let (clip, read) = (Arc::clone(&clipboard), Arc::clone(&presses));
-        bridge.clipboard = Box::new(move || Ok(clip.lock().unwrap().take()));
+        bridge.clipboard = Box::new(move || Ok(clip.lock().unwrap().take().into_iter().collect()));
         bridge.presses = Box::new(move || *read.lock().unwrap());
         bridge.keys_hidden = Box::new(|| false);
         bridge.on_capture(CaptureMessage::Wow(Some(format!("live@{}", now_ms()))));
