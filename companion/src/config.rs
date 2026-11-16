@@ -359,9 +359,15 @@ pub struct Config {
     /// T3 server menu can switch to it again in one click.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_remote: Option<String>,
-    /// The tray's "Commands from the game"; none means Full.
+    /// The tray's "Commands from the game"; none means Full. A companion set up for the
+    /// first time saves No new threads here (see `prepare`).
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_trust")]
     pub game_commands: Option<Trust>,
+    /// The key the addon signs its frames with, as 64 hex digits, made on the first start of
+    /// a companion that has none. The companion writes it into the addon (Key.lua), so it is
+    /// no more secret from this user than that file; other addons can't read files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_key: Option<String>,
     /// The tray's "When T3 WoW starts" under Update checks; none means on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_check_on_start: Option<bool>,
@@ -466,6 +472,37 @@ impl Config {
         #[cfg(not(windows))]
         write_private(&temp, &serde_json::to_string_pretty(self).unwrap_or_default())?;
         fs::rename(&temp, file)
+    }
+
+    /// What every start needs before the rest reads the settings: the key the addon signs
+    /// its frames with, made once. A companion set up for the first time (no config.json
+    /// yet) also starts with "Commands from the game" at No new threads; one set up before
+    /// keeps what it has, Full unless changed.
+    pub fn prepare() -> Config {
+        Self::prepare_at(&Self::file())
+    }
+
+    fn prepare_at(file: &Path) -> Config {
+        let first = !file.exists();
+        match Self::read(file) {
+            Ok((config, false)) if !first && config.game_key_bytes().is_some() => config,
+            _ => Self::update_at(file, |config| {
+                if first {
+                    config.game_commands.get_or_insert(Trust::NoNewThreads);
+                }
+                if config.game_key_bytes().is_none() {
+                    let mut key = [0u8; 32];
+                    getrandom::fill(&mut key).expect("random bytes");
+                    config.game_key = Some(key.iter().map(|b| format!("{b:02x}")).collect());
+                }
+            }),
+        }
+    }
+
+    /// The key the addon signs its frames with, as bytes (None until `prepare` made one).
+    pub fn game_key_bytes(&self) -> Option<Vec<u8>> {
+        let hex = self.game_key.as_deref().filter(|k| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()))?;
+        (0..64).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect()
     }
 
     /// Reads the file, applies `change`, and writes it back (other fields untouched). The tray
@@ -916,6 +953,35 @@ mod tests {
         let (config, _) = Config::read(&file).unwrap();
         assert_eq!(config.trust(), Trust::ReadOnly);
         assert_eq!(config.wow_dir.as_deref(), Some("C:\\wow"), "the rest of the file still reads");
+    }
+
+    #[test]
+    fn a_first_start_makes_a_key_and_starts_at_no_new_threads() {
+        let file = temp_file("first-start");
+        let config = Config::prepare_at(&file);
+        assert_eq!(config.trust(), Trust::NoNewThreads);
+        let key = config.game_key_bytes().expect("a key");
+        assert_eq!(key.len(), 32);
+        let saved = Config::read(&file).unwrap().0;
+        assert_eq!((saved.trust(), saved.game_key_bytes()), (Trust::NoNewThreads, Some(key.clone())));
+        // The next start keeps both.
+        assert_eq!(Config::prepare_at(&file).game_key_bytes(), Some(key));
+        assert_ne!(Config::prepare_at(&temp_file("first-start-2")).game_key_bytes(), saved.game_key_bytes(), "each install has its own");
+    }
+
+    #[test]
+    fn a_companion_set_up_before_keeps_its_setting_and_gets_a_key() {
+        let file = temp_file("set-up-before");
+        fs::write(&file, r#"{"wowDir":"C:\\wow"}"#).unwrap();
+        let config = Config::prepare_at(&file);
+        assert_eq!(config.trust(), Trust::Full);
+        assert!(config.game_key_bytes().is_some());
+        assert_eq!(config.wow_dir.as_deref(), Some("C:\\wow"));
+        fs::write(&file, r#"{"gameCommands":"readOnly"}"#).unwrap();
+        assert_eq!(Config::prepare_at(&file).trust(), Trust::ReadOnly);
+        // A key that isn't one (a hand edit) is made again.
+        fs::write(&file, r#"{"gameKey":"not hex"}"#).unwrap();
+        assert!(Config::prepare_at(&file).game_key_bytes().is_some());
     }
 
     #[test]

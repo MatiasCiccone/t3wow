@@ -23,6 +23,47 @@ return "ok"
 `);
 });
 
+test("with the key Key.lua holds, every frame is signed, and the key leaves the namespace", () => {
+  const key = "5a".repeat(32);
+  runGame(`
+assert(ns.key == nil, "the key stays in the namespace")
+local drawnWith = {}
+local encode = ns.Codec.Encode
+ns.Codec.Encode = function(seq, payload, k)
+  local cells = encode(seq, payload, k)
+  drawnWith[#drawnWith + 1] = { payload = payload, cells = cells }
+  return cells
+end
+Link.Init()
+assert(Link.Status().signed, "not signed")
+local last = drawnWith[#drawnWith]
+assert(last and last.payload:find('"t":"hello"', 1, true), "hello not drawn")
+-- The drawn bytes: version 3, then (after seq and length) the signature, made with the key
+-- over the version byte and the payload, then the payload.
+local bytes, acc, bits = {}, 0, 0
+for _, cell in ipairs(last.cells) do
+  acc, bits = acc * 8 + cell, bits + 3
+  if bits >= 8 then
+    bits = bits - 8
+    bytes[#bytes + 1] = math.floor(acc / 2 ^ bits)
+    acc = acc % 2 ^ bits
+  end
+end
+local drawn = string.char(table.unpack(bytes))
+assert(drawn:sub(1, 3) == "T3" .. string.char(3), "not version 3")
+local tag = ns.Codec.HmacSha256(ns.Codec.KeyFromHex("${key}"), string.char(3) .. last.payload):sub(1, 8)
+assert(drawn:sub(8, 15) == tag, "wrong signature")
+assert(drawn:sub(16, 15 + #last.payload) == last.payload, "payload")
+return "ok"
+`, { key });
+  // Without Key.lua (a game started before the companion wrote it): drawn as before signing.
+  runGame(`
+Link.Init()
+assert(not Link.Status().signed, "signed without a key")
+return "ok"
+`);
+});
+
 test("the last slots are announced, and loading slot 200 marks the session out of updates", () => {
   runGame(`
 Link.Init()

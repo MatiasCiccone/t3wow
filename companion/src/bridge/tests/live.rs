@@ -252,7 +252,7 @@ impl Live {
         // made from it, and T3 answers a key it has seen with what it did then (the thread
         // a previous run started, say). The replay gives the updates its own key.
         let frame = json!({ "k": self.session, "u": self.session, "n": 0, "l": if self.seq == 1 { 1 } else { 0 }, "dc": 1, "wk": 1, "q": [command] });
-        self.bridge.on_frame(&frame, None, now_ms());
+        self.bridge.on_frame(&frame, None, true, now_ms());
         self.bridge.tick();
         self.seq
     }

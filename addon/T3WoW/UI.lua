@@ -191,6 +191,11 @@ UI.Companion = (IsMacClient and IsMacClient()) and {
 }
 local function blockedReason(kind)
     local trust = inbox and inbox.trust
+    -- The companion follows only signed commands for anything that changes T3 (inbox.uns:
+    -- this game's aren't, so it loaded no key, or an old one).
+    if inbox and inbox.uns and CHANGES_T3[kind] then
+        return format("%s until you restart WoW: T3 WoW loads the key that signs what it sends when the game starts.", BLOCKED_LEAD[kind])
+    end
     if (trust == "readonly" and CHANGES_T3[kind]) or (trust == "nonew" and kind == "new") then
         return format(UI.Companion.blocked, BLOCKED_LEAD[kind], TRUST_NAME[trust])
     end
@@ -2784,7 +2789,7 @@ local function drawnAsIs()
     local kept = {}
     for _, part in ipairs(inbox and type(inbox.same) == "table" and inbox.same or {}) do kept[part] = true end
     return kept.view and kept.threads and drawn.view ~= nil and drawn.view == inbox.view and drawn.listed == selectedThread()
-        and drawn.selected == selected and drawn.echo == echo and drawn.sent == askState.sent and drawn.trust == inbox.trust
+        and drawn.selected == selected and drawn.echo == echo and drawn.sent == askState.sent and drawn.trust == inbox.trust and drawn.uns == inbox.uns
 end
 
 function renderView()
@@ -2947,7 +2952,7 @@ function renderView()
     -- settle.
     if stickToBottom then scrollToEnd = false end
     fit(stickToBottom)
-    drawn = { view = view, listed = listed, selected = selected, echo = echo, sent = askState.sent, trust = inbox.trust }
+    drawn = { view = view, listed = listed, selected = selected, echo = echo, sent = askState.sent, trust = inbox.trust, uns = inbox.uns }
 end
 
 -- ---------------------------------------------------------------- composer
@@ -4352,6 +4357,9 @@ local function renderStatus()
         -- In a few words: the note's sentence goes to the tooltip and chat.
         connected = "|cffff8000Update the T3 WoW companion|r"
         full = "|cffff8000" .. UI.CompanionNote() .. "|r"
+    elseif inbox.uns then
+        connected = "|cffff8000Restart WoW to send from the game|r"
+        full = "|cffff8000" .. blockedReason("send") .. "|r"
     elseif ns.Link.SlotsLow() then
         connected = format("|cffffd100%d/%d updates used: Reload UI soon|r", ns.Link.SlotsUsed())
     elseif type(inbox.t3u) == "string" then

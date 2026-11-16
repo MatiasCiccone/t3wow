@@ -6,6 +6,7 @@
 ## SavedVariables: T3WoWDB
 ## OptionalDeps: ElvUI
 Codec.lua
+Key.xml
 Theme.lua
 UI.lua
 Link.lua

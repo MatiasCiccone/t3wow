@@ -2,6 +2,7 @@
 // the same fixture files are checked from both sides (see companion/tests/fixtures and
 // the Rust tests in codec.rs and lua.rs), so neither can drift without a test failing.
 import assert from "node:assert/strict";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import fengari from "fengari";
@@ -28,6 +29,37 @@ for i, v in ipairs(Codec.Encode(${seq}, [==[${payload}]==])) do out[i] = string.
 return table.concat(out)`);
     assert.equal(drawn, cells);
   }
+});
+
+test("the addon signs frames exactly as the companion checks them", () => {
+  // The companion decodes these and checks their signatures with the same key (codec.rs).
+  const { signed } = JSON.parse(fixture("frames.json"));
+  assert.equal(signed.frames.length, 2);
+  for (const { seq, payload, part, cells } of signed.frames) {
+    const expr = part === undefined
+      ? `Codec.Encode(${seq}, [==[${payload}]==], key)`
+      : `Codec.EncodePart(${seq}, [==[${payload}]==], [==[${part}]==], key)`;
+    const drawn = runLua(`local key = Codec.KeyFromHex("${signed.key}")
+local out = {}
+for i, v in ipairs(${expr}) do out[i] = string.format("%d", v) end
+return table.concat(out)`);
+    assert.equal(drawn, cells);
+  }
+});
+
+test("the addon's SHA-256 and HMAC, in plain arithmetic, match the standard ones at every length", () => {
+  // Lengths around each padding boundary, and the largest a frame holds.
+  const toHex = `local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end`;
+  const key = randomBytes(32);
+  const literal = (bytes) => [...bytes].map((b) => `\\${b}`).join("");
+  for (const length of [0, 1, 55, 56, 63, 64, 65, 119, 120, 1000, 2983]) {
+    const data = randomBytes(length);
+    const got = runLua(`${toHex}
+return hex(Codec.Sha256("${literal(data)}")) .. " " .. hex(Codec.HmacSha256("${literal(key)}", "${literal(data)}"))`);
+    assert.equal(got, `${createHash("sha256").update(data).digest("hex")} ${createHmac("sha256", key).update(data).digest("hex")}`, `length ${length}`);
+  }
+  assert.equal(runLua(`return tostring(Codec.KeyFromHex("abc"))`), "nil");
+  assert.equal(runLua(`return tostring(Codec.KeyFromHex(string.rep("zz", 32)))`), "nil");
 });
 
 test("the addon draws exactly the part frames the companion joins", () => {
