@@ -4,7 +4,8 @@
 //!
 //! Four checks in one run:
 //! - T3's tools take the inputs the companion was made for (`tests/fixtures/t3-tools.json`;
-//!   see docs/t3-update.md);
+//!   see docs/t3-update.md), and a page an agent shows with html_render, which T3 lists only
+//!   to agents in a thread, has the inputs the companion reads (`PAGE_INPUTS`);
 //! - every call the bridge makes is answered in the shape `FakeT3` answers it, so the unit
 //!   tests above keep testing against the real T3 (`fake_and_live_differ`);
 //! - every command the game can send works end to end against the real T3;
@@ -53,10 +54,11 @@ impl T3 for Recorder {
     }
 }
 
-/// The game's slots, kept in the order they were written.
+/// The game's slots, kept in the order they were written, and the image slots holding a picture.
 #[derive(Default)]
 struct Inboxes {
     written: Vec<String>,
+    images: BTreeSet<u32>,
 }
 
 struct RecordingSlots(Arc<Mutex<Inboxes>>);
@@ -74,12 +76,15 @@ impl SlotWriter for RecordingSlots {
     fn flip_probe(&mut self, _real: bool) -> Vec<String> {
         Vec::new()
     }
-    fn write_image(&mut self, _n: u32, _tga: &[u8]) -> std::io::Result<()> {
+    fn write_image(&mut self, n: u32, _tga: &[u8]) -> std::io::Result<()> {
+        self.0.lock().unwrap().images.insert(n);
         Ok(())
     }
-    fn blank_image(&mut self, _n: u32) {}
-    fn has_image(&self, _n: u32) -> bool {
-        false
+    fn blank_image(&mut self, n: u32) {
+        self.0.lock().unwrap().images.remove(&n);
+    }
+    fn has_image(&self, n: u32) -> bool {
+        self.0.lock().unwrap().images.contains(&n)
     }
 }
 
@@ -174,6 +179,8 @@ struct Live {
     /// The image the next paste finds on the clipboard, and the Ctrl+V presses so far.
     clipboard: Arc<Mutex<Option<Clipped>>>,
     presses: Arc<Mutex<(u64, i64)>>,
+    /// Whether the game can show pictures (each frame says so).
+    images: bool,
 }
 
 impl Live {
@@ -212,6 +219,7 @@ impl Live {
             checkpoints: Vec::new(),
             clipboard,
             presses,
+            images: false,
         };
         live.command(json!({ "t": "ui", "o": true, "f": true }));
         live.wait("the first look at T3", STATE_TIMEOUT, |live| live.bridge.polled_ok && live.snapshot()["models"].is_array());
@@ -251,7 +259,7 @@ impl Live {
         // The game's client key, new each run: a command's retry key (clientRequestId) is
         // made from it, and T3 answers a key it has seen with what it did then (the thread
         // a previous run started, say). The replay gives the updates its own key.
-        let frame = json!({ "k": self.session, "u": self.session, "n": 0, "l": if self.seq == 1 { 1 } else { 0 }, "dc": 1, "wk": 1, "q": [command] });
+        let frame = json!({ "k": self.session, "u": self.session, "n": 0, "l": if self.seq == 1 { 1 } else { 0 }, "dc": 1, "wk": 1, "im": u8::from(self.images), "q": [command] });
         self.bridge.on_frame(&frame, None, true, now_ms());
         self.bridge.tick();
         self.seq
@@ -579,7 +587,66 @@ fn live_an_answer_from_the_game_reaches_the_agent() {
     }
 }
 
-/// The T3 tools the companion calls, and those whose calls it reads from a thread's timeline.
+/// The inputs of an html_render call that the companion reads from the page's timeline item:
+/// the HTML (`html`, or a file at `path`) is drawn `height` tall, under `title` (`page_html`,
+/// `draw_page`, `page_title`).
+const PAGE_INPUTS: &[&str] = &["height", "html", "path", "title"];
+
+/// The text of each html_render call in thread `id`'s activity, with its status.
+fn page_calls(live: &Live, id: &str) -> Vec<(String, String)> {
+    let read = live.t3.client.call("t3_thread_read", json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 20000 })).expect("thread read");
+    let items = read["items"].as_array().into_iter().flatten();
+    items.filter(|i| i["type"] == "dynamic_tool" && is_page_item(str_of(&i["text"]))).map(|i| (str_of(&i["status"]).to_string(), str_of(&i["text"]).to_string())).collect()
+}
+
+/// A page an agent shows with html_render reaches the game as a picture, drawn from the
+/// call's inputs. T3 lists html_render only to agents in a thread, so the tool check can't
+/// watch it: this reads its inputs from a call an agent made, and fails on an input the
+/// companion doesn't read (one renamed, or a new required one) or a missing one it does.
+#[test]
+#[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
+fn live_a_page_an_agent_shows_reaches_the_game() {
+    let mut live = Live::start("page");
+    let painter = FakePainter::default();
+    live.bridge.set_painter(Some(Box::new(painter.clone())));
+    live.images = true;
+    let ask = "Call the html_render tool once, with title \"Kiwi chart\", height 240, and html \"<h1>KIWI</h1>\" (inline, not a file). Then reply with only the word DONE.";
+    let id = live.new_thread(ask);
+    let (mut attempt, mut replies) = (1, 0);
+    let text = loop {
+        live.wait("the agent's reply", REPLY_TIMEOUT, |live| live.said(&id, "a").len() > replies && !working(str_of(&live.thread(&id)["status"])));
+        let calls = page_calls(&live, &id);
+        if let Some((_, text)) = calls.iter().find(|(status, _)| status == "completed") {
+            break text.clone();
+        }
+        assert!(attempt < TRIES, "the agent never showed a page; its html_render calls: {calls:?}; its replies: {:?}", live.said(&id, "a"));
+        eprintln!("  try {attempt}: the agent didn't show a page, asking it again");
+        (attempt, replies) = (attempt + 1, live.said(&id, "a").len());
+        let s = live.command(json!({ "t": "send", "id": id, "m": ask }));
+        live.expect_no_failure(s);
+    };
+    let call: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("the page's item isn't a whole tool call: {text}"));
+    let input = call["input"].as_object().cloned().unwrap_or_default();
+    let unread: Vec<&String> = input.keys().filter(|k| !PAGE_INPUTS.contains(&k.as_str())).collect();
+    let missing: Vec<&str> = ["height", "html", "title"].into_iter().filter(|k| !input.contains_key(*k)).collect();
+    assert!(
+        unread.is_empty() && missing.is_empty(),
+        "html_render's input changed: the agent passed {unread:?}, which the companion doesn't read, and left out {missing:?}, which it does. \
+         Fix page_html, draw_page and page_title in bridge.rs, then PAGE_INPUTS. The call:\n{text}"
+    );
+    assert_eq!(page_title(&text), "Kiwi chart", "the page's title as the companion reads it");
+    assert!(page_html(&text, None).is_ok_and(|html| html.contains("KIWI")), "the page's HTML as the companion reads it: {:?}", page_html(&text, None));
+    // The bridge finds the page in the timeline, draws it from its inputs and shows it.
+    let shown = |live: &Live| live.snapshot()["view"]["items"].as_array().into_iter().flatten().any(|i| i["x"] == "[Page: Kiwi chart]" && i["im"].is_object());
+    live.wait("the page as a picture in the game", STATE_TIMEOUT, shown);
+    let drawn = painter.calls();
+    assert!(drawn.iter().any(|c| c.starts_with("page 240 ") && c.contains("KIWI")), "the page wasn't drawn 240 tall from its HTML: {drawn:?}");
+    live.finish();
+}
+
+/// The T3 tools the companion calls. T3 lists html_render, whose calls it reads from a
+/// thread's timeline, only to agents in a thread: `live_a_page_an_agent_shows_reaches_the_game`
+/// checks its inputs.
 const WATCHED_TOOLS: &[&str] = &[
     "list_thread_pull_requests",
     "orchestrator_capabilities",
@@ -597,8 +664,6 @@ const WATCHED_TOOLS: &[&str] = &[
     "t3_thread_read",
     "t3_thread_send",
     "t3_thread_send_attachments",
-    // Read from the timeline: its `html` becomes a picture (`draw_page`).
-    "html_render",
 ];
 const TOOLS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/t3-tools.json");
 

@@ -8,8 +8,8 @@ T3 WoW says which T3 Code it's made for: `t3Code` in `package.json` is the one p
 
 Read T3 Code's GitHub release notes for every tag since the one T3 WoW is made for. Most of the changes won't touch T3 WoW; look for these:
 
-- **The tools the companion calls or reads** (`WATCHED_TOOLS` in `companion/src/bridge/tests/live.rs`): new or removed inputs, new values, and a different result from the same inputs. `html_render` is read from the timeline, not called: its input is what becomes a picture.
-- **What the companion reads from a thread's timeline:** the item types (`work_kind` in `companion/src/bridge.rs`), `html_render`'s input and `AskUserQuestion`'s output.
+- **The tools the companion calls or reads** (`WATCHED_TOOLS` in `companion/src/bridge/tests/live.rs`): new or removed inputs, new values, and a different result from the same inputs. `html_render` isn't among them: the companion doesn't call it but reads its calls from the timeline, where its input becomes a picture, and since 0.110.0 T3 lists it only to agents in a thread (`PAGE_INPUTS` in the same file has the inputs the companion reads).
+- **What the companion reads from a thread's timeline:** the item types (matched on `item["type"]` in `companion/src/bridge.rs`, e.g. `FoundWork::from_item`, `waiting_card` and `read_view_scan`), `html_render`'s input and `AskUserQuestion`'s output.
 - **Sign-in:** the OAuth flow, scopes, access levels, and what the approval page grants by default.
 - **Threads:** statuses, pending requests (questions, approvals, secrets), snooze and settle rules.
 - **Providers and models:** new providers, model options and efforts.
@@ -23,6 +23,7 @@ Example: in 0.18.0, approving the sign-in with the code box left empty grants Re
 `npm run test:live` (see the README's **Live tests**) against the new T3:
 
 - The tool check fails on any input added, removed or changed on a watched tool, or a watched tool T3 no longer offers, and names each one. It compares with `companion/tests/fixtures/t3-tools.json`, the tools as the companion was made for them.
+- The page test has an agent show a page with `html_render` and fails if the call has an input the companion doesn't read (`PAGE_INPUTS`: a renamed one, or a new required one) or lacks `title`, `height` or `html`, then checks that the page reaches the game as a picture. T3's tool list can't show this tool's inputs, so a new optional input goes unnoticed until the agent uses it: look for one in the release notes.
 - The shape check fails where T3 answers in a shape `FakeT3` doesn't know.
 - The command tests and the replay fail where a command no longer works end to end.
 
