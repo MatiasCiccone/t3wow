@@ -6,15 +6,12 @@
 //   node scripts/unlist-release.mjs v0.9.1 --relist [--apply]
 //   node scripts/unlist-release.mjs --check           # is "latest" the newest listed release?
 //
-// --repo <owner/name> works on another repository instead: while the Release workflow also
-// publishes to MatiasCiccone/t3wow-releases (for companions up to 0.10.0), run it again with
-// --repo MatiasCiccone/t3wow-releases.
+// --repo <owner/name> works on another repository instead.
 //
 // A listed release is a published release that isn't a prerelease; unlisting marks it a
 // prerelease. Every companion asks GitHub for the repository's latest release, which is never
 // a prerelease, and also ignores a prerelease itself. That pointer isn't moved reliably on its
-// own (on t3wow-releases the releases share one commit, so GitHub can't order them by date),
-// so after each change the script marks the newest listed release "latest" and reads the
+// own, so after each change the script marks the newest listed release "latest" and reads the
 // pointer back. The release and its signed files stay as they were: nothing is deleted or
 // re-signed.
 //
