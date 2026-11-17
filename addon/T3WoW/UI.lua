@@ -5317,6 +5317,14 @@ function selectThread(envId, threadId)
     UI.History.Visit(envId, threadId)
     scrollToEnd = true
     copyBox:Hide()
+    -- As in T3 Code, opening a thread dismisses its notifications, as clicking one does.
+    for index = #toasts, 1, -1 do
+        local toast = toasts[index]
+        if toast.threadId == threadId and toast.envId == envId then
+            UI.Waits.MarkSeen(toast)
+            removeToast(toast)
+        end
+    end
     ns.Link.Send({ t = "open", e = envId, id = threadId })
     UI.Refresh()
 end
