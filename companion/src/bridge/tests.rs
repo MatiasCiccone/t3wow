@@ -286,7 +286,12 @@ impl T3 for FakeT3 {
                     "requestId": args["requestId"],
                     "questions": [
                         { "id": "Which color?", "header": "Color", "question": "Which color?", "multiSelect": false,
-                          "options": [{ "label": "Red", "description": "Warm" }, { "label": "Blue", "description": "Cool" }] },
+                          "options": [{ "label": "Red", "description": "Warm" },
+                                      { "label": "Blue", "description": "Cool", "preview": "```css
+.sky | .sea {
+  color: blue;
+}
+```" }] },
                         { "id": "Which extras?", "header": "Extras", "question": "Which extras?", "multiSelect": true,
                           "options": [{ "label": "Sound", "description": "" }, { "label": "Chat line", "description": "" }] },
                     ],
@@ -828,7 +833,7 @@ fn a_pending_question_reaches_the_game_and_its_answer_goes_back_by_label() {
     rig.bridge.tick();
     let inbox = rig.slot(1);
     assert!(inbox.contains("ask={k=\""), "{inbox}");
-    assert!(inbox.contains("{h=\"Color\",q=\"Which color?\",m=false,o={{l=\"Red\",d=\"Warm\"},{l=\"Blue\",d=\"Cool\"}}}"), "{inbox}");
+    assert!(inbox.contains("{h=\"Color\",q=\"Which color?\",m=false,o={{l=\"Red\",d=\"Warm\"},{l=\"Blue\",d=\"Cool\",p=\""), "{inbox}");
     assert!(!inbox.contains("a-very-long-id"), "the long request id stays in the companion");
     let token = {
         let at = inbox.find("ask={k=\"").unwrap() + 8;
@@ -849,6 +854,41 @@ fn a_pending_question_reaches_the_game_and_its_answer_goes_back_by_label() {
     rig.advance(2_000);
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_pending_request").into_iter().filter(|a| a["action"] == "respond").count(), 1);
+}
+
+#[test]
+fn an_options_preview_reaches_the_game_with_its_lines_as_in_t3() {
+    let mut rig = Rig::new(5_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["status"] = json!("waiting");
+        threads[0]["pendingRequestCount"] = json!(1);
+    }
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let options = rig.bridge.snapshot()["view"]["ask"]["qs"][0]["o"].clone();
+    // The fence's lines go (the game draws it all as code); the lines and their indent stay,
+    // and a pipe is doubled, as WoW shows one.
+    assert_eq!(options[1]["p"], ".sky || .sea {
+  color: blue;
+}", "{options}");
+    assert!(options[0]["p"].is_null(), "a preview where there is none: {options}");
+}
+
+#[test]
+fn a_long_preview_is_cut_to_a_few_lines() {
+    let long = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("
+");
+    let request = json!({ "questions": [{ "id": "q", "question": "Which?", "options": [
+        { "label": "A", "description": "", "preview": long },
+        { "label": "B", "description": "", "preview": "x".repeat(5_000) },
+    ] }] });
+    let (_, shown) = Bridge::pending_ask("local", "t1", "r1", &request).unwrap();
+    let a = shown["qs"][0]["o"][0]["p"].as_str().unwrap();
+    assert!(a.starts_with("line 1
+line 2
+") && a.ends_with('…') && a.lines().count() <= 13, "{a}");
+    assert!(shown["qs"][0]["o"][1]["p"].as_str().unwrap().chars().count() <= 801);
 }
 
 #[test]

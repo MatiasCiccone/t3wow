@@ -6,7 +6,7 @@ use crate::clip::{self, Clipped};
 use crate::codec::decode_cells;
 use crate::config::Trust;
 use crate::made_for::{self, older_t3, OlderT3};
-use crate::lua::{name_model_refs, name_thread_links, plain, to_lua, wow_segments, wow_text, MODEL_MARK};
+use crate::lua::{name_model_refs, name_thread_links, plain, preview_text, to_lua, wow_segments, wow_text, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::snooze::{civil_from_days, days_from_civil};
@@ -4761,7 +4761,15 @@ impl Bridge {
                 // Not in the view, which names models: a model reference stays as written.
                 "q": name_model_refs(&wow_text(text, 1000), |_, _| None),
                 "m": multi,
-                "o": options.iter().map(|o| json!({ "l": plain(str_of(&o["label"]), 60), "d": plain(str_of(&o["description"]), 160) })).collect::<Vec<_>>(),
+                "o": options.iter().map(|o| {
+                    let mut shown = json!({ "l": plain(str_of(&o["label"]), 60), "d": plain(str_of(&o["description"]), 160) });
+                    // A preview (a mockup, a snippet), shown under its option as in T3.
+                    let preview = preview_text(str_of(&o["preview"]), 800, 12);
+                    if !preview.is_empty() {
+                        shown["p"] = json!(preview);
+                    }
+                    shown
+                }).collect::<Vec<_>>(),
             }));
         }
         if questions.is_empty() {

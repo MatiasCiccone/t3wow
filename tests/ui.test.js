@@ -4165,6 +4165,31 @@ return "ok"
 `);
 });
 
+test("an option's preview shows under it in the code font, always, as in T3", () => {
+  run(`
+local ask = { k = "abcd1234", qs = { { h = "Layout", q = "Which layout?", m = false, o = {
+  { l = "Sidebar", d = "Nav on the left", p = "+-----+------+\\n|| nav || main ||\\n+-----+------+" },
+  { l = "Top bar", d = "" },
+} } } }
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+UI.Select(thread)
+local preview
+for _, fs in ipairs(fontStrings) do
+  if not fs.hidden and fs.text == ask.qs[1].o[1].p then preview = fs end
+end
+local first, second = find("Button", "Sidebar"), find("Button", "Top bar")
+assert(preview, "no preview")
+assert(preview.fontObject == ns.Skin.fonts.mono, "the preview isn't in the code font")
+assert(preview.point[2] == first and preview.point[3] == "BOTTOMLEFT", "the preview isn't under its option")
+assert(second.point[2] == preview, "the next option isn't under the preview")
+-- Not only while picked or pointed at: T3 shows it always, so nothing moves.
+click("Top bar")
+assert(showing("^%+%-%-%-%-%-%+"), "the preview went when another option was picked")
+return "ok"
+`);
+});
+
 test("an update that left out the open thread and the list leaves the conversation as drawn", () => {
   run(`
 function load(inbox)
