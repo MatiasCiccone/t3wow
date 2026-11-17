@@ -182,20 +182,18 @@ test("the Mac app is built on GitHub's Apple Silicon runner, and its checksum is
   for (const sha of ["t3wow.exe.sha256", "t3wow-macos-arm64.zip.sha256"]) {
     assert.ok(publish.includes(`node scripts/sign-release.mjs release/${sha}\n`), sha);
   }
-  // Both releases, here and on the bridge, carry every file.
-  for (const name of ["Publish the release", "Publish to t3wow-releases (bridge)"]) {
-    const step = jobStep(publish, name);
-    assert.match(step, /uses: softprops\/action-gh-release@/);
-    const files = step.slice(step.indexOf("files: |")).split("\n").map((line) => line.trim());
-    for (const file of ["t3wow.exe", "t3wow.exe.sha256", "t3wow.exe.sha256.sig", "t3wow-macos-arm64.zip", "t3wow-macos-arm64.zip.sha256", "t3wow-macos-arm64.zip.sha256.sig", "T3WoW-${{ github.ref_name }}.zip"]) {
-      assert.ok(files.includes(`release/${file}`), `${name}: ${file}`);
-    }
+  // The release carries every file.
+  const step = jobStep(publish, "Publish the release");
+  assert.match(step, /uses: softprops\/action-gh-release@/);
+  const files = step.slice(step.indexOf("files: |")).split("\n").map((line) => line.trim());
+  for (const file of ["t3wow.exe", "t3wow.exe.sha256", "t3wow.exe.sha256.sig", "t3wow-macos-arm64.zip", "t3wow-macos-arm64.zip.sha256", "t3wow-macos-arm64.zip.sha256.sig", "T3WoW-${{ github.ref_name }}.zip"]) {
+    assert.ok(files.includes(`release/${file}`), file);
   }
-  // Signing happens once both builds are in, before either release is published.
+  // Signing happens once both builds are in, before the release is published.
   assert.ok(publish.indexOf("- name: Sign the checksum") < publish.indexOf("softprops/action-gh-release"));
 });
 
-test("a release is published here with the job's token, and on t3wow-releases only while RELEASES_TOKEN is set", () => {
+test("a release is published here with the job's token, and nowhere else", () => {
   const workflow = readText("../.github/workflows/release.yml");
   // Only the publish job may write; every other job reads.
   assert.match(workflow, /\npermissions:\n  contents: read\n/);
@@ -206,28 +204,16 @@ test("a release is published here with the job's token, and on t3wow-releases on
   const main = jobStep(publish, "Publish the release");
   assert.doesNotMatch(main, /\n\s+(repository|token):/);
   assert.doesNotMatch(main, /\n\s+if:/);
-  // The bridge: its own token, gated on that secret, with a note in the log when it's gone.
-  assert.match(publish, /BRIDGE: \$\{\{ secrets\.RELEASES_TOKEN != '' \}\}/);
-  assert.match(workflow, /BRIDGE_REPO: MatiasCiccone\/t3wow-releases\n/);
-  const bridge = jobStep(publish, "Publish to t3wow-releases (bridge)");
-  assert.match(bridge, /^- name: .+\n\s+if: env\.BRIDGE == 'true'\n/);
-  assert.match(bridge, /repository: \$\{\{ env\.BRIDGE_REPO \}\}/);
-  assert.match(bridge, /token: \$\{\{ secrets\.RELEASES_TOKEN \}\}/);
-  const retired = jobStep(publish, "Bridge retired");
-  assert.match(retired, /^- name: .+\n\s+if: env\.BRIDGE != 'true'\n\s+run: echo "::notice::No RELEASES_TOKEN secret/);
-  // RELEASES_TOKEN is the bridge's alone.
-  assert.equal(workflow.match(/secrets\.RELEASES_TOKEN/g).length, 2);
-  // The main release comes first, so a failing bridge never holds it back.
-  assert.ok(publish.indexOf("- name: Publish the release") < publish.indexOf("- name: Publish to t3wow-releases (bridge)"));
+  assert.equal(workflow.match(/softprops\/action-gh-release@/g).length, 1);
   // CurseForge's changelog links to this repository's releases.
   assert.match(jobStep(publish, "Upload the addon to CurseForge"), /https:\/\/github\.com\/\$env:GITHUB_REPOSITORY\/releases\/latest/);
 });
 
-test("signed releases stay signed: the check reads this repository's latest release, then t3wow-releases'", () => {
+test("signed releases stay signed: the check reads this repository's latest release", () => {
   const check = jobStep(releaseJob("build-windows"), "Signed releases stay signed");
   assert.match(check, /GH_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(check, /foreach \(\$repo in @\(\$env:GITHUB_REPOSITORY, \$env:BRIDGE_REPO\)\)/);
-  assert.match(check, /if \(\$latest\) \{ break \}/);
+  assert.match(check, /\$repo = \$env:GITHUB_REPOSITORY\n/);
+  assert.match(check, /if \(-not \$latest\) \{ "No earlier release on \$repo\."; exit 0 \}/);
   assert.match(check, /\$assets -contains "t3wow\.exe\.sha256\.sig"/);
 });
 

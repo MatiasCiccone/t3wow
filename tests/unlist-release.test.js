@@ -1,6 +1,6 @@
 // Unlisting a release (scripts/unlist-release.mjs) against a pretend MatiasCiccone/t3wow (or,
-// with --repo, t3wow-releases): GitHub's "latest" pointer moves only when a release is marked
-// latest, as on t3wow-releases, whose releases all share one commit date.
+// with --repo, another repository): GitHub's "latest" pointer moves only when a release is
+// marked latest.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { apply, check, compareVersions, describe, newestListed, plan, releases, repoOption } from "../scripts/unlist-release.mjs";
@@ -100,18 +100,18 @@ test("a missing release or a draft is refused, and a wrong latest is caught", ()
   assert.throws(() => apply({ edit: null, latest: "v0.9.0" }, stuck), /GitHub's latest release is v0\.8\.0, not v0\.9\.0/);
 });
 
-test("--repo works on t3wow-releases, the bridge, instead of this repository", () => {
+test("--repo works on another repository instead of this one", () => {
   assert.deepEqual(repoOption(["v0.9.1", "--apply"]), { repo: "MatiasCiccone/t3wow", rest: ["v0.9.1", "--apply"] });
-  assert.deepEqual(repoOption(["v0.9.1", "--repo", "MatiasCiccone/t3wow-releases", "--apply"]), { repo: "MatiasCiccone/t3wow-releases", rest: ["v0.9.1", "--apply"] });
+  assert.deepEqual(repoOption(["v0.9.1", "--repo", "someone/t3wow-fork", "--apply"]), { repo: "someone/t3wow-fork", rest: ["v0.9.1", "--apply"] });
   assert.throws(() => repoOption(["v0.9.1", "--repo"]), /--repo takes owner\/name/);
   assert.throws(() => repoOption(["v0.9.1", "--repo", "--apply"]), /--repo takes owner\/name/);
-  const bridge = "MatiasCiccone/t3wow-releases";
-  const github = fakeGitHub(["v0.9.0", "v0.9.1"], "v0.9.1", bridge);
-  const steps = plan(releases(github.gh, bridge), "v0.9.1", false, bridge);
-  apply(steps, github.gh, bridge);
+  const other = "someone/t3wow-fork";
+  const github = fakeGitHub(["v0.9.0", "v0.9.1"], "v0.9.1", other);
+  const steps = plan(releases(github.gh, other), "v0.9.1", false, other);
+  apply(steps, github.gh, other);
   assert.equal(github.latest(), "v0.9.0");
-  assert.ok(github.calls.every((c) => !c.includes("--repo") || c.includes(`--repo ${bridge}`)));
-  assert.throws(() => plan(releases(github.gh, bridge), "v0.7.0", false, bridge), /There's no release v0\.7\.0 on MatiasCiccone\/t3wow-releases/);
-  const stale = fakeGitHub(["v0.8.0", "v0.9.0"], "v0.8.0", bridge);
-  assert.throws(() => check(stale.gh, bridge), /--relist --apply --repo MatiasCiccone\/t3wow-releases\./);
+  assert.ok(github.calls.every((c) => !c.includes("--repo") || c.includes(`--repo ${other}`)));
+  assert.throws(() => plan(releases(github.gh, other), "v0.7.0", false, other), /There's no release v0\.7\.0 on someone\/t3wow-fork/);
+  const stale = fakeGitHub(["v0.8.0", "v0.9.0"], "v0.8.0", other);
+  assert.throws(() => check(stale.gh, other), /--relist --apply --repo someone\/t3wow-fork\./);
 });

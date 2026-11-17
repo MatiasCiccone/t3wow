@@ -7,13 +7,7 @@
 # from the T3WOW_MACOS_CERT_P12 secret), and publish, which signs both checksums and uploads
 # everything once both builds are done. Publishing here uses the job's GITHUB_TOKEN, which is
 # why publish alone may write the repository's contents.
-# The bridge: companions up to 0.10.0 look for updates only on MatiasCiccone/t3wow-releases,
-# where releases went while this repository was private. So for a while every release is also
-# published there, with the RELEASES_TOKEN secret (a fine-grained token with Contents read and
-# write on t3wow-releases only). A few releases later, once those companions have updated to
-# one that reads this repository, t3wow-releases gets archived: delete the RELEASES_TOKEN
-# secret, and the bridge step skips itself with a note in the log. Signing needs the
-# T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
+# Signing needs the T3WOW_SIGNING_KEY secret: the release key's private half (PKCS#8 PEM, made by
 # scripts/gen-signing-key.mjs), whose public half is in companion/src/updater/release_key.rs. Until both
 # are set up, releases go out unsigned with a warning (companions with the placeholder key
 # accept that); with only one of the two, the release fails. The addon zip is also uploaded to the
@@ -35,8 +29,6 @@ permissions:
   contents: read
 
 env:
-  # The bridge (see above), for companions up to 0.10.0.
-  BRIDGE_REPO: MatiasCiccone/t3wow-releases
   CURSEFORGE_PROJECT: "1788778"
   # CurseForge's game version type for WoW Forever.
   CURSEFORGE_GAME_TYPE: "88568"
@@ -83,23 +75,17 @@ jobs:
 
       # Once a release has gone out signed, an unsigned one means both the key and the secret
       # went missing (say, release_key.rs back to the placeholder and the secret deleted).
-      # Companions that require the signature would refuse it, so stop instead. The latest
-      # release is this repository's, or, before this repository has one, t3wow-releases'
-      # (public, so the job's token reads it).
+      # Companions that require the signature would refuse it, so stop instead.
       - name: Signed releases stay signed
         if: steps.key.outputs.signed != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $latest = $null
-          foreach ($repo in @($env:GITHUB_REPOSITORY, $env:BRIDGE_REPO)) {
-            $latest = gh release list --repo $repo --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName'
-            if ($LASTEXITCODE -ne 0) { throw "Couldn't list the releases on $repo." }
-            if ($latest) { break }
-            "No earlier release on $repo."
-          }
-          if (-not $latest) { exit 0 }
+          $repo = $env:GITHUB_REPOSITORY
+          $latest = gh release list --repo $repo --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName'
+          if ($LASTEXITCODE -ne 0) { throw "Couldn't list the releases on $repo." }
+          if (-not $latest) { "No earlier release on $repo."; exit 0 }
           $assets = gh release view $latest --repo $repo --json assets --jq '.assets[].name'
           if ($LASTEXITCODE -ne 0) { throw "Couldn't read release $latest on $repo." }
           if ($assets -contains "t3wow.exe.sha256.sig") {
@@ -301,10 +287,6 @@ jobs:
     # The release on this repository is made with the job's GITHUB_TOKEN.
     permissions:
       contents: write
-    env:
-      # The bridge to t3wow-releases runs while the RELEASES_TOKEN secret is set. 'true' or
-      # 'false': secrets can't appear in a step's if.
-      BRIDGE: ${{ secrets.RELEASES_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -349,30 +331,6 @@ jobs:
       - name: Publish the release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
-          tag_name: ${{ github.ref_name }}
-          name: T3 WoW ${{ github.ref_name }}
-          body_path: release/NOTES.md
-          files: |
-            release/t3wow.exe
-            release/t3wow.exe.sha256
-            release/t3wow.exe.sha256.sig
-            release/t3wow-macos-arm64.zip
-            release/t3wow-macos-arm64.zip.sha256
-            release/t3wow-macos-arm64.zip.sha256.sig
-            release/T3WoW-${{ github.ref_name }}.zip
-
-      # The same release on t3wow-releases, for companions up to 0.10.0 (see the top of this
-      # file). Retired by deleting the RELEASES_TOKEN secret.
-      - name: Bridge retired
-        if: env.BRIDGE != 'true'
-        run: echo "::notice::No RELEASES_TOKEN secret, so the release isn't published to $BRIDGE_REPO too (the bridge for companions up to 0.10.0 is retired)."
-
-      - name: Publish to t3wow-releases (bridge)
-        if: env.BRIDGE == 'true'
-        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
-        with:
-          repository: ${{ env.BRIDGE_REPO }}
-          token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: T3 WoW ${{ github.ref_name }}
           body_path: release/NOTES.md

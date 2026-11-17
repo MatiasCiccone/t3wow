@@ -86,7 +86,7 @@ The same steps by hand, in PowerShell:
 
    Between this and the merge, a pushed tag stops at **Release key** (the secret without the public key). Nothing gets published that way; merge before tagging.
 
-6. Merge, then release as usual. In the Release run, **Release key** says "The release key is set and matches the companion's public key", and the release lists `t3wow.exe.sha256.sig` (on this repository, and on `t3wow-releases` while the bridge runs).
+6. Merge, then release as usual. In the Release run, **Release key** says "The release key is set and matches the companion's public key", and the release lists `t3wow.exe.sha256.sig`.
 
 7. Once you know a backup opens, you can delete the `.pem` from your PC: the workflow only needs the secret.
 
@@ -105,14 +105,14 @@ So nothing is stranded: every companion released so far updates to the first sig
 - the secret without the public key, or the public key without the secret: **Release key** fails;
 - neither, after a release that went out signed: **Signed releases stay signed** fails.
 
-What the transition can't do is protect companions that haven't updated yet: until a companion runs the first signed release, it trusts a matching SHA-256 from the repository it reads releases from (this one; `t3wow-releases` for companions up to 0.10.0), as it does today.
+What the transition can't do is protect companions that haven't updated yet: until a companion runs the first signed release, it trusts a matching SHA-256 from the repository it reads releases from, as it does today.
 
 ### Losing or replacing the key
 
 There's one key, and companions trust only it. Neither the scripts nor the companion support switching keys yet, so:
 
 - **Lost** (no backup, secret deleted): releases can't be signed with it again. Make a new key (`release_key.rs` back to `[0; 32]` first, then the steps above) and release. Companions built with the old key refuse that release, so their users have to download the new `t3wow.exe` by hand once; say so in the release notes.
-- **Leaked**: the same, as soon as possible. Until those companions are replaced, whoever has the key can sign an update they'd install, provided they can also publish a release where those companions look: on this repository (which takes a maintainer's account, or a workflow run with `contents: write`) or, for companions up to 0.10.0, on `t3wow-releases` (which takes `RELEASES_TOKEN` or your GitHub account).
+- **Leaked**: the same, as soon as possible. Until those companions are replaced, whoever has the key can sign an update they'd install, provided they can also publish a release where those companions look: on this repository (which takes a maintainer's account, or a workflow run with `contents: write`) or, for companions up to 0.10.0, on the archived `t3wow-releases` (which takes your GitHub account, to unarchive it).
 - **Planned rotation** would need the companion to accept a list of keys, and the workflow to sign with the old key a release that embeds the new one. That's a small change to make before it's needed, not now.
 
 ## Authenticode
@@ -335,6 +335,6 @@ Then set the two secrets from the new `.p12` (`base64 -i "T3 WoW Self-Signed.p12
 - [ ] Mac app: `T3WOW_MACOS_CERT_P12`, `T3WOW_MACOS_CERT_PASSWORD` and the `T3WOW_CODESIGN_IDENTITY` variable are set.
 - [ ] Bump the version in the three files and push the tag.
 - [ ] In the run: **Release key** says the key matches.
-- [ ] On the release (and on `t3wow-releases` while the bridge runs): `t3wow.exe.sha256.sig` is there.
+- [ ] On the release: `t3wow.exe.sha256.sig` is there.
 - [ ] In the run: **The app is this version** passed, so the Mac app's requirement names the certificate.
 - [ ] From a 0.5.0 companion, **Update to x.y.z** installs it. After the update, a forged release (for instance, the same release with its `.sig` removed, on a test repository through `T3WOW_UPDATE_REPO` in a debug build) is refused.

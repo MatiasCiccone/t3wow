@@ -18,9 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// Releases are published in the source repository. Companions up to 0.10.0 read
-// MatiasCiccone/t3wow-releases instead, where releases went while this repository was private,
-// so the Release workflow publishes to both until that one is archived.
+// Releases are published in the source repository.
 const REPO: &str = "MatiasCiccone/t3wow";
 /// The most a program download may be: t3wow.exe, or the zipped app (the same program,
 /// compressed, plus a few kilobytes of Info.plist, icon and signature), both about 10 MB.
