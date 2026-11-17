@@ -4832,9 +4832,14 @@ UI.Fade = {
     held = false, -- opened while moving or fighting: no fading until that stops
 }
 
+-- In combat the game keeps your speed secret, and comparing a secret value is an error: then
+-- it counts as standing still, and In combat decides.
 function UI.Fade.Moving()
     if UnitOnTaxi and UnitOnTaxi("player") then return false end
-    return GetUnitSpeed ~= nil and (GetUnitSpeed("player") or 0) > 0
+    if not GetUnitSpeed then return false end
+    local speed = GetUnitSpeed("player")
+    if issecretvalue and issecretvalue(speed) then return false end
+    return (speed or 0) > 0
 end
 
 function UI.Fade.InCombat()
@@ -5467,18 +5472,31 @@ end)
 
 frame:SetScript("OnShow", function()
     restoreLayout()
+    UI.diedOpen = nil
     UI.Fade.Opened()
     -- The companion looks for Ctrl+V (Cmd+V on a Mac) only while this window is open.
     ns.Link.Send({ t = "ui", o = true })
     scrollToEnd = true -- reopening the window also lands on the latest message
     UI.Refresh()
 end)
-frame:SetScript("OnHide", function() ns.Link.Send({ t = "ui", o = false }) end)
+frame:SetScript("OnHide", function()
+    -- Dying closes every window (the game's CloseAllWindows): this one opens again after.
+    UI.diedOpen = UnitIsDead ~= nil and UnitIsDead("player") or nil
+    ns.Link.Send({ t = "ui", o = false })
+end)
 
 -- The mouse's side buttons, with the pointer on the window. This is the game-wide click
 -- event because the rows and the message box keep clicks from the window's OnMouseDown.
 frame:RegisterEvent("GLOBAL_MOUSE_DOWN")
-frame:SetScript("OnEvent", function(_, _, mouse)
+-- Alive again, after dying closed the window: resurrected before releasing (PLAYER_ALIVE,
+-- which releasing to a ghost fires too) or back in your body after (PLAYER_UNGHOST).
+frame:RegisterEvent("PLAYER_ALIVE")
+frame:RegisterEvent("PLAYER_UNGHOST")
+frame:SetScript("OnEvent", function(_, event, mouse)
+    if event ~= "GLOBAL_MOUSE_DOWN" then
+        if UI.diedOpen and not UnitIsDeadOrGhost("player") then frame:Show() end
+        return
+    end
     local step = (mouse == "Button4" and -1) or (mouse == "Button5" and 1)
     if not step or not frame:IsVisible() or not frame:IsMouseOver() then return end
     if T3WoWPictureZoom and T3WoWPictureZoom:IsShown() then return end -- it covers the window

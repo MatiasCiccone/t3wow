@@ -2076,13 +2076,26 @@ return "ok"
 `);
 });
 
-// The player, as the fade reads it: moving (speed), on a flight path, in combat.
+// The player, as the fade reads it: moving (speed), on a flight path, in combat, dead (a
+// corpse) or a ghost. In combat the game keeps the speed secret, as WoW: Forever's client does.
 const PLAYER = `
-speed, onTaxi, inCombat = 0, false, false
-function GetUnitSpeed(unit) return unit == "player" and speed or 0 end
+speed, onTaxi, inCombat, dead, ghost = 0, false, false, false, false
+function GetUnitSpeed(unit)
+  if unit ~= "player" then return 0 end
+  if inCombat then return secret() end
+  return speed
+end
 function UnitOnTaxi() return onTaxi end
 function InCombatLockdown() return inCombat end
-function UnitAffectingCombat() return inCombat end`;
+function UnitAffectingCombat() return inCombat end
+function UnitIsDead() return dead end
+function UnitIsDeadOrGhost() return dead or ghost end
+-- Dying as the game does it: the character drops, combat ends, and every window closes.
+function die()
+  dead, inCombat = true, false
+  CloseAllWindows()
+  fire("PLAYER_DEAD")
+end`;
 // Nobody typing in the window, the pointer off it.
 const FADE_HELPERS = `
 rawset(composer(), "HasFocus", function() return false end)
@@ -2180,6 +2193,64 @@ T3WoWDB.settings.fadeCombat = false
 inCombat = true
 tick(1)
 assert(alpha() == 1, "hid with In combat off: " .. alpha())
+return "ok"
+`, { before: PLAYER });
+});
+
+test("Dim dims the window in a fight, where the game keeps your speed secret, and it comes back after", () => {
+  run(`${FADE_HELPERS}
+T3WoWDB.settings.fade = "dim"
+assert(T3WoWFrame:IsShown(), "the window isn't open")
+-- Running dims it; a mob aggroes as you stop, and the speed turns secret.
+speed = 7
+tick(1)
+assert(alpha() == 0.35, "running didn't dim it: " .. alpha())
+speed = 0
+tick(0.5)
+assert(alpha() == 1, "stopping didn't bring it back: " .. alpha())
+inCombat = true
+tick(1)
+assert(alpha() == 0.35, "not dimmed in combat: " .. alpha())
+inCombat = false
+tick(0.5)
+assert(alpha() == 1, "didn't come back after combat: " .. alpha())
+-- While moving alone: a fight with a secret speed leaves it whole, without an error.
+T3WoWDB.settings.fadeCombat = false
+inCombat = true
+tick(1)
+assert(alpha() == 1, "dimmed in combat with In combat off: " .. alpha())
+return "ok"
+`, { before: PLAYER });
+});
+
+test("the window that dying closed opens again once you're alive, whole; one you closed stays closed", () => {
+  run(`${FADE_HELPERS}
+T3WoWDB.settings.fade = "dim"
+inCombat = true
+tick(1)
+assert(alpha() == 0.35, "not dimmed in combat: " .. alpha())
+die()
+assert(not T3WoWFrame:IsShown(), "dying should close it, as it closes every window")
+tick(1)
+-- Released: a ghost is still dead, so it waits.
+dead, ghost = false, true
+fire("PLAYER_ALIVE")
+assert(not T3WoWFrame:IsShown(), "opened while a ghost")
+ghost = false
+fire("PLAYER_UNGHOST")
+assert(T3WoWFrame:IsShown(), "didn't open again after resurrecting at the corpse")
+assert(alpha() == 1, "opened faded: " .. alpha())
+-- Resurrected by someone before releasing.
+die()
+dead = false
+fire("PLAYER_ALIVE")
+assert(T3WoWFrame:IsShown(), "didn't open again after a resurrect before releasing")
+-- Closed before dying: it stays closed.
+UI.Toggle()
+die()
+dead = false
+fire("PLAYER_ALIVE")
+assert(not T3WoWFrame:IsShown(), "opened a window you had closed")
 return "ok"
 `, { before: PLAYER });
 });
