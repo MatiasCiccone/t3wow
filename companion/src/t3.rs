@@ -231,6 +231,9 @@ fn is_hosted_page(redirect: Option<&str>) -> bool {
 /// companion's own token comes from the page's approval and needs none.
 const DEVICE_APPROVAL_NOTE: &str = "If the page says it could not reach that environment through T3 Connect, the T3 there may require approval for new devices: approve this browser in T3 on that machine under Settings > Sharing & access > T3 Connect devices, then reload the page.";
 
+/// The same after the wait ran out: the sign-in has ended, so a reload can't finish it.
+const DEVICE_APPROVAL_TIMED_OUT_NOTE: &str = "If T3 Connect's page said it could not reach that environment, the T3 there may require approval for new devices: approve this browser in T3 on that machine under Settings > Sharing & access > T3 Connect devices, then sign in again.";
+
 /// Said after a sign-in that can only read, and on the tray menu and the game's top line
 /// while it's the one in use.
 pub const READ_ONLY_NOTE: &str =
@@ -528,7 +531,7 @@ const TIMED_OUT: &str = "Timed out waiting for approval (10 min).";
 /// A wait on T3 Connect's page that ran out may be a browser waiting for device approval on the
 /// host, or denied it: neither brings anything back, so the timeout says what to check.
 fn with_device_approval_note(error: String, redirect: Option<&str>) -> String {
-    if error == TIMED_OUT && is_hosted_page(redirect) { format!("{error} {DEVICE_APPROVAL_NOTE}") } else { error }
+    if error == TIMED_OUT && is_hosted_page(redirect) { format!("{error} {DEVICE_APPROVAL_TIMED_OUT_NOTE}") } else { error }
 }
 
 fn parse_event_stream(text: &str, id: u64) -> Option<Value> {
@@ -797,6 +800,8 @@ mod tests {
         let timed_out = wait_for_code(&listener, "s", Duration::ZERO, &|| false).unwrap_err();
         let hosted = with_device_approval_note(timed_out.clone(), Some("https://app.t3.codes/approve-agent?x=1"));
         assert!(hosted.starts_with(TIMED_OUT) && hosted.contains("T3 Connect devices"), "{hosted}");
+        // That sign-in has ended, so reloading the page can't finish it.
+        assert!(hosted.ends_with("then sign in again.") && !hosted.contains("reload"), "{hosted}");
         assert_eq!(with_device_approval_note(timed_out, Some("/connect-agent?x=1")), TIMED_OUT);
         let cancelled = "Sign-in cancelled.".to_string();
         assert_eq!(with_device_approval_note(cancelled.clone(), Some("https://app.t3.codes/approve-agent")), cancelled);
