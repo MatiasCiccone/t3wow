@@ -154,12 +154,14 @@ fn fake_and_live_differ(calls: &[(String, Value, Value)]) -> Vec<String> {
 }
 
 /// A checkpoint for the replay: after loading inbox `file` (and those before it), the addon
-/// shows thread `id` with each of `texts` on screen, and each of `buttons`.
+/// shows thread `id` with each of `texts` on screen, each of `previews` under a question's
+/// option, and each of `buttons`.
 #[derive(Serialize)]
 struct Checkpoint {
     label: String,
     file: String,
     id: String,
+    previews: Vec<String>,
     texts: Vec<String>,
     buttons: Vec<String>,
 }
@@ -379,9 +381,14 @@ impl Live {
             label: label.into(),
             file,
             id: id.into(),
+            previews: Vec::new(),
             texts: texts.iter().map(|t| t.to_string()).collect(),
             buttons: buttons.iter().map(|b| b.to_string()).collect(),
         });
+        self.save_checkpoints();
+    }
+
+    fn save_checkpoints(&self) {
         let json = serde_json::to_string_pretty(&self.checkpoints).unwrap();
         std::fs::write(self.dir.join("checkpoints.json"), json).unwrap();
     }
@@ -551,14 +558,14 @@ fn live_stop_ends_a_run() {
     }
 }
 
-/// An agent's question shows in the game, and the answer picked there reaches the agent,
-/// with what was typed in the box as a note on the pick.
+/// An agent's question shows in the game, each option's preview under it, and the answer
+/// picked there reaches the agent, with what was typed in the box as a note on the pick.
 #[test]
 #[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
 fn live_an_answer_from_the_game_reaches_the_agent() {
     let mut live = Live::start("answer");
     let ask = "Use your tool for asking the user a question (AskUserQuestion) to ask me exactly one question, \
-               \"Which color?\", with two options: Red and Blue. Once I answer, reply with only the color I picked, in capitals, and do what a note in my answer says. \
+               \"Which color?\", with two options: Red, with the preview \".apple { color: red; }\", and Blue, with the preview \".sky { color: blue; }\". Once I answer, reply with only the color I picked, in capitals, and do what a note in my answer says. \
                Do not use any other tools.";
     let id = live.new_thread(ask);
     for attempt in 1..=TRIES {
@@ -570,8 +577,14 @@ fn live_an_answer_from_the_game_reaches_the_agent() {
         if asked.is_ok() && view["ask"].is_object() {
             let labels: Vec<String> = view["ask"]["qs"][0]["o"].as_array().into_iter().flatten().map(|o| str_of(&o["l"]).to_string()).collect();
             let blue = labels.iter().position(|l| l.eq_ignore_ascii_case("blue")).unwrap_or_else(|| panic!("no Blue among {labels:?}"));
-            // Its text is in your message too: the buttons are what only the question shows.
+            // T3 sends an option's preview only when the agent gave it one, as here.
+            let preview = str_of(&view["ask"]["qs"][0]["o"][blue]["p"]).to_string();
+            assert!(preview.contains("color: blue;"), "Blue's preview didn't reach the game: {:#}", view["ask"]);
+            // Its text is in your message too: the buttons and the preview are what only the
+            // question shows.
             live.checkpoint("an agent's question", &id, &[], &["Red", "Blue", "Submit answer"]);
+            live.checkpoints.last_mut().unwrap().previews.push(preview);
+            live.save_checkpoints();
             // What was typed in the box goes with the pick, as the game sends it.
             let s = live.command(json!({ "t": "answer", "id": id, "k": view["ask"]["k"], "a": [[blue + 1, "Also say the word KIWI."]] }));
             live.expect_no_failure(s);
