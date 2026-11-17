@@ -190,7 +190,7 @@ fn status_and_json(response: Result<ureq::http::Response<ureq::Body>, ureq::Erro
 const OPERATE_SCOPE: &str = "orchestration:operate";
 
 /// Whether a token T3 granted `scope` (space-separated, as its token response says) can
-/// change threads. T3 Code 0.18.0's Read only level grants `orchestration:read` alone;
+/// change threads. T3 Code 0.1.8's Read only level grants `orchestration:read` alone;
 /// Supervised through Auto add `orchestration:operate`, and Full access more on top.
 pub fn scope_can_operate(scope: &str) -> bool {
     scope.split_whitespace().any(|s| s == OPERATE_SCOPE)
@@ -225,7 +225,7 @@ fn is_hosted_page(redirect: Option<&str>) -> bool {
     path.trim_end_matches('/').ends_with("/approve-agent")
 }
 
-/// T3 Code 0.110.0 can require approval for new T3 Connect devices (off by default). The
+/// T3 Code 0.1.10 can require approval for new T3 Connect devices (off by default). The
 /// hosted page reaches the environment as a T3 Connect device, so a browser that machine doesn't
 /// trust yet waits for approval there, and the page only says it couldn't reach it. The
 /// companion's own token comes from the page's approval and needs none.
@@ -672,7 +672,7 @@ impl McpClient {
     }
 }
 
-/// What a tool's refusal says: T3 Code 0.110.0 sends it as JSON (`{"_tag": …, "code": …,
+/// What a tool's refusal says: T3 Code 0.1.10 sends it as JSON (`{"_tag": …, "code": …,
 /// "message": …}`), and only its message reads as a sentence.
 fn tool_error(text: &str) -> String {
     serde_json::from_str::<Value>(text).ok().and_then(|v| v["message"].as_str().map(str::to_string)).unwrap_or_else(|| text.to_string())
@@ -781,13 +781,13 @@ mod tests {
 
     #[test]
     fn the_sign_in_note_follows_the_page_t3_sends_the_browser_to() {
-        // T3 Code 0.19.0 sends a sign-in on a T3 Connect address to its hosted page, which starts
+        // T3 Code 0.1.9 sends a sign-in on a T3 Connect address to its hosted page, which starts
         // with no access picked; any other keeps the environment's page, where no code means Read only.
         let hosted = approval_notes(Some("https://app.t3.codes/approve-agent?response_type=code&client_id=c&environment=e"));
         assert!(hosted[0].contains("no access picked"), "{}", hosted[0]);
         assert!(!hosted.concat().contains("Read only when"), "{hosted:?}");
         assert!(approval_notes(Some("https://nightly.app.t3.codes/approve-agent/?x=1"))[0].contains("T3 Connect"));
-        // T3 Code 0.110.0 can make that page's browser wait for device approval on the host.
+        // T3 Code 0.1.10 can make that page's browser wait for device approval on the host.
         assert!(hosted[1].contains("Settings > Sharing & access > T3 Connect devices"), "{}", hosted[1]);
         for local in [Some("/connect-agent?response_type=code"), Some("http://127.0.0.1:3773/connect-agent"), None] {
             let notes = approval_notes(local);
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn a_timeout_on_t3_connects_page_names_device_approval() {
-        // A browser waiting for T3 Code 0.110.0's device approval, or denied it, never calls back.
+        // A browser waiting for T3 Code 0.1.10's device approval, or denied it, never calls back.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let timed_out = wait_for_code(&listener, "s", Duration::ZERO, &|| false).unwrap_err();
         let hosted = with_device_approval_note(timed_out.clone(), Some("https://app.t3.codes/approve-agent?x=1"));
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn the_authorize_step_is_read_without_following_its_redirect() {
-        // As T3 Code 0.19.0 answers an authorize request that came in on a T3 Connect address.
+        // As T3 Code 0.1.9 answers an authorize request that came in on a T3 Connect address.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let t3 = std::thread::spawn(move || {

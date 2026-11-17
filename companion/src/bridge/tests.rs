@@ -180,7 +180,7 @@ impl T3 for FakeT3 {
             }
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
-            // As T3 Code 0.110.0 refuses a new worktree for a project whose folder isn't in
+            // As T3 Code 0.1.10 refuses a new worktree for a project whose folder isn't in
             // a Git repository (it looks on disk), before making a thread.
             "t3_thread_launch" if args["workspaceStrategy"]["type"] == "worktree" && self.not_a_repository(&args) => {
                 let env = args["environmentId"].as_str().unwrap_or("local");
@@ -1166,7 +1166,7 @@ fn an_approval_shows_as_approve_in_t3_and_the_game_can_open_t3_on_it() {
 }
 
 /// A working thread's latest activity while its agent waits on a secret card, in the shapes
-/// T3 0.18.0 returns (see the probe in the commit log): T3's list says "running" and its
+/// T3 0.1.8 returns (see the probe in the commit log): T3's list says "running" and its
 /// pending count is 0; only the card's item says it waits.
 fn secret_card_activity(card_status: &str) -> Vec<Value> {
     vec![
@@ -2091,7 +2091,7 @@ fn new_thread_starts_in_a_new_worktree_or_the_checkout_and_defaults_as_t3_does()
 
 #[test]
 fn a_project_that_isnt_a_git_repository_starts_only_in_its_folder() {
-    // As T3 Code 0.110.0 lists them: a repository by its remote, a plain folder (or a
+    // As T3 Code 0.1.10 lists them: a repository by its remote, a plain folder (or a
     // repository without a remote) with none.
     let dir = std::env::temp_dir().join(format!("t3wow-norepo-{}", std::process::id()));
     let (plain, local_repo) = (dir.join("plain"), dir.join("local-repo"));
@@ -2189,14 +2189,13 @@ fn an_older_t3_code_on_this_server_is_said_in_the_tray_and_the_game() {
     rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.8"), ("mac".to_string(), "0.1.7")]);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
     rig.bridge.tick();
-    let older = rig.bridge.status().older_t3.expect("T3 Code 0.18.0 is older than this release is made for");
-    assert_eq!(older.running, "0.18.0");
+    let older = rig.bridge.status().older_t3.expect("T3 Code 0.1.8 is older than this release is made for");
+    assert_eq!(older.running, "0.1.8");
     assert_eq!(rig.bridge.snapshot()["t3u"], json!(older.line()));
     assert_eq!(rig.bridge.snapshot()["t3s"], json!(format!("Update T3 Code to {}", crate::made_for::T3_CODE)));
 
     // Updated to the T3 Code it's made for: nothing more to say.
-    let made_for = crate::made_for::T3_CODE.strip_prefix("0.1").and_then(|rest| rest.strip_suffix(".0")).map(|n| format!("0.1.{n}")).unwrap();
-    rig.t3.versions.lock().unwrap().insert("local".to_string(), Box::leak(made_for.into_boxed_str()));
+    rig.t3.versions.lock().unwrap().insert("local".to_string(), crate::made_for::T3_CODE);
     rig.advance(61_000);
     rig.bridge.tick();
     assert_eq!(rig.bridge.status().older_t3, None);
@@ -2316,7 +2315,7 @@ fn a_working_thread_says_when_its_run_started_from_one_read_per_run() {
 #[test]
 fn a_row_ages_from_its_last_run_or_when_it_was_settled_as_in_t3() {
     let mut rig = Rig::new(34_000_000);
-    // Touched long after its last run ended (a sweep, a pull request linked): T3 0.18 ages
+    // Touched long after its last run ended (a sweep, a pull request linked): T3 0.1.8 ages
     // the row from the run, not from updatedAt.
     *rig.t3.threads.lock().unwrap() = vec![
         json!({ "threadId": "t1", "projectId": "p1", "title": "Replied", "status": "completed", "latestRunId": "r1", "updatedAt": "2026-11-06T10:57:00.000Z" }),
@@ -3114,7 +3113,7 @@ fn an_image_a_message_embeds_from_a_file_follows_that_message() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An html_render call that passed a file, as T3 0.18's activity shows it: its result names
+/// An html_render call that passed a file, as T3 0.1.8's activity shows it: its result names
 /// the snapshot T3 saved.
 fn path_call(title: &str, path: &std::path::Path, attachment: &str) -> String {
     let render = json!({ "htmlRender": { "attachmentId": attachment, "title": title, "height": 120 }, "message": "Shown to the reader above your reply." });
@@ -4215,7 +4214,7 @@ fn clear_starts_a_fresh_session_on_the_signed_in_t3() {
     for item in items {
         println!("{} {}: {}", item["position"], item["type"], str_of(&item["text"]));
     }
-    // Whether T3's read marks the fresh message itself (T3 Code 0.19.0 doesn't).
+    // Whether T3's read marks the fresh message itself (T3 Code 0.1.9 doesn't).
     println!("marked: {}", items.iter().chain(read["recentRuns"].as_array().unwrap()).any(|i| i.get("freshContext").is_some()));
     let lines: Vec<&str> = view["items"].as_array().unwrap().iter().filter(|i| i["ns"] == 1).map(|i| str_of(&i["x"])).collect();
     assert_eq!(lines, vec!["What word did I ask you to remember? If you don't know, reply with just NONE."], "{view}");
@@ -4822,7 +4821,7 @@ fn back_to_back_messages_sent_into_a_turn_split_it_once_after_the_last() {
 
 #[test]
 fn durations_read_as_t3_says_them() {
-    // Seconds show whenever minutes do (T3 0.19.0); hours alone stay bare.
+    // Seconds show whenever minutes do (T3 0.1.9); hours alone stay bare.
     for (seconds, said) in [
         (22, "22s"),
         (59, "59s"),

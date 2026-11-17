@@ -2,13 +2,11 @@
 
 T3 WoW says which T3 Code it's made for: `t3Code` in `package.json` is the one place that version is set. The companion is built with it (it suggests updating a T3 that runs an older one), and `npm test` checks that the README and `assets/curseforge-description.md` say the same. Before that changes, compare what the new T3 changed with what the companion relies on: `npm run test:live` catches changed tool inputs and answers, but not a change in what the same inputs do.
 
-**Version names:** T3's GitHub tags and the `serverVersion` that `t3_environment_read` reports read `0.1.N`; this project's docs write that as `0.1N.0` (tag `v0.1.8` is T3 Code 0.18.0).
-
 ## 1. Read the release notes
 
 Read T3 Code's GitHub release notes for every tag since the one T3 WoW is made for. Most of the changes won't touch T3 WoW; look for these:
 
-- **The tools the companion calls or reads** (`WATCHED_TOOLS` in `companion/src/bridge/tests/live.rs`): new or removed inputs, new values, and a different result from the same inputs. `html_render` isn't among them: the companion doesn't call it but reads its calls from the timeline, where its input becomes a picture, and since 0.110.0 T3 lists it only to agents in a thread (`PAGE_INPUTS` in the same file has the inputs the companion reads).
+- **The tools the companion calls or reads** (`WATCHED_TOOLS` in `companion/src/bridge/tests/live.rs`): new or removed inputs, new values, and a different result from the same inputs. `html_render` isn't among them: the companion doesn't call it but reads its calls from the timeline, where its input becomes a picture, and since 0.1.10 T3 lists it only to agents in a thread (`PAGE_INPUTS` in the same file has the inputs the companion reads).
 - **What the companion reads from a thread's timeline:** the item types (matched on `item["type"]` in `companion/src/bridge.rs`, e.g. `FoundWork::from_item`, `waiting_card` and `read_view_scan`), `html_render`'s input and `AskUserQuestion`'s output.
 - **Sign-in:** the OAuth flow, scopes, access levels, and what the approval page grants by default.
 - **Threads:** statuses, pending requests (questions, approvals, secrets), snooze and settle rules.
@@ -16,7 +14,7 @@ Read T3 Code's GitHub release notes for every tag since the one T3 WoW is made f
 - **What T3 now handles itself:** slash commands, send flags.
 - **What the game copies from T3's window:** list rows, labels, ages.
 
-Example: in 0.18.0, approving the sign-in with the code box left empty grants Read only. No schema changed, but a new sign-in can no longer send messages. Only the release notes show that.
+Example: in 0.1.8, approving the sign-in with the code box left empty grants Read only. No schema changed, but a new sign-in can no longer send messages. Only the release notes show that.
 
 ## 2. Run the live tests
 
