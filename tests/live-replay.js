@@ -41,6 +41,13 @@ local function agentSays(text)
   end
   return false
 end
+-- Whether a string on the question's card (it has no bubble) shows \`text\` as given.
+local function cardShows(text)
+  for _, fs in ipairs(fontStrings) do
+    if rawget(fs, "bubble") == nil and not fs.hidden and fs.text == text then return true end
+  end
+  return false
+end
 local function button(text)
   for _, f in ipairs(frames) do
     if f.kind == "Button" and f.shown and (f.text == text or rawget(f, "tip") == text) then return f end
@@ -79,6 +86,9 @@ for i, name in ipairs(FILES) do
         end
         error(check.label .. " (" .. name .. "): no message from the agent says " .. text .. "; the window shows:\\n  " .. table.concat(shown, "\\n  "))
       end
+    end
+    for _, text in ipairs(check.previews) do
+      assert(cardShows(text), check.label .. " (" .. name .. "): no option's preview shows " .. text)
     end
     for _, text in ipairs(check.buttons) do
       assert(button(text), check.label .. " (" .. name .. "): no " .. text .. " button")
