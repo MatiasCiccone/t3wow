@@ -51,6 +51,18 @@ fn is_scan(args: &Value) -> bool {
     args["view"] == "activity" && args["limit"] != CARD_LOOKBACK
 }
 
+/// A thread as T3 0.1.10 lists or reads it: only its open pull requests, with how many are
+/// linked and how many open beside them. `list_thread_pull_requests` still gives them all.
+fn as_t3_lists(mut thread: Value) -> Value {
+    if let Some(prs) = thread["pullRequests"].as_array().cloned() {
+        let open: Vec<Value> = prs.iter().filter(|pr| pull_request_open(pr)).cloned().collect();
+        thread["pullRequestCount"] = json!(prs.len());
+        thread["openPullRequestCount"] = json!(open.len());
+        thread["pullRequests"] = json!(open);
+    }
+    thread
+}
+
 /// An item's text cut to `max` chars from `offset`, as T3 cuts it.
 fn cut_text(item: &mut Value, max: usize, offset: usize) {
     let text: Vec<char> = str_of(&item["text"]).chars().collect();
@@ -175,7 +187,7 @@ impl T3 for FakeT3 {
                         pr
                     })
                     .collect();
-                json!({ "pullRequests": prs })
+                json!({ "pullRequests": prs, "nextCursor": null })
             }
             // As T3 answers: an id and an address that carries its own permission.
             "t3_attachment_prepare_upload" => {
@@ -213,7 +225,7 @@ impl T3 for FakeT3 {
                 assert!(limit <= 100, "T3 refuses a limit over 100");
                 let cursor = args["cursor"].as_u64().unwrap_or(0) as usize;
                 let total = threads.len();
-                let page: Vec<Value> = threads.into_iter().skip(cursor).take(limit).collect();
+                let page: Vec<Value> = threads.into_iter().skip(cursor).take(limit).map(as_t3_lists).collect();
                 let next = (cursor + page.len() < total).then_some(cursor + page.len());
                 json!({ "threads": page, "nextCursor": next, "total": total })
             }
@@ -222,7 +234,7 @@ impl T3 for FakeT3 {
                 let text = self.item_texts.lock().unwrap().get(&id).cloned().unwrap_or_default();
                 let mut item = json!({ "position": 1, "itemId": id, "type": "dynamic_tool", "status": "completed", "text": text });
                 cut_text(&mut item, args["maxCharsPerItem"].as_u64().unwrap_or(50_000) as usize, args["textOffset"].as_u64().unwrap_or(0) as usize);
-                json!({ "thread": self.thread(&args["threadId"]), "items": [item], "hasMore": false })
+                json!({ "thread": as_t3_lists(self.thread(&args["threadId"])), "items": [item], "hasMore": false })
             }
             "t3_thread_read" if args["view"].is_string() => {
                 // Messages (or activity) after afterPosition, a page at a time; with none, the newest page.
@@ -258,13 +270,13 @@ impl T3 for FakeT3 {
                 let rest: Vec<Value> = all.into_iter().filter(|m| m["position"].as_i64().unwrap() > after).collect();
                 let page: Vec<Value> = rest.iter().take(limit).cloned().collect();
                 json!({
-                    "thread": self.thread(&args["threadId"]),
+                    "thread": as_t3_lists(self.thread(&args["threadId"])),
                     "items": page,
                     "hasMore": rest.len() > limit,
                     "nextPosition": page.last().map(|m| m["position"].clone()),
                 })
             }
-            "t3_thread_read" => json!({ "thread": self.thread(&args["threadId"]), "recentRuns": *self.runs.lock().unwrap(), "items": [], "hasMore": false }),
+            "t3_thread_read" => json!({ "thread": as_t3_lists(self.thread(&args["threadId"])), "recentRuns": *self.runs.lock().unwrap(), "items": [], "hasMore": false }),
             // Pending questions, in the shape T3 returns (see the probe in the commit log): a
             // second question in the same run lists after the first, which stays pending.
             "t3_pending_request" => match args["action"].as_str() {
@@ -576,6 +588,48 @@ fn the_open_thread_lists_its_pull_requests_and_the_game_can_open_only_those() {
 }
 
 #[test]
+fn merged_and_closed_pull_requests_show_though_t3_lists_only_open_ones() {
+    let mut rig = Rig::new(3_100_000);
+    *rig.t3.links.lock().unwrap() = json!([]);
+    let github = |number: u64, state: &str| json!({ "number": number, "state": state, "url": format!("https://github.com/o/r/pull/{number}") });
+    rig.t3.set("completed", "2026-11-06T10:00:00Z");
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"] = json!([github(41, "merged"), github(42, "closed")]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let links = json!([
+        { "n": "#41", "s": "merged", "u": "https://github.com/o/r/pull/41" },
+        { "n": "#42", "s": "closed", "u": "https://github.com/o/r/pull/42" },
+    ]);
+    let snapshot = rig.bridge.snapshot();
+    let row = snapshot["threads"].as_array().unwrap().iter().find(|t| t["e"] == 1 && t["id"] == "t1").unwrap().clone();
+    assert_eq!((row["pr"].clone(), row["ps"].clone()), (json!("#42 +1"), json!("closed")), "the row");
+    assert_eq!(row["prs"], links, "the row's links");
+    // The header, and the numbers a message names, color from the view's links.
+    assert_eq!(snapshot["view"]["prs"], links, "the open thread");
+    assert_eq!(rig.t3.calls_to("list_thread_pull_requests").len(), 1);
+
+    // Nothing changed: not read again.
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("list_thread_pull_requests").len(), 1);
+    assert_eq!(rig.bridge.snapshot()["view"]["prs"], links);
+
+    // Another PR opens, and the run ends: the watch check's read fills the merged ones too.
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"].as_array_mut().unwrap().push(github(43, "open"));
+    rig.t3.set("completed", "2026-11-06T10:01:00Z");
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("list_thread_pull_requests").len(), 2, "one read for the watch and the merged PRs");
+    assert_eq!(rig.bridge.snapshot()["view"]["prs"].as_array().unwrap().len(), 3);
+
+    // It merges without the thread changing: T3's counts move, so it's read again.
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"][2]["state"] = json!("merged");
+    rig.advance(5000);
+    rig.bridge.tick();
+    assert_eq!(rig.bridge.snapshot()["view"]["prs"][2], json!({ "n": "#43", "s": "merged", "u": "https://github.com/o/r/pull/43" }));
+}
+
+#[test]
 fn the_list_follows_t3s_sidebar() {
     let mut rig = Rig::new(3_000_000);
     rig.t3.threads.lock().unwrap().extend([
@@ -863,9 +917,12 @@ fn a_thread_watching_its_pull_request_shows_as_watching_and_notifies_when_the_wa
     assert!(latest.contains("id=\"t1\",t=\"Fix tests\",s=\"completed\""), "{latest}");
     assert!(latest.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"completed\"}"), "an alert: {latest}");
 
-    // Merged: nothing left to watch, so it isn't asked.
+    // Merged: nothing left to watch, so it isn't asked again once its merged PR is read
+    // (on each machine), which T3's list leaves out.
     rig.t3.threads.lock().unwrap()[0]["pullRequests"] = json!([{ "number": 31, "state": "merged" }]);
     rig.t3.set("completed", "2026-11-06T10:05:00Z");
+    rig.advance(WATCH_RECHECK_MS);
+    rig.bridge.tick();
     let asked = rig.t3.calls_to("list_thread_pull_requests").len();
     rig.advance(WATCH_RECHECK_MS);
     rig.bridge.tick();

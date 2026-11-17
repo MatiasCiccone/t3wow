@@ -125,6 +125,21 @@ fn pull_request_open(pr: &Value) -> bool {
     !matches!(str_of(&pr["state"]), "merged" | "closed")
 }
 
+/// Whether T3 left some of a thread's pull requests out of its list: since T3 Code 0.1.10 a
+/// thread list or read carries only the open ones, with how many are linked beside them.
+fn lists_some_pull_requests(thread: &Value) -> bool {
+    let listed = thread["pullRequests"].as_array().map_or(0, Vec::len);
+    thread["pullRequestCount"].as_u64().is_some_and(|count| count > listed as u64)
+}
+
+/// What a read of a thread's whole pull request list holds for as long as it's unchanged:
+/// its updatedAt (an agent linked one), how many are linked and which are open (one merged
+/// or closed without touching the thread).
+fn pull_request_stamp(thread: &Value) -> String {
+    let open: Vec<String> = numbered_pull_requests(thread).iter().map(|pr| pr["number"].to_string()).collect();
+    format!("{}|{}|{}", str_of(&thread["updatedAt"]), thread["pullRequestCount"], open.join(","))
+}
+
 /// The pull requests linked to a thread that have a number to show.
 fn numbered_pull_requests(thread: &Value) -> Vec<&Value> {
     thread["pullRequests"].as_array().map_or_else(Vec::new, |prs| prs.iter().filter(|pr| pr["number"].is_u64()).collect())
@@ -885,6 +900,9 @@ pub struct Bridge {
     /// Whether threads with an open pull request watch it, keyed by thread: only T3's
     /// pull request list says so.
     watches: HashMap<String, Watch>,
+    /// Each thread's whole pull request list, by the stamp of the list it filled
+    /// (`pull_request_stamp`): T3's lists leave out the merged and closed ones.
+    pull_requests: HashMap<String, (String, Value)>,
     /// Where each agent-made thread came from, read once (again on a change, while undecided).
     launchers: HashMap<String, Origin>,
     /// Per machine, the threads the last read found waiting on a subagent.
@@ -1829,6 +1847,8 @@ enum Step {
     /// Which of its threads wait on a subagent still going.
     Delegates,
     Watch(usize),
+    /// The pull requests T3 left out of a thread's list.
+    PullRequests(usize),
     Launcher(usize),
     RunStart(usize),
     Activity(usize),
@@ -2016,6 +2036,7 @@ impl Bridge {
             unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
             watches: HashMap::new(),
+            pull_requests: HashMap::new(),
             listed_envs: HashSet::new(),
             launchers: HashMap::new(),
             delegating: HashMap::new(),
@@ -3001,6 +3022,7 @@ impl Bridge {
             Step::QuestionKind(i, read_at) => self.check_waiting_on(i, read_at),
             Step::Delegates => self.check_delegates(),
             Step::Watch(i) => self.check_watch(i),
+            Step::PullRequests(i) => self.fill_pull_requests(i),
             Step::Launcher(i) => self.find_launcher(i),
             Step::RunStart(i) => self.read_run_start(i),
             Step::Activity(i) => self.read_activity(i),
@@ -3146,6 +3168,7 @@ impl Bridge {
                 let mut steps: Vec<Step> = (0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::Question).collect();
                 steps.extend(threads.iter().any(run_over).then_some(Step::Delegates));
                 steps.extend((0..threads.len()).filter(|i| may_watch(&threads[*i])).map(Step::Watch));
+                steps.extend((0..threads.len()).filter(|i| lists_some_pull_requests(&threads[*i])).map(Step::PullRequests));
                 steps.extend((0..threads.len()).filter(|i| threads[*i]["createdBy"] == "agent").map(Step::Launcher));
                 steps.extend((0..threads.len()).filter(|i| working(str_of(&threads[*i]["status"]))).map(Step::RunStart));
                 steps.extend((0..threads.len()).filter(|i| ages_from_run(&threads[*i])).map(Step::Activity));
@@ -3312,6 +3335,10 @@ impl Bridge {
                 match self.client.call("list_thread_pull_requests", args) {
                     Ok(list) => {
                         let watching = list["pullRequests"].as_array().is_some_and(|prs| prs.iter().any(|pr| pr["watching"] == true));
+                        // The same list fills what T3's thread list left out.
+                        if let Some(stamp) = self.listed_mut().and_then(|l| l.threads.get(i)).map(pull_request_stamp) {
+                            self.pull_requests.insert(key.clone(), (stamp, list["pullRequests"].clone()));
+                        }
                         self.watches.insert(key, Watch { updated, read_at: now, watching });
                         watching
                     }
@@ -3327,6 +3354,31 @@ impl Bridge {
         if watching {
             if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
                 thread["status"] = json!(WATCHING);
+            }
+        }
+        Ok(())
+    }
+
+    /// A thread whose list left out some of its pull requests (the merged and closed ones,
+    /// since T3 Code 0.1.10) gets them all from T3's pull request list, as the watch check
+    /// reads it, read again only when the thread's list changes. Unread, it shows what T3 listed.
+    fn fill_pull_requests(&mut self, i: usize) -> Result<(), T3Error> {
+        let Some((env, id, _)) = self.listed_thread(i) else { return Ok(()) };
+        let Some(stamp) = self.listed_mut().and_then(|l| l.threads.get(i)).map(pull_request_stamp) else { return Ok(()) };
+        let key = format!("{env}:{id}");
+        if self.pull_requests.get(&key).is_none_or(|(known, _)| *known != stamp) && !self.out_of_time() {
+            let args = with_args(json!({ "threadId": id }), &self.env_arg(&env));
+            match self.client.call("list_thread_pull_requests", args) {
+                Ok(list) => {
+                    self.pull_requests.insert(key.clone(), (stamp.clone(), list["pullRequests"].clone()));
+                }
+                Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+                Err(T3Error::Other(message)) => self.log(&format!("pull requests ({key}): {message}")),
+            }
+        }
+        if let Some(prs) = self.pull_requests.get(&key).filter(|(known, _)| *known == stamp).map(|(_, prs)| prs.clone()) {
+            if let Some(thread) = self.listed_mut().and_then(|l| l.threads.get_mut(i)) {
+                thread["pullRequests"] = prs;
             }
         }
         Ok(())
@@ -3448,6 +3500,7 @@ impl Bridge {
         let ids: HashSet<String> = listed.threads.iter().map(|t| format!("{prefix}{}", str_of(&t["threadId"]))).collect();
         self.unlisted_misses.retain(|k, _| !k.starts_with(&prefix) || !ids.contains(k));
         self.watches.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
+        self.pull_requests.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         self.run_starts.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         self.activity.retain(|k, _| !k.starts_with(&prefix) || ids.contains(k));
         let gone: Vec<(String, String)> =
