@@ -245,3 +245,23 @@ assert(count() == 1, "the new T3 doesn't catch up")
 return "ok"
 `, { ui: true, db: SAVED(`["box:b1"] = "box"`) });
 });
+
+test("opening a thread another way dismisses its notifications, as clicking one does", () => {
+  // From the list, and from chat or a link (UI.OpenThread). Only that thread on that machine:
+  // the same thread id on another machine and other threads keep theirs.
+  for (const open of ["UI.Toggle() UI.Select(t1)", `UI.OpenThread("t1", "mac")`]) {
+    runGame(`${HELPERS}
+t1 = thread("t1", "waiting")
+update({ t1, thread("t2", "waiting"), thread("t1", "waiting", { e = 2 }) })
+assert(count() == 3, "notifications: " .. count())
+${open}
+assert(count() == 2, "still on screen: " .. count())
+for _, toast in ipairs(shownToasts()) do
+  assert(not (toast.threadId == "t1" and toast.envId == "mac"), "the opened thread's notification stayed")
+end
+assert(seen("mac:t1"), "not counted as seen")
+assert(not seen("box:t1") and not seen("mac:t2"), "another thread counted as seen")
+return "ok"
+`, { ui: true });
+  }
+});
