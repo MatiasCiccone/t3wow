@@ -33,6 +33,11 @@ fn signal_file(n: u32) -> String {
     format!("{n:04}.ttf")
 }
 
+/// What a slot's `Inbox.lua` holds when it carries no update. Never an empty file: the game
+/// shows a Lua warning for every empty Lua file it loads (to anyone with script errors
+/// shown). It doesn't set `T3WoW_Inbox`, which is how the addon tells a slot was empty.
+pub const BLANK_INBOX: &str = "-- No update here yet: the T3 WoW companion writes them into this file.\n";
+
 /// Loads the slot's `Inbox.lua`. Addon managers fingerprint a folder from its toc and the
 /// files those list, but follow only self-closing `<Script/>` tags. With this open tag they
 /// never reach `Inbox.lua`, so every slot keeps one fixed fingerprint whatever it holds.
@@ -356,7 +361,12 @@ impl Slots {
         for n in 1..=SLOT_COUNT {
             let dir = self.addons_dir.join(slot_name(n));
             fs::create_dir_all(&dir)?;
-            put(dir.join("Inbox.lua"), b"")?;
+            let inbox = dir.join("Inbox.lua");
+            put(inbox.clone(), BLANK_INBOX.as_bytes())?;
+            // Companions before BLANK_INBOX left a blank slot empty.
+            if fs::metadata(&inbox).is_ok_and(|m| m.len() == 0) {
+                write_whole(&inbox, BLANK_INBOX.as_bytes())?;
+            }
             // Before the toc, so a write that fails can't leave a toc listing a file that isn't there.
             put(dir.join("Slot.xml"), SLOT_XML.as_bytes())?;
             let toc = dir.join(format!("{}.toc", slot_name(n)));
@@ -543,8 +553,8 @@ impl SlotWriter for Slots {
     fn clear_slots(&mut self) {
         for n in 1..=SLOT_COUNT {
             let file = self.addons_dir.join(slot_name(n)).join("Inbox.lua");
-            if fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) {
-                let _ = write_whole(&file, b"");
+            if fs::read(&file).is_ok_and(|held| held != BLANK_INBOX.as_bytes()) {
+                let _ = write_whole(&file, BLANK_INBOX.as_bytes());
             }
         }
     }
@@ -892,6 +902,48 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Every Lua file under `dir` that is empty: the game warns about each one it loads.
+    fn empty_lua_files(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(empty_lua_files(&path));
+            } else if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("lua")) && fs::metadata(&path).unwrap().len() == 0 {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn no_lua_file_the_game_loads_is_ever_empty() {
+        let dir = temp_dir("no-empty-lua");
+        let mut slots = fixture_slots(&dir, "16001");
+        slots.install().unwrap();
+        assert_eq!(empty_lua_files(&dir), Vec::<PathBuf>::new(), "after an install");
+        assert_eq!(fs::read_to_string(slot_file(&dir, 1, "Inbox.lua")).unwrap(), BLANK_INBOX);
+        assert!(!BLANK_INBOX.contains("T3WoW_Inbox"), "a blank slot must read as empty to the addon");
+
+        // Slots an older companion left empty get the placeholder on the next start; a
+        // slot that holds an update keeps it.
+        for n in [1, 9, SLOT_COUNT] {
+            fs::write(slot_file(&dir, n, "Inbox.lua"), b"").unwrap();
+        }
+        slots.write_slot(5, "T3WoW_Inbox = { slot = 5 }").unwrap();
+        slots.repair().unwrap();
+        assert_eq!(empty_lua_files(&dir), Vec::<PathBuf>::new(), "after a repair");
+        assert_eq!(fs::read_to_string(slot_file(&dir, 9, "Inbox.lua")).unwrap(), BLANK_INBOX);
+        assert_eq!(fs::read_to_string(slot_file(&dir, 5, "Inbox.lua")).unwrap(), "T3WoW_Inbox = { slot = 5 }");
+
+        // Clearing the slots blanks them to the placeholder, and leaves one already blank alone.
+        fs::write(slot_file(&dir, 9, "Inbox.lua"), b"").unwrap();
+        slots.clear_slots();
+        assert_eq!(empty_lua_files(&dir), Vec::<PathBuf>::new(), "after clearing the slots");
+        assert_eq!(fs::read_to_string(slot_file(&dir, 5, "Inbox.lua")).unwrap(), BLANK_INBOX);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn clearing_the_slots_blanks_every_update_and_nothing_else() {
         let dir = temp_dir("clear-slots");
@@ -902,7 +954,7 @@ mod tests {
         slots.raise_signal(7).unwrap();
         slots.clear_slots();
         for n in [1, SLOT_COUNT] {
-            assert_eq!(fs::read_to_string(dir.join(slot_name(n)).join("Inbox.lua")).unwrap(), "");
+            assert_eq!(fs::read_to_string(dir.join(slot_name(n)).join("Inbox.lua")).unwrap(), BLANK_INBOX);
         }
         assert!(slots.installed());
         assert_eq!(fs::read(dir.join("T3WoW/sig/0007.ttf")).unwrap(), FIXTURE_FONT, "signals are another matter");
