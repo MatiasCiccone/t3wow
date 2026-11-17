@@ -128,6 +128,16 @@ impl FakeT3 {
     }
 }
 
+/// Why T3 refuses a call that has a top-level argument its tool doesn't declare, as T3 Code
+/// 0.1.10 and later do, going by the tools as recorded (`tests/fixtures/t3-tools.json`).
+fn undeclared_argument(name: &str, args: &Value) -> Option<String> {
+    static TOOLS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| serde_json::from_str(include_str!("../../tests/fixtures/t3-tools.json")).unwrap());
+    let inputs = TOOLS["tools"][name]["inputs"].as_object()?;
+    let unknown = args.as_object()?.keys().find(|k| !inputs.contains_key(*k))?;
+    let accepted: Vec<&str> = inputs.keys().map(String::as_str).collect();
+    Some(format!("Invalid parameters for tool '{name}': Unknown argument \"{unknown}\". Accepted arguments: {}.", accepted.join(", ")))
+}
+
 impl T3 for FakeT3 {
     fn call(&self, name: &str, args: Value) -> Result<Value, T3Error> {
         {
@@ -135,6 +145,9 @@ impl T3 for FakeT3 {
             calls.push((name.to_string(), args.clone()));
             let at = self.clock.lock().unwrap().as_ref().map_or(0, |clock| *clock.lock().unwrap());
             self.call_times.lock().unwrap().push(at);
+        }
+        if let Some(message) = undeclared_argument(name, &args) {
+            return Err(T3Error::Other(message));
         }
         if let (Some(ms), Some(clock)) = (self.delays.lock().unwrap().get(name), self.clock.lock().unwrap().as_ref()) {
             *clock.lock().unwrap() += ms;
@@ -3200,18 +3213,18 @@ fn a_paste_right_after_ctrl_v_in_wow_shows_above_the_box_and_goes_with_the_messa
     rig.advance(2000);
     press(&rig, &presses);
     rig.advance(300);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "paste", "d": "mac:t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "paste", "d": "local:t1" }] }));
     rig.bridge.tick();
     assert_eq!(outcome(&rig, 2), json!({ "s": 2, "ok": true }));
     // Its small picture is in an image slot, named to the game process.
     let att = rig.bridge.snapshot()["att"].clone();
-    assert_eq!(att, json!([{ "d": "mac:t1", "i": 1, "w": 1920, "h": 1080, "f": 1, "tw": 142, "th": 80, "bf": 2, "bw": 1024, "bh": 576 }]));
+    assert_eq!(att, json!([{ "d": "local:t1", "i": 1, "w": 1920, "h": 1080, "f": 1, "tw": 142, "th": 80, "bf": 2, "bw": 1024, "bh": 576 }]));
     assert!(rig.written.lock().unwrap().images.contains_key(&1));
     assert!(rig.bridge.link.images_shown.contains(&1));
-    assert!(rig.slot(2).contains("att={{d=\"mac:t1\",i=1,"), "{}", rig.slot(2));
+    assert!(rig.slot(2).contains("att={{d=\"local:t1\",i=1,"), "{}", rig.slot(2));
 
     // The message carries it: uploaded, then sent with T3's send for attachments.
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "send", "e": "mac", "id": "t1", "m": "what's this?" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 3, "t": "send", "e": "local", "id": "t1", "m": "what's this?" }] }));
     rig.bridge.tick();
     let prepared = rig.t3.calls_to("t3_attachment_prepare_upload");
     assert_eq!(prepared, vec![json!({ "upload": { "type": "image", "name": "pasted-image-1.png", "mimeType": "image/png", "sizeBytes": 5000 } })]);
@@ -3221,13 +3234,12 @@ fn a_paste_right_after_ctrl_v_in_wow_shows_above_the_box_and_goes_with_the_messa
         "threadId": "t1",
         "attachments": [{ "type": "image", "id": "pending-0", "name": "pasted-image-1.png", "mimeType": "image/png", "sizeBytes": 5000 }],
         "message": "what's this?",
-        "environmentId": "mac",
     })]);
     assert!(rig.t3.calls_to("t3_thread_send").is_empty());
     assert!(rig.bridge.snapshot()["att"].is_null(), "sent: no longer above the box");
 
     // The next message has none: an ordinary send.
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "thanks" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 4, "t": "send", "e": "local", "id": "t1", "m": "thanks" }] }));
     rig.bridge.tick();
     assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
     assert_eq!(rig.t3.calls_to("t3_thread_send_attachments").len(), 1);
@@ -3240,16 +3252,16 @@ fn a_sent_image_shows_under_its_own_message_and_not_under_older_words_like_it() 
     // The same words said long before, with no image.
     let old = json!({ "position": 0, "messageId": "old", "type": "user_message", "text": "look", "updatedAt": "1970-01-01T10:00:00Z" });
     rig.t3.messages.lock().unwrap().insert("t1".into(), vec![old.clone()]);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "local", "id": "t1" }] }));
     rig.bridge.tick();
     press(&rig, &presses);
     rig.advance(200);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "mac:t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "local:t1" }] }));
     rig.bridge.tick();
     assert_eq!(rig.bridge.snapshot()["att"][0]["bf"], 2);
 
     // Sent, but T3 doesn't show it yet: the older message doesn't take the picture.
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "look" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "local", "id": "t1", "m": "look" }] }));
     rig.bridge.tick();
     assert!(rig.bridge.snapshot()["att"].is_null());
     assert!(view_items(&rig).iter().all(|item| item["im"].is_null()), "{:?}", view_items(&rig));
@@ -3265,7 +3277,7 @@ fn a_sent_image_shows_under_its_own_message_and_not_under_older_words_like_it() 
     assert_eq!(items.len(), 3, "{items:?}");
     assert_eq!(items[2], json!({ "r": "u", "x": "[Pasted image]", "im": { "f": 2, "w": 1024, "h": 576, "sm": 1 } }));
     assert_eq!(rig.written.lock().unwrap().images.len(), written);
-    assert_eq!(rig.bridge.link.images[&2].key, "sent:mac:t1:mcp:new:0");
+    assert_eq!(rig.bridge.link.images[&2].key, "sent:local:t1:mcp:new:0");
 
     // A new game process still finds it: it's filed under the message now.
     rig.bridge.on_capture(CaptureMessage::Wow(Some("456@2".into())));
@@ -3281,13 +3293,13 @@ fn a_sent_image_whose_file_was_emptied_says_so_and_its_slot_is_never_named() {
     let (mut rig, presses) = paste_rig(60_000_000, 4, 4, 100);
     rig.bridge.set_painter(Some(Box::new(FakePainter::default())));
     rig.t3.messages.lock().unwrap().insert("t1".into(), Vec::new());
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "local", "id": "t1" }] }));
     rig.bridge.tick();
     press(&rig, &presses);
     rig.advance(200);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "mac:t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "local:t1" }] }));
     rig.bridge.tick();
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "local", "id": "t1", "m": "" }] }));
     rig.bridge.tick();
     let new = json!({ "position": 0, "messageId": "mcp:new", "type": "user_message", "text": "", "updatedAt": "1970-01-01T16:40:10Z" });
     rig.t3.messages.lock().unwrap().insert("t1".into(), vec![new]);
@@ -3334,13 +3346,13 @@ fn an_image_sent_with_no_words_is_only_its_picture_and_other_blank_messages_stay
     rig.bridge.set_painter(Some(Box::new(FakePainter::default())));
     let blank = json!({ "position": 0, "messageId": "blank", "type": "user_message", "text": "", "updatedAt": "1970-01-01T10:00:00Z" });
     rig.t3.messages.lock().unwrap().insert("t1".into(), vec![blank.clone()]);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "mac", "id": "t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "q": [{ "s": 2, "t": "open", "e": "local", "id": "t1" }] }));
     rig.bridge.tick();
     press(&rig, &presses);
     rig.advance(200);
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "mac:t1" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "im": 1, "q": [{ "s": 3, "t": "paste", "d": "local:t1" }] }));
     rig.bridge.tick();
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "im": 1, "q": [{ "s": 4, "t": "send", "e": "local", "id": "t1", "m": "" }] }));
     rig.bridge.tick();
     let new = json!({ "position": 2, "messageId": "mcp:new", "type": "user_message", "text": "", "updatedAt": "1970-01-01T16:23:30Z" });
     rig.t3.messages.lock().unwrap().insert("t1".into(), vec![blank, new]);
@@ -3453,7 +3465,7 @@ fn a_new_thread_starts_with_its_pasted_images_and_a_failed_send_keeps_them() {
     assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(2));
     // The launch fails: what was uploaded is given back, and the images stay for another try.
     rig.t3.failing.lock().unwrap().insert("t3_thread_launch".into(), "T3 is busy".into());
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "new", "e": "mac", "m": "" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "new", "e": "local", "m": "" }] }));
     rig.bridge.tick();
     assert_eq!(outcome(&rig, 4)["ok"], false);
     let discarded: Vec<Value> = rig.t3.calls_to("t3_attachment_discard").iter().map(|a| a["attachmentId"].clone()).collect();
@@ -3461,7 +3473,7 @@ fn a_new_thread_starts_with_its_pasted_images_and_a_failed_send_keeps_them() {
     assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(2));
     // Again, and it starts: images only, so it gets a title of its own.
     rig.t3.failing.lock().unwrap().clear();
-    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 5, "t": "new", "e": "mac", "m": "" }] }));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 5, "t": "new", "e": "local", "m": "" }] }));
     rig.bridge.tick();
     let launched = rig.t3.calls_to("t3_thread_launch").last().cloned().unwrap();
     assert_eq!(launched["title"], "Pasted image");
@@ -3487,6 +3499,28 @@ fn a_failed_upload_sends_nothing_and_says_why() {
     assert!(rig.t3.calls_to("t3_thread_send").is_empty(), "not sent without its image");
     assert_eq!(rig.t3.calls_to("t3_attachment_discard").len(), 1);
     assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(1));
+}
+
+/// T3 sends attachments only to its own threads: its send for them takes no machine, and a
+/// launch on a linked one refuses them. The game says so before anything is uploaded.
+#[test]
+fn pasted_images_for_a_thread_on_another_machine_are_refused_before_any_upload() {
+    let (mut rig, presses) = paste_rig(54_500_000, 4, 4, 100);
+    for (s, draft) in [(2, "mac:t1"), (3, "new")] {
+        press(&rig, &presses);
+        rig.advance(100);
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": s, "q": [{ "s": s, "t": "paste", "d": draft }] }));
+        rig.bridge.tick();
+    }
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 4, "t": "send", "e": "mac", "id": "t1", "m": "look" }, { "s": 5, "t": "new", "e": "mac", "p": "p1", "m": "look" }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 4), json!({ "s": 4, "ok": false, "x": "T3 can't send pasted images to a thread on another machine: their × takes them back" }));
+    assert_eq!(outcome(&rig, 5), json!({ "s": 5, "ok": false, "x": "T3 can't start a thread on another machine with pasted images: their × takes them back" }));
+    for tool in ["t3_attachment_prepare_upload", "t3_thread_send_attachments", "t3_thread_send", "t3_thread_launch"] {
+        assert!(rig.t3.calls_to(tool).is_empty(), "{tool} was called");
+    }
+    assert!(rig.t3.uploads.lock().unwrap().is_empty());
+    assert_eq!(rig.bridge.snapshot()["att"].as_array().map(Vec::len), Some(2), "the images stay");
 }
 
 #[test]

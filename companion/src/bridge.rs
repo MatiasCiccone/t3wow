@@ -2557,6 +2557,10 @@ impl Bridge {
                     if fresh && with_images {
                         return Err(T3Error::Other("T3 can't start a fresh session with pasted images: send them after it starts".into()));
                     }
+                    // T3's send with attachments takes no machine: they go only to its own threads.
+                    if with_images && !env_arg.is_empty() {
+                        return Err(T3Error::Other("T3 can't send pasted images to a thread on another machine: their × takes them back".into()));
+                    }
                     if with_images {
                         // T3's send with attachments has no mode or retry key: it starts an
                         // idle thread, and steers or queues on a busy one, as a send does.
@@ -2565,7 +2569,7 @@ impl Bridge {
                         if !message.is_empty() {
                             args["message"] = json!(message);
                         }
-                        if let Err(error) = self.client.call("t3_thread_send_attachments", with_args(args, &env_arg)) {
+                        if let Err(error) = self.client.call("t3_thread_send_attachments", args) {
                             self.discard_uploads(&attachments);
                             return Err(error);
                         }
@@ -2586,6 +2590,10 @@ impl Bridge {
                     self.view_changed();
                 }
                 "new" if !message.is_empty() || with_images => {
+                    // An upload stays on T3's own machine, so a launch on a linked one refuses it.
+                    if with_images && !env_arg.is_empty() {
+                        return Err(T3Error::Other("T3 can't start a thread on another machine with pasted images: their × takes them back".into()));
+                    }
                     let mut title: String = message.split('\n').next().unwrap_or("").chars().take(60).collect();
                     if title.trim().is_empty() {
                         title = "Pasted image".into();
