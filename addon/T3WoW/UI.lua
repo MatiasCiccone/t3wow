@@ -127,6 +127,12 @@ local notice
 -- Commands whose outcome matters, by number, until the companion reports it (inbox.out):
 -- { kind = "send" | "new" | "answer", text, at }. A failure puts the text back.
 local awaiting = {}
+-- The game's edit box holds a typed | as || (its escape for a literal pipe), and GetText
+-- gives that back: a typed "a || b" reads as "a |||| b". What goes out is what was typed,
+-- and text put back in a box is escaped again. On UI, not locals of their own: the file
+-- has all of Lua's 200 locals in one chunk.
+function UI.BoxText(box) return (box:GetText():gsub("||", "|")) end
+function UI.SetBoxText(box, text) box:SetText((text:gsub("|", "||"))) end
 local ANSWER_TIMEOUT = 45 -- an answer with no word back stops showing "Sending…"
 -- The Stop under way, { env, id, s, at, taken }: its thread's Stop shows "Stopping…" until
 -- the thread stops working, the companion says there was nothing to stop or T3 refused, or
@@ -812,7 +818,7 @@ do
     local function submit()
         local t = box.thread
         if not t then return box:Hide() end
-        local text = edit:GetText():gsub("^%s+", ""):gsub("%s+$", "")
+        local text = UI.BoxText(edit):gsub("^%s+", ""):gsub("%s+$", "")
         if text == "" then return say("Type when it comes back: " .. HINT, true) end
         local blocked = blockedReason("snooze")
         if blocked then return say(blocked, true) end
@@ -3811,7 +3817,7 @@ function openCopy(text)
 end
 
 local function sendCurrent()
-    local text = input:GetText():gsub("^%s+", ""):gsub("%s+$", "")
+    local text = UI.BoxText(input):gsub("^%s+", ""):gsub("%s+$", "")
     -- /clear on its own is T3's: it arms a fresh session for the next message, sending
     -- nothing (never an answer to a question).
     if text == "/clear" and Paste.CanFresh() then
@@ -5259,7 +5265,7 @@ local function takeOutcomes(data)
                     scrollToEnd = true
                 end
             else
-                if sent.text and input:GetText() == "" then input:SetText(sent.text) end
+                if sent.text and input:GetText() == "" then UI.SetBoxText(input, sent.text) end
                 if sent.fresh then Paste.fresh[sent.fresh] = true end
                 if echo and echo.s == o.s then echo = nil end
                 if sent.kind == "answer" then askState.sent = nil end
