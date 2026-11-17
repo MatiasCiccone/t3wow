@@ -1,10 +1,12 @@
 {
-  "t3": "0.1.9",
+  "t3": "0.1.10",
   "tools": {
     "list_thread_pull_requests": {
       "inputs": {
         "environmentId": [],
-        "threadId": []
+        "threadId": [],
+        "states": [],
+        "cursor": []
       },
       "required": []
     },
@@ -160,6 +162,7 @@
           "messages"
         ],
         "afterPosition": [],
+        "beforePosition": [],
         "limit": [],
         "runLimit": [],
         "maxCharsPerItem": []
@@ -195,18 +198,6 @@
       },
       "required": [
         "attachments"
-      ]
-    },
-    "html_render": {
-      "inputs": {
-        "path": [],
-        "html": [],
-        "title": [],
-        "height": []
-      },
-      "required": [
-        "height",
-        "title"
       ]
     }
   }
