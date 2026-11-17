@@ -57,6 +57,7 @@ function inboxWith(envs, extra)
   data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
   data.snz = extra and extra.snz
   data.uns = extra and extra.uns
+  data.unr = extra and extra.unr
   -- The companion has taken every command sent so far.
   for i = #queue(), 1, -1 do queue()[i] = nil end
   UI.OnInbox(data)
@@ -3487,6 +3488,25 @@ Link.Send({ t = "open", e = "mac", id = "t1" })
 tick(25)
 UI.Refresh()
 assert(showing("Companion not answering: is T3 WoW running in the system tray%?"), "stalled wording")
+return "ok"
+`, { before: `function IsMacClient() return false end` });
+});
+
+test("not answering because the companion can't read the strip, the window says that instead", () => {
+  run(`
+inboxWith(ENVS, { threads = { THREAD }, unr = "bad checksum" })
+assert(not showing("can't read"), "said while commands still go through")
+Link.Send({ t = "open", e = "mac", id = "t1" })
+tick(25)
+UI.Refresh()
+assert(showing("Companion can't read the game's strip %(bad checksum%)"), "the reason")
+assert(not showing("Companion not answering"), "says it isn't running")
+-- An update without it (the strip read again): back to the usual wording while stalled.
+inboxWith(ENVS, { threads = { THREAD } })
+Link.Send({ t = "open", e = "mac", id = "t1" })
+tick(25)
+UI.Refresh()
+assert(showing("Companion not answering"), "stalled wording")
 return "ok"
 `, { before: `function IsMacClient() return false end` });
 });

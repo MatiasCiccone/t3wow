@@ -4453,6 +4453,10 @@ local function renderStatus()
         connected = "|cffff8000All 200 updates of this session used: Reload UI|r"
     elseif link.loadError then
         connected = "|cffff4040Slot addons blocked (" .. tostring(link.loadError) .. "): enable T3 WoW slots in AddOns at character select|r"
+    elseif ns.Link.Stalled() and inbox and type(inbox.unr) == "string" then
+        -- The companion runs and sees the strip, but it doesn't read (inbox.unr says why).
+        connected = "|cffff4040Companion can't read the game's strip (" .. inbox.unr .. ")|r"
+        full = "|cffff4040The T3 WoW companion runs and sees the game's strip, but can't read it (" .. inbox.unr .. "): commands from the game don't reach it|r"
     elseif ns.Link.Stalled() then
         connected = "|cffff4040" .. UI.Companion.stalled .. "|r"
     elseif not inbox then
