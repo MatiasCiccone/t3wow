@@ -34,7 +34,7 @@
 | `slots.rs`, `Link.lua`, signals | `/t3 probe`; a long session (`/t3 status` counts the 200 updates); WoW running when the addon files change: the window's top line says to restart WoW; the AddOns list in the game shows T3 WoW as one entry, with no slot rows under it |
 | `render.rs`, pictures | A page and an embedded image (`![alt](C:\path\image.png)`); clicking a picture |
 | `clip.rs`, `keys.rs` | Ctrl+V in **New Thread** too; Ctrl+V outside the box pastes nothing; an image picked with **Win+V**; two image files (a PNG and a JPEG) copied in File Explorer, then Ctrl+V: two thumbnails |
-| `UI.lua`, `Theme.lua` | All three themes and **Compact thread list** in Settings; **Fade window** set to **Dim**: the window dims while you run and in a fight, and comes back when you stop, leave combat or point at it; `npm run screenshots` and compare |
+| `UI.lua`, `Theme.lua` | All three themes and **Compact thread list** in Settings; **Fade window** set to **Dim**: the window dims while you run and in a fight (with no addon error), and comes back when you stop, leave combat or point at it; dying closes it, and it opens again once you're alive; `npm run screenshots` and compare |
 | `.toc`, interface version | Tray **Match WoW's interface version…**, then the AddOns list shows nothing out of date |
 | `tray.rs`, `dialog.rs`, `app.rs` | Every menu item the change touched, and its notification |
 | `updater.rs` | From the previous release's exe, **Check for updates** and **Update to x.y.z** (debug builds take `T3WOW_UPDATE_REPO` to update from another repository); the restarted companion says its new version |

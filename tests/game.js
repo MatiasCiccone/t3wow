@@ -127,11 +127,32 @@ local function frame(kind, name)
   end })
 end
 function CreateFont(name) return frame("Font", name) end
-function CreateFrame(kind, name, parent)
+-- A frame made from a secure template is protected: in combat the game refuses to show,
+-- hide, move, resize or reparent it from an addon.
+local LOCKED = { "Show", "Hide", "SetShown", "SetPoint", "ClearAllPoints", "SetSize", "SetHeight", "SetParent" }
+function CreateFrame(kind, name, parent, template)
   local f = frame(kind, name)
   f.parent = parent
+  if type(template) == "string" and template:find("Secure") then
+    for _, method in ipairs(LOCKED) do
+      local open = f[method]
+      f[method] = function(self, ...)
+        if InCombatLockdown and InCombatLockdown() then error("ADDON_ACTION_BLOCKED: " .. method .. " on a protected frame in combat", 2) end
+        return open(self, ...)
+      end
+    end
+  end
   return f
 end
+-- A secret value, as the game hands one to an addon in combat: comparing it, or doing
+-- arithmetic with it, is an error. issecretvalue tells one apart, as in the game.
+local SECRET = {}
+local function refuse() error("attempt to compare a secret value", 2) end
+for _, event in ipairs({ "__lt", "__le", "__eq", "__add", "__sub", "__mul", "__div", "__unm", "__concat", "__len", "__index" }) do
+  SECRET[event] = refuse
+end
+function secret() return setmetatable({}, SECRET) end
+function issecretvalue(value) return getmetatable(value) == SECRET end
 UIParent, WorldFrame, Minimap = frame(), frame(), frame()
 UISpecialFrames = {}
 -- What Escape does to addon windows in the game (UIParentPanelManager.lua).
@@ -146,6 +167,8 @@ function CloseSpecialWindows()
   end
   return found
 end
+-- What dying does to them (UIParent.lua, on PLAYER_DEAD): every window closes.
+function CloseAllWindows() return CloseSpecialWindows() end
 tinsert = table.insert
 unpack = unpack or table.unpack
 ChatFontNormal = {}
