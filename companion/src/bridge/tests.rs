@@ -225,7 +225,7 @@ impl T3 for FakeT3 {
                 json!({ "thread": self.thread(&args["threadId"]), "items": [item], "hasMore": false })
             }
             "t3_thread_read" if args["view"].is_string() => {
-                // Messages (or activity) after afterPosition, a page at a time.
+                // Messages (or activity) after afterPosition, a page at a time; with none, the newest page.
                 let id = str_of(&args["threadId"]).to_string();
                 let activity = if args["view"] == "activity" { self.activity.lock().unwrap().get(&id).cloned() } else { None };
                 let max = args["maxCharsPerItem"].as_u64().unwrap_or(50_000) as usize;
@@ -244,8 +244,17 @@ impl T3 for FakeT3 {
                         json!({ "position": 1, "type": "assistant_message", "text": "**done**" }),
                     ]
                 });
-                let after = args["afterPosition"].as_i64().unwrap_or(-1);
                 let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+                let Some(after) = args["afterPosition"].as_i64() else {
+                    // No position: the newest `limit` items, oldest first, as T3 0.1.10 reads.
+                    let page: Vec<Value> = all[all.len().saturating_sub(limit)..].to_vec();
+                    return Ok(json!({
+                        "thread": self.thread(&args["threadId"]),
+                        "items": page,
+                        "hasMore": false,
+                        "earlierPosition": page.first().map(|m| m["position"].clone()),
+                    }));
+                };
                 let rest: Vec<Value> = all.into_iter().filter(|m| m["position"].as_i64().unwrap() > after).collect();
                 let page: Vec<Value> = rest.iter().take(limit).cloned().collect();
                 json!({
@@ -1799,7 +1808,7 @@ fn the_open_thread_reads_only_whats_new_and_still_sees_its_last_message_grow() {
     rig.advance(5_000);
     rig.bridge.tick();
     let reads = message_reads(&rig);
-    assert!(reads[2].get("afterPosition").is_none(), "{}", reads[2]);
+    assert_eq!(reads[2]["afterPosition"], -1, "read from the first item: {}", reads[2]);
     let view = rig.bridge.snapshot()["view"].clone();
     assert_eq!(view["items"].as_array().unwrap().len(), 2);
 }

@@ -208,6 +208,12 @@ fn waiting_card(item: &Value) -> Option<Card> {
     Some(Card { kind, label: plain(str_of(&item["title"]), 120) })
 }
 
+/// Where a read starts: after `after`, or with none, from the thread's first item. T3 0.1.10
+/// reads a thread's newest items when given no position, so a read from the start says -1.
+fn from_after(after: Option<u64>) -> Value {
+    after.map_or(json!(-1), |after| json!(after))
+}
+
 /// The read that checks what a working thread waits on: its pending count, and its latest
 /// few activity items (titles only), where a waiting card shows. `item_count` is the
 /// thread's from its list.
@@ -3402,7 +3408,7 @@ impl Bridge {
             Some(origin) => origin.open && origin.updated != updated,
         };
         if stale && !self.out_of_time() {
-            let args = with_args(json!({ "threadId": id, "view": "messages", "limit": 1, "maxCharsPerItem": OPENING_CHARS }), &self.env_arg(&env));
+            let args = with_args(json!({ "threadId": id, "view": "messages", "afterPosition": -1, "limit": 1, "maxCharsPerItem": OPENING_CHARS }), &self.env_arg(&env));
             match self.client.call("t3_thread_read", args) {
                 Ok(read) => {
                     let first = &read["items"][0];
@@ -3964,10 +3970,7 @@ impl Bridge {
     /// found too few widens, VIEW_PASSES at most; then the view for the game is built.
     fn read_view_page(&mut self) -> Result<(), T3Error> {
         let Some(read) = self.view_read() else { return Ok(()) };
-        let mut args = json!({ "threadId": read.view.id, "view": "messages", "limit": 100, "maxCharsPerItem": 6000 });
-        if let Some(after) = read.after {
-            args["afterPosition"] = json!(after);
-        }
+        let args = json!({ "threadId": read.view.id, "view": "messages", "afterPosition": from_after(read.after), "limit": 100, "maxCharsPerItem": 6000 });
         let env = read.view.env.clone();
         let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
         let Some(read) = self.view_read() else { return Ok(()) };
@@ -4151,12 +4154,10 @@ impl Bridge {
             Some(cache) => cache,
             None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new(), changes: Vec::new(), work: Vec::new(), runs: BTreeMap::new() },
         };
-        let mut args = json!({ "threadId": id, "view": "activity", "limit": 100, "maxCharsPerItem": 200 });
         // Back to what was still under way, whose title and text may have come since.
         let unfinished = cache.work.iter().filter(|w| !w.ended).map(|w| w.position).min().and_then(|p| p.checked_sub(1));
-        if let Some(after) = [cache.upto.or(first.checked_sub(1)), unfinished].into_iter().flatten().min() {
-            args["afterPosition"] = json!(after);
-        }
+        let after = [cache.upto.or(first.checked_sub(1)), unfinished].into_iter().flatten().min();
+        let args = json!({ "threadId": id, "view": "activity", "afterPosition": from_after(after), "limit": 100, "maxCharsPerItem": 200 });
         let result = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env))) {
             Ok(result) => result,
             Err(error) => {
@@ -4323,10 +4324,7 @@ impl Bridge {
         let Some(read) = self.view_read() else { return Ok(()) };
         let View { env, id, .. } = read.view.clone();
         let Some(position) = self.scan.as_ref().and_then(|s| s.cards.iter().find(|c| c.item_id == item_id)).map(|c| c.position) else { return Ok(()) };
-        let mut args = json!({ "threadId": id, "view": "activity", "limit": 1, "maxCharsPerItem": CARD_CHARS });
-        if let Some(after) = position.checked_sub(1) {
-            args["afterPosition"] = json!(after);
-        }
+        let args = json!({ "threadId": id, "view": "activity", "afterPosition": from_after(position.checked_sub(1)), "limit": 1, "maxCharsPerItem": CARD_CHARS });
         let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
         let item = result["items"].as_array().and_then(|items| items.iter().find(|it| it["itemId"] == item_id.as_str())).cloned();
         if let (Some(item), Some(scan)) = (item, self.scan.as_mut()) {
@@ -4343,10 +4341,7 @@ impl Bridge {
     fn read_view_answer(&mut self, position: u64) -> Result<(), T3Error> {
         let Some(read) = self.view_read() else { return Ok(()) };
         let View { env, id, .. } = read.view.clone();
-        let mut args = json!({ "threadId": id, "view": "activity", "limit": 2, "maxCharsPerItem": DETAIL_CHARS });
-        if let Some(after) = position.checked_sub(2) {
-            args["afterPosition"] = json!(after);
-        }
+        let args = json!({ "threadId": id, "view": "activity", "afterPosition": from_after(position.checked_sub(2)), "limit": 2, "maxCharsPerItem": DETAIL_CHARS });
         let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
         let call = result["items"].as_array().into_iter().flatten().filter_map(|item| serde_json::from_str::<Value>(str_of(&item["text"])).ok()).find(|call| call["toolName"] == "AskUserQuestion");
         let answer = call.and_then(|call| call["output"]["answers"].as_object().map(|answers| answers.values().filter_map(Value::as_str).map(|a| plain(a, 200)).collect::<Vec<_>>().join(" · ")));
@@ -4550,10 +4545,7 @@ impl Bridge {
     /// failure is shown where the row's contents would be, and can be tried again.
     fn open_detail(&mut self, env: &str, id: &str, first: u64, last: u64) -> Result<(), T3Error> {
         let limit = (last.saturating_sub(first) + 1).min(WORK_ROW_SPAN);
-        let mut args = json!({ "threadId": id, "view": "activity", "limit": limit, "maxCharsPerItem": DETAIL_CHARS });
-        if let Some(after) = first.checked_sub(1) {
-            args["afterPosition"] = json!(after);
-        }
+        let args = json!({ "threadId": id, "view": "activity", "afterPosition": from_after(first.checked_sub(1)), "limit": limit, "maxCharsPerItem": DETAIL_CHARS });
         let (mut body, failed) = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(env))) {
             Ok(result) => (detail_segments(result["items"].as_array().map(Vec::as_slice).unwrap_or_default()), false),
             Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
