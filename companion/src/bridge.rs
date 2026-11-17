@@ -2333,6 +2333,8 @@ impl Bridge {
                     self.link.signal_time = self.now_seconds();
                     self.link.wow_key = Some(key);
                     self.link.ui_session = None;
+                    // A strip misread in the client that's gone says nothing about the next.
+                    self.unreadable = None;
                     self.new_game_images();
                     self.save_state();
                 }
