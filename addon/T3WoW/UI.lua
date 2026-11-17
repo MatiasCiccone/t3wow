@@ -2495,6 +2495,7 @@ local function askString(index)
         fs:SetSpacing(2)
         askStrings[index] = fs
     end
+    fs:SetNonSpaceWrap(false) -- a preview's string, handed out again for prose
     return fs
 end
 
@@ -2646,6 +2647,18 @@ local function renderAsk(view)
             b:SetEnabled(not blocked)
             place(b, x, 2)
             last = b
+            -- Its preview (a mockup, a snippet: the companion keeps it to a few lines) under
+            -- it in the code font, in line with the label, always shown as in T3.
+            if type(o.p) == "string" and o.p ~= "" then
+                si = si + 1
+                local preview = askString(si)
+                preview:SetFontObject(Skin.fonts.mono)
+                preview:SetNonSpaceWrap(true) -- a line wider than the card breaks, not cut
+                preview:SetWidth(width - 32)
+                preview:SetText(o.p)
+                place(preview, x + 24, 6)
+                last = preview
+            end
         end
         flow.gap = flow.gap + 12
     end

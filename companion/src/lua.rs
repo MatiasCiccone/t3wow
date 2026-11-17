@@ -72,6 +72,22 @@ pub fn plain(text: &str, max: usize) -> String {
     collapsed.chars().take(max).collect()
 }
 
+/// A question option's preview (a mockup or a snippet), for the game's monospace font: its
+/// lines and indents kept, a code fence's ``` lines dropped, cut to `max_lines` lines and
+/// `max` chars (with "…"), pipes escaped for WoW.
+pub fn preview_text(text: &str, max: usize, max_lines: usize) -> String {
+    let fence = &patterns().fence;
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = text.split('\n').filter(|l| !fence.is_match(l)).map(str::trim_end).collect();
+    let lines = lines.join("\n");
+    let lines = lines.trim_matches('\n');
+    let mut kept: String = lines.split('\n').take(max_lines).collect::<Vec<_>>().join("\n").chars().take(max).collect();
+    if kept.len() < lines.len() {
+        kept.push('…');
+    }
+    kept.replace('|', "||")
+}
+
 const CODE: &str = "|cffc8c8a0";
 const HEAD: &str = "|cffffd100";
 
