@@ -550,6 +550,37 @@ fn without_signals_the_games_own_slot_count_drives_where_updates_go() {
 }
 
 #[test]
+fn a_command_from_the_game_goes_ahead_of_a_long_lists_per_thread_reads() {
+    // As after Show more in Settled: 200 agent-made threads whose merged pull requests T3's
+    // list leaves out, each read again on its own (pull requests, launcher), a T3 call apiece.
+    let mut rig = Rig::new(3_100_000);
+    let settled: Vec<Value> = (0..200)
+        .map(|i| json!({
+            "threadId": format!("s{i}"), "projectId": "p1", "title": format!("Done {i}"), "status": "completed", "settled": true,
+            "createdBy": "agent", "updatedAt": "2026-11-05T10:00:00Z",
+            "pullRequests": [{ "number": 90 + i, "state": "merged", "url": format!("https://github.com/o/r/pull/{}", 90 + i) }],
+        }))
+        .collect();
+    rig.t3.settled.lock().unwrap().extend(settled);
+    rig.t3.delays.lock().unwrap().extend([("list_thread_pull_requests".to_string(), 200), ("t3_thread_read".to_string(), 200)]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [
+        { "s": 1, "t": "ui", "o": true },
+        { "s": 2, "t": "list", "g": "settled" }, { "s": 3, "t": "list", "g": "settled" }, { "s": 4, "t": "list", "g": "settled" },
+    ] }));
+    // Into the poll's per-thread reads.
+    while rig.t3.calls_to("list_thread_pull_requests").len() < 20 {
+        rig.bridge.tick();
+    }
+    assert!(rig.bridge.polling());
+    // A message sent now goes to T3 on the next turn, in this poll, not after its reads.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 5, "t": "send", "id": "t1", "m": "now" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+    assert_eq!(rig.bridge.link.acked.get("c1"), Some(&5));
+    assert!(rig.bridge.polling(), "the poll ended first");
+}
+
+#[test]
 fn a_row_names_the_threads_pull_request_and_how_many_more() {
     let mut rig = Rig::new(3_000_000);
     let thread = |id: &str, prs: Value| {
