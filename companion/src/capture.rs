@@ -4,6 +4,8 @@
 
 use crate::bridge::CaptureMessage;
 use crate::codec::{cells_needed, magic_cells, CELLS_PER_ROW, CELL_PX, MAX_ROWS};
+#[cfg(any(windows, test))]
+use crate::codec::decode_cells;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -45,8 +47,141 @@ fn cell(px: &[u8], stride: usize, w: usize, h: usize, x: usize, y: usize) -> Opt
     Some(bit(px[i + 2]) * 4 + bit(px[i + 1]) * 2 + bit(px[i]))
 }
 
+/// How much larger than drawn the game can show the strip and still have it captured whole.
+/// Its size is measured only up to about 1.025 (the frame's header, its first 19 cells, has
+/// to read right every CELL_PX pixels); the capture leaves room past that.
+#[cfg(any(windows, test))]
+const MAX_STRETCH: f64 = 1.05;
+
+/// Where the strip's cells are in a capture: its top-left corner and the size of a cell, in
+/// pixels. The addon draws cells CELL_PX pixels wide, but the game can show the strip a
+/// little larger (seen: 4.06 pixels a cell, on a 2560x1440 client), and over a row of 200
+/// cells a read every CELL_PX pixels slips into the cells beside the ones it means.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Grid {
+    x: f64,
+    y: f64,
+    pitch: f64,
+}
+
+/// The cells at `grid`, read at each one's middle, up to as many as the frame's header asks
+/// for: fewer when the strip runs off the capture, only the header when it asks for too many.
+#[cfg(any(windows, test))]
+fn read_grid(px: &[u8], stride: usize, w: usize, h: usize, grid: Grid) -> Vec<u8> {
+    let mut need = 19;
+    let mut cells = Vec::with_capacity(64);
+    let mut n = 0;
+    while n < need {
+        let (row, col) = (n / CELLS_PER_ROW, n % CELLS_PER_ROW);
+        let x = (grid.x + (col as f64 + 0.5) * grid.pitch) as usize;
+        let y = (grid.y + (row as f64 + 0.5) * grid.pitch) as usize;
+        let Some(value) = cell(px, stride, w, h, x, y) else { break };
+        cells.push(value);
+        if n == 18 {
+            match cells_needed(&cells) {
+                Some(cells) if cells <= CELLS_PER_ROW * MAX_ROWS => need = cells,
+                _ => break,
+            }
+        }
+        n += 1;
+    }
+    cells
+}
+
+/// A straight line `t = start + k * step` fitted to points (k, t), by least squares.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct Line {
+    n: f64,
+    k: f64,
+    t: f64,
+    kk: f64,
+    kt: f64,
+}
+
+#[cfg(any(windows, test))]
+impl Line {
+    fn add(&mut self, k: usize, t: usize) {
+        let (k, t) = (k as f64, t as f64);
+        self.n += 1.0;
+        self.k += k;
+        self.t += t;
+        self.kk += k * k;
+        self.kt += k * t;
+    }
+
+    /// The fitted start and step; with too few points to fit a step, `step`'s start.
+    fn fit(&self, start: f64, step: f64) -> (f64, f64) {
+        let det = self.n * self.kk - self.k * self.k;
+        if det < 1.0 {
+            return if self.n > 0.0 { ((self.t - step * self.k) / self.n, step) } else { (start, step) };
+        }
+        let step = (self.n * self.kt - self.k * self.t) / det;
+        ((self.t - step * self.k) / self.n, step)
+    }
+}
+
+/// The strip's grid measured from where its cells change color: along its first row, each
+/// change is the edge before cell k, at `x + k * pitch`; down its columns, the edge before
+/// row r, at `y + r * pitch`. The strip was found reading at (`dx`, `dy`) every CELL_PX
+/// pixels, so its corner is within 2 pixels of (`dx` + 1, `dy` + 1); each edge refines the
+/// fit, which keeps the next one's k right while the slip grows along the row.
+#[cfg(any(windows, test))]
+fn measure(px: &[u8], stride: usize, w: usize, h: usize, dx: usize, dy: usize, header: &[u8]) -> Option<Grid> {
+    let need = cells_needed(header.get(..19)?)?;
+    let (first_row, rows) = (need.min(CELLS_PER_ROW), need.div_ceil(CELLS_PER_ROW));
+    let mut along = Line::default();
+    let (mut x0, mut pitch) = (dx as f64 + 1.0, CELL_PX as f64);
+    let y = dy + CELL_PX / 2;
+    let mut last = cell(px, stride, w, h, dx, y)?;
+    for x in dx + 1..w {
+        let value = cell(px, stride, w, h, x, y)?;
+        if value == last {
+            continue;
+        }
+        last = value;
+        let k = ((x as f64 - x0) / pitch).round().max(0.0) as usize;
+        if k >= first_row {
+            break; // the strip's end
+        }
+        if k > 0 {
+            along.add(k, x);
+            (x0, pitch) = along.fit(x0, pitch);
+        }
+    }
+    if !(CELL_PX as f64 / MAX_STRETCH..=CELL_PX as f64 * MAX_STRETCH).contains(&pitch) {
+        return None;
+    }
+    let mut down = Line::default();
+    let y0 = dy as f64 + 1.0;
+    for col in 0..first_row {
+        let x = (x0 + (col as f64 + 0.5) * pitch) as usize;
+        let Some(mut last) = cell(px, stride, w, h, x, dy + CELL_PX / 2) else { break };
+        let bottom = (y0 + rows as f64 * pitch) as usize;
+        for y in dy + CELL_PX / 2 + 1..bottom.min(h) {
+            let value = cell(px, stride, w, h, x, y)?;
+            if value == last {
+                continue;
+            }
+            last = value;
+            let r = ((y as f64 - y0) / pitch).round() as usize;
+            // Not the strip's bottom edge: the cell below it is in the frame.
+            if r > 0 && r * CELLS_PER_ROW + col < need {
+                down.add(r, y);
+            }
+        }
+    }
+    // The top from the row edges, with the pitch from the first row's 200 cells. A frame of
+    // one row has none, and doesn't slip down it.
+    let y = if down.n > 0.0 { (down.t - pitch * down.k) / down.n } else { dy as f64 };
+    Some(Grid { x: x0, y, pitch })
+}
+
 /// Finds the strip (its first cells are one of `magics`, within SEARCH pixels of the corner) and
 /// reads just the cells its frame needs, so the scene behind it doesn't change the result.
+/// When those don't make a frame, the strip may be shown larger or smaller than drawn: then
+/// the cells at its measured size, if they make one. None when no strip starts there.
 #[cfg(any(windows, test))]
 pub fn sample(px: &[u8], stride: usize, w: usize, h: usize, magics: &[Vec<u8>]) -> Option<Vec<u8>> {
     let half = CELL_PX / 2;
@@ -56,21 +191,12 @@ pub fn sample(px: &[u8], stride: usize, w: usize, h: usize, magics: &[Vec<u8>]) 
             if !found {
                 continue;
             }
-            let mut need = 19;
-            let mut cells = Vec::with_capacity(64);
-            let mut n = 0;
-            while n < need {
-                let (row, col) = (n / CELLS_PER_ROW, n % CELLS_PER_ROW);
-                cells.push(cell(px, stride, w, h, dx + col * CELL_PX + half, dy + row * CELL_PX + half)?);
-                if n == 18 {
-                    need = cells_needed(&cells)?;
-                    if need > CELLS_PER_ROW * MAX_ROWS {
-                        return None;
-                    }
-                }
-                n += 1;
+            let cells = read_grid(px, stride, w, h, Grid { x: dx as f64, y: dy as f64, pitch: CELL_PX as f64 });
+            if decode_cells(&cells).is_ok() {
+                return Some(cells);
             }
-            return Some(cells);
+            let measured = measure(px, stride, w, h, dx, dy, &cells).map(|grid| read_grid(px, stride, w, h, grid));
+            return Some(measured.filter(|cells| decode_cells(cells).is_ok()).unwrap_or(cells));
         }
     }
     None
@@ -228,8 +354,9 @@ mod win {
             if ClientToScreen(hwnd, &mut origin) == 0 {
                 return Sampled::NotCapturable;
             }
-            let w = ((rect.right - rect.left) as usize).min(CELLS_PER_ROW * CELL_PX + SEARCH + 4);
-            let h = ((rect.bottom - rect.top) as usize).min(MAX_ROWS * CELL_PX + SEARCH + 4);
+            let stretched = |cells: usize| (cells as f64 * CELL_PX as f64 * MAX_STRETCH) as usize + SEARCH + 4;
+            let w = ((rect.right - rect.left) as usize).min(stretched(CELLS_PER_ROW));
+            let h = ((rect.bottom - rect.top) as usize).min(stretched(MAX_ROWS));
             if w < 64 || h < 16 {
                 return Sampled::NotCapturable;
             }
@@ -769,7 +896,7 @@ mod mac {
             for dx in 0..=SEARCH * scale {
                 for cell in CELL_PX..=MAX_CELL {
                     let geometry = Geometry { dx, dy, cell };
-                    if let Some(cells) = read_at(image, magics, geometry).filter(|c| decode_cells(c).is_some()) {
+                    if let Some(cells) = read_at(image, magics, geometry).filter(|c| decode_cells(c).is_ok()) {
                         return Some((settled(image, magics, geometry, &cells), cells));
                     }
                 }
@@ -1457,7 +1584,12 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                 if let Some(wow) = &wow {
                     match win::sample_window(wow.hwnd, &magic) {
                         win::Sampled::NotCapturable => {}
-                        win::Sampled::NoStrip => last_cells.clear(),
+                        win::Sampled::NoStrip => {
+                            // Gone (it hides with nothing to say): what it showed last is over.
+                            if !std::mem::take(&mut last_cells).is_empty() && tx.send(CaptureMessage::NoStrip).is_err() {
+                                return;
+                            }
+                        }
                         win::Sampled::Cells(cells) => {
                             if cells != last_cells {
                                 last_cells = cells.clone();
@@ -1576,7 +1708,12 @@ pub fn spawn(client_folder: PathBuf, tx: Sender<CaptureMessage>) {
                     }
                     match read {
                         mac::Read::NotCapturable | mac::Read::Failed(_) => {}
-                        mac::Read::NoStrip => last_cells.clear(),
+                        mac::Read::NoStrip => {
+                            // Gone (it hides with nothing to say): what it showed last is over.
+                            if !std::mem::take(&mut last_cells).is_empty() && tx.send(CaptureMessage::NoStrip).is_err() {
+                                return;
+                            }
+                        }
                         mac::Read::Cells(cells) => {
                             strip_seen = Some(Instant::now());
                             if cells != last_cells {
@@ -1634,6 +1771,54 @@ mod tests {
         assert_eq!(decode_cells(&cells).unwrap().payload, payload);
     }
 
+    /// The strip as the game shows it at another size: cells `pitch` pixels wide from
+    /// (`x`, `y`), each pixel blending what it covers, on the game's dark background.
+    fn draw_scaled(cells: &[u8], x: f64, y: f64, pitch: f64) -> (Vec<u8>, usize, usize) {
+        let w = (CELLS_PER_ROW as f64 * pitch + x) as usize + 20;
+        let h = (cells.len().div_ceil(CELLS_PER_ROW) as f64 * pitch + y) as usize + 20;
+        let mut px = vec![0u8; w * h * 4];
+        const SUB: usize = 8;
+        for (at, pixel) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let mut sum = [0usize; 3];
+            for sub in 0..SUB * SUB {
+                let fx = ((at % w) as f64 + (sub % SUB) as f64 / SUB as f64 - x) / pitch;
+                let fy = ((at / w) as f64 + (sub / SUB) as f64 / SUB as f64 - y) / pitch;
+                let n = (fy >= 0.0 && fx >= 0.0 && fx < CELLS_PER_ROW as f64).then(|| fy as usize * CELLS_PER_ROW + fx as usize);
+                let bgr = match n.and_then(|n| cells.get(n)) {
+                    Some(&v) => [v & 1, v & 2, v & 4].map(|bit| if bit != 0 { 255 } else { 0 }),
+                    None => [38, 16, 25],
+                };
+                (0..3).for_each(|c| sum[c] += bgr[c]);
+            }
+            (0..3).for_each(|c| pixel[c] = (sum[c] / (SUB * SUB)) as u8);
+        }
+        (px, w, h)
+    }
+
+    /// The game showed the strip 1.4% larger than drawn (4.056 pixels a cell from the
+    /// corner): read every 4 pixels, each row slipped into the cells beside its own from
+    /// about the 35th, the checksum failed and no command came through for minutes. Its
+    /// size is measured from its own edges when that happens.
+    #[test]
+    fn a_strip_shown_larger_or_smaller_than_drawn_still_reads() {
+        let key = [7u8; 32];
+        let payload = r#"{"dc":1,"g":0,"im":1,"k":"0123456789abcdef","l":19,"lid":"01234567","n":0,"p":1,"q":[{"e":"environment-0123456789","id":"0b6c1f0e-4d2a-4c55-9a1e-6f3b2d7c8e90","s":2286,"t":"open"},{"o":false,"s":2287,"t":"hello"},{"o":true,"s":2288,"t":"ui"}],"u":"6afbd389f35e","wk":1}"#;
+        let frame = crate::codec::encode_signed_frame(22, payload, &key);
+        assert!(frame.len() > 3 * CELLS_PER_ROW, "several rows, like the frame that stalled");
+        for (x, y, pitch) in [(-0.06, -0.13, 4.056), (0.0, 0.0, 4.1), (2.5, 1.3, 4.03), (0.0, 0.0, 3.95), (3.0, 2.0, 4.09)] {
+            let (px, w, h) = draw_scaled(&frame, x, y, pitch);
+            let every_4 = read_grid(&px, w * 4, w, h, Grid { x: x.max(0.0).floor(), y: y.max(0.0).floor(), pitch: CELL_PX as f64 });
+            assert_eq!(decode_cells(&every_4).err(), Some(crate::codec::Unreadable::Checksum), "at {pitch} a read every 4 pixels fails");
+            let cells = sample(&px, w * 4, w, h, &magic_cells()).unwrap_or_else(|| panic!("strip found at {pitch}"));
+            let decoded = decode_cells(&cells).unwrap_or_else(|why| panic!("at {pitch}: {}", why.text()));
+            assert_eq!((decoded.seq, decoded.payload.as_str()), (22, payload));
+            assert!(decoded.signed_with(&key));
+        }
+        // Drawn at its own size, the strip reads as before.
+        let (px, w, h) = draw_scaled(&frame, 0.0, 0.0, 4.0);
+        assert_eq!(sample(&px, w * 4, w, h, &magic_cells()), Some(frame));
+    }
+
     #[test]
     fn a_part_frame_on_screen_is_found_too() {
         let (px, w, h) = draw(&encode_part_frame(9, r#"{"k":"a"}"#, &[1, 2, 0, 255]), 1, 4);
@@ -1666,5 +1851,45 @@ mod tests {
     fn no_strip_means_nothing() {
         let (px, w, h) = draw(&[], 0, 0);
         assert_eq!(sample(&px, w * 4, w, h, &magic_cells()), None);
+    }
+
+    /// Reads screen captures of the game (PNG files of its top-left corner at 1:1 pixels, in
+    /// the folder T3WOW_STRIPS) as the Windows capture does, and says what each holds; with
+    /// T3WOW_KEY (the 64 hex digits in the addon's Key.lua), whether it's signed with it.
+    #[test]
+    #[ignore = "a dev check on captures from a game: T3WOW_STRIPS=<folder>"]
+    fn captures_on_disk_read_back() {
+        let dir = std::env::var("T3WOW_STRIPS").expect("T3WOW_STRIPS");
+        let key = std::env::var("T3WOW_KEY").unwrap_or_default();
+        let key: Vec<u8> = (0..key.len() / 2 * 2).step_by(2).filter_map(|i| u8::from_str_radix(&key[i..i + 2], 16).ok()).collect();
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().path()).filter(|path| path.extension().is_some_and(|e| e == "png")).collect();
+        files.sort();
+        for file in files {
+            let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&file).unwrap())).read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+            let info = reader.next_frame(&mut buf).unwrap();
+            let (samples, w, h) = (info.color_type.samples(), info.width as usize, info.height as usize);
+            let mut px = vec![0u8; w * h * 4];
+            for (at, pixel) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let from = at * samples;
+                pixel[..3].copy_from_slice(&[buf[from + 2], buf[from + 1], buf[from]]);
+            }
+            let name = file.file_name().unwrap().to_string_lossy().to_string();
+            let Some(cells) = sample(&px, w * 4, w, h, &magic_cells()) else {
+                println!("{name}: no strip");
+                continue;
+            };
+            // What a read every CELL_PX pixels from where the strip starts makes of it, and
+            // the grid measured there.
+            let magics = magic_cells();
+            let plain = (0..=SEARCH).flat_map(|dy| (0..=SEARCH).map(move |dx| (dx, dy))).find_map(|(dx, dy)| {
+                let cells = read_grid(&px, w * 4, w, h, Grid { x: dx as f64, y: dy as f64, pitch: CELL_PX as f64 });
+                magics.iter().any(|magic| cells.starts_with(magic)).then(|| (decode_cells(&cells).err().map(|why| why.text()), measure(&px, w * 4, w, h, dx, dy, &cells)))
+            });
+            match decode_cells(&cells) {
+                Ok(frame) => println!("{name}: frame {} ({} bytes), signed with the key: {}; read every {} pixels: {:?}", frame.seq, frame.payload.len(), frame.signed_with(&key), CELL_PX, plain),
+                Err(why) => println!("{name}: {} ({} cells); {:?}", why.text(), cells.len(), plain),
+            }
+        }
     }
 }

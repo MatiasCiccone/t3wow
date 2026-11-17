@@ -3,7 +3,7 @@
 //! that tell the game to read them.
 
 use crate::clip::{self, Clipped};
-use crate::codec::decode_cells;
+use crate::codec::{decode_cells, Unreadable};
 use crate::config::Trust;
 use crate::made_for::{self, older_t3, OlderT3};
 use crate::lua::{name_model_refs, name_thread_links, plain, preview_text, to_lua, wow_segments, wow_text, MODEL_MARK};
@@ -21,6 +21,9 @@ use std::sync::Arc;
 
 const WORKING: [&str; 4] = ["preparing", "queued", "starting", "running"];
 const MIN_PUBLISH_GAP_MS: i64 = 1500;
+/// How long the strip can show without reading as a frame before the log and the game hear
+/// why: longer than a frame takes to draw, or a capture between two of them.
+const UNREADABLE_AFTER_MS: i64 = 10_000;
 /// Routine changes while the window is open: one update at most this often (200 slots
 /// then last about 35 minutes of watching a busy thread, not 15).
 const ROUTINE_GAP_MS: i64 = 10_000;
@@ -777,6 +780,8 @@ pub enum CaptureMessage {
     Wow(Option<String>),
     /// Cell values read from the strip, and when (epoch ms).
     Strip(Vec<u8>, i64),
+    /// The strip that showed is gone.
+    NoStrip,
 }
 
 #[derive(Clone)]
@@ -984,6 +989,9 @@ pub struct Bridge {
     /// The game's latest frame wasn't signed with the key: it gets only what Read-only
     /// allows, and the window says to restart WoW.
     unsigned: bool,
+    /// The strip shows but hasn't read as a frame: since when (epoch ms), why, and whether
+    /// that has gone on for UNREADABLE_AFTER_MS, said in the log and to the game.
+    unreadable: Option<(i64, Unreadable, bool)>,
     /// Draws pictures for the game (None: no browser to draw with, so no pictures).
     painter: Option<Box<dyn Painter>>,
     /// The game's addon can show pictures this UI session (its frames say `im`).
@@ -2085,6 +2093,7 @@ impl Bridge {
             trust: Trust::Full,
             game_key: None,
             unsigned: false,
+            unreadable: None,
             painter: None,
             images_ok: false,
             cards_ok: false,
@@ -2328,15 +2337,41 @@ impl Bridge {
                     self.save_state();
                 }
             }
-            CaptureMessage::Strip(cells, at) => {
-                if let Some(frame) = decode_cells(&cells) {
+            CaptureMessage::Strip(cells, at) => match decode_cells(&cells) {
+                Ok(frame) => {
+                    self.readable();
                     if let Ok(header) = serde_json::from_str::<Value>(&frame.payload) {
                         let signed = self.game_key.as_ref().is_some_and(|key| frame.signed_with(key));
                         self.on_frame(&header, frame.part, signed, at);
                     }
                 }
-            }
+                Err(why) => {
+                    let since = self.unreadable.map_or(self.now_ms(), |(since, _, _)| since);
+                    let said = self.unreadable.is_some_and(|(_, _, said)| said);
+                    self.unreadable = Some((since, why, said));
+                }
+            },
+            CaptureMessage::NoStrip => self.readable(),
         }
+    }
+
+    /// The strip reads as a frame again, or is gone: nothing unreadable to say.
+    fn readable(&mut self) {
+        if self.unreadable.take().is_some_and(|(_, _, said)| said) {
+            self.log("The game's strip reads again");
+        }
+    }
+
+    /// Says once when the strip has shown for UNREADABLE_AFTER_MS without reading as a
+    /// frame: no command from the game comes through meanwhile, and the game would otherwise
+    /// only see the companion not answering.
+    fn check_unreadable(&mut self) {
+        let Some((since, why, false)) = self.unreadable else { return };
+        if self.now_ms() - since < UNREADABLE_AFTER_MS {
+            return;
+        }
+        self.unreadable = Some((since, why, true));
+        self.log(&format!("The game's strip shows but hasn't read as a frame for {} s ({}): commands from the game can't come through", UNREADABLE_AFTER_MS / 1000, why.text()));
     }
 
     /// A new game process has loaded no picture: every image slot can be written again. The
@@ -5073,6 +5108,11 @@ impl Bridge {
         if self.unsigned {
             out.insert("uns".into(), json!(1));
         }
+        // The strip shows but hasn't read as a frame for a while, and why: the window says
+        // so rather than that the companion isn't answering.
+        if let Some((_, why, true)) = self.unreadable {
+            out.insert("unr".into(), json!(why.text()));
+        }
         // The addon version on disk, so the game can say when it needs a restart of WoW to
         // load newer files (left out when unknown).
         if let Some(version) = self.slots.addon_version() {
@@ -5113,6 +5153,7 @@ impl Bridge {
             "auth": data["auth"],
             "trust": data["trust"],
             "uns": data["uns"],
+            "unr": data["unr"],
             "av": data["av"],
             "t3u": data["t3u"],
             "att": data["att"],
@@ -5285,6 +5326,7 @@ impl Bridge {
     /// A poll runs a step (one request) at a time for up to TICK_BUDGET_MS, then gives the
     /// caller (and the game's next commands, the tray's controls) a turn.
     pub fn tick(&mut self) {
+        self.check_unreadable();
         self.run_commands();
         let now = self.now_ms();
         self.outcomes.retain(|(at, _)| now - at < OUTCOME_KEEP_MS);

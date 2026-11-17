@@ -2520,6 +2520,50 @@ fn the_tray_setting_decides_which_commands_from_the_game_reach_t3() {
     assert!(rig.bridge.snapshot()["trust"].is_null());
 }
 
+/// A strip that shows but doesn't read (the game drew it at another size, say) used to leave
+/// the game saying only that the companion isn't answering, and the log saying nothing.
+#[test]
+fn a_strip_that_shows_but_doesnt_read_is_said_once_after_a_while() {
+    let mut rig = Rig::new(29_400_000);
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&lines);
+    rig.bridge.log = Box::new(move |line| sink.lock().unwrap().push(line.to_string()));
+    let said = |lines: &Arc<Mutex<Vec<String>>>| lines.lock().unwrap().iter().filter(|l| l.contains("strip")).cloned().collect::<Vec<_>>();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [] }));
+    let mut damaged = crate::codec::encode_signed_frame(2, &json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 1, "t": "send", "id": "t1", "m": "hi" }] }).to_string(), TEST_KEY);
+    let last = damaged.len() - 30;
+    damaged[last] = (damaged[last] + 1) % 8;
+    let at = *rig.clock.lock().unwrap();
+    rig.bridge.on_capture(CaptureMessage::Strip(damaged.clone(), at));
+    rig.advance(9_000);
+    rig.bridge.tick();
+    assert!(said(&lines).is_empty(), "a moment's misread isn't news");
+    assert!(rig.bridge.snapshot()["unr"].is_null());
+    rig.advance(1_000);
+    rig.bridge.tick();
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(said(&lines), vec!["The game's strip shows but hasn't read as a frame for 10 s (bad checksum): commands from the game can't come through"]);
+    assert_eq!(rig.bridge.snapshot()["unr"], "bad checksum", "the window says why");
+    assert!(rig.slot(rig.bridge.link.slot - 1).contains("unr=\"bad checksum\""), "{}", rig.slot(rig.bridge.link.slot - 1));
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 0);
+
+    // It reads again: said, and the window stops saying it.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 1, "t": "send", "id": "t1", "m": "hi" }] }));
+    rig.bridge.tick();
+    assert_eq!(rig.t3.calls_to("t3_thread_send").len(), 1);
+    assert_eq!(said(&lines).last().map(String::as_str), Some("The game's strip reads again"));
+    assert!(rig.bridge.snapshot()["unr"].is_null());
+
+    // A misread strip that then hides had nothing more to say: no news after it.
+    let at = *rig.clock.lock().unwrap();
+    rig.bridge.on_capture(CaptureMessage::Strip(damaged, at));
+    rig.bridge.on_capture(CaptureMessage::NoStrip);
+    rig.advance(20_000);
+    rig.bridge.tick();
+    assert_eq!(said(&lines).len(), 2);
+}
+
 #[test]
 fn a_frame_not_signed_with_the_addons_key_can_only_read() {
     let changes = ["t3_thread_send", "t3_thread_launch", "t3_thread_organize", "t3_thread_interrupt"];
