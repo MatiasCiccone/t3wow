@@ -206,11 +206,10 @@ pub const PICK_ACCESS_NOTE: &str =
 /// to T3 Connect there, and it starts with no access picked. Any other goes to the
 /// environment's own `/connect-agent` page, where approving without a code grants Read only.
 fn approval_notes(redirect: Option<&str>) -> [String; 2] {
-    let path = redirect.unwrap_or("").split(['?', '#']).next().unwrap_or("");
-    if path.trim_end_matches('/').ends_with("/approve-agent") {
+    if is_hosted_page(redirect) {
         [
             format!("Opening T3 Connect's sign-in page. {PICK_ACCESS_NOTE} It starts with no access picked."),
-            "If it asks you to sign in, use your T3 Connect account.".to_string(),
+            format!("If it asks you to sign in, use your T3 Connect account. {DEVICE_APPROVAL_NOTE}"),
         ]
     } else {
         [
@@ -219,6 +218,18 @@ fn approval_notes(redirect: Option<&str>) -> [String; 2] {
         ]
     }
 }
+
+/// Whether T3's authorize step sent the browser to T3 Connect's hosted page (`approval_notes`).
+fn is_hosted_page(redirect: Option<&str>) -> bool {
+    let path = redirect.unwrap_or("").split(['?', '#']).next().unwrap_or("");
+    path.trim_end_matches('/').ends_with("/approve-agent")
+}
+
+/// T3 Code 0.110.0 can require approval for new T3 Connect devices (off by default). The
+/// hosted page reaches the environment as a T3 Connect device, so a browser that machine doesn't
+/// trust yet waits for approval there, and the page only says it couldn't reach it. The
+/// companion's own token comes from the page's approval and needs none.
+const DEVICE_APPROVAL_NOTE: &str = "If the page says it could not reach that environment through T3 Connect, the T3 there may require approval for new devices: approve this browser in T3 on that machine under Settings > Sharing & access > T3 Connect devices, then reload the page.";
 
 /// Said after a sign-in that can only read, and on the tray menu and the game's top line
 /// while it's the one in use.
@@ -394,7 +405,7 @@ fn login(origin: &str, key: &str, log: &dyn Fn(&str), on_browser: &dyn Fn(), can
     open_browser(&authorize);
     on_browser();
 
-    let code = wait_for_code(&listener, &state, Duration::from_secs(600), cancelled)?;
+    let code = wait_for_code(&listener, &state, Duration::from_secs(600), cancelled).map_err(|e| with_device_approval_note(e, page.as_deref()))?;
 
     let form: Vec<String> = [
         ("grant_type", "authorization_code"),
@@ -509,7 +520,15 @@ fn wait_for_code(listener: &TcpListener, state: &str, timeout: Duration, cancell
             None => respond(&stream, "400 Bad Request", "<h2>Sign-in failed</h2><p>T3 sent no code.</p>"),
         }
     }
-    Err("Timed out waiting for approval (10 min).".into())
+    Err(TIMED_OUT.into())
+}
+
+const TIMED_OUT: &str = "Timed out waiting for approval (10 min).";
+
+/// A wait on T3 Connect's page that ran out may be a browser waiting for device approval on the
+/// host, or denied it: neither brings anything back, so the timeout says what to check.
+fn with_device_approval_note(error: String, redirect: Option<&str>) -> String {
+    if error == TIMED_OUT && is_hosted_page(redirect) { format!("{error} {DEVICE_APPROVAL_NOTE}") } else { error }
 }
 
 fn parse_event_stream(text: &str, id: u64) -> Option<Value> {
@@ -759,13 +778,28 @@ mod tests {
         assert!(hosted[0].contains("no access picked"), "{}", hosted[0]);
         assert!(!hosted.concat().contains("Read only when"), "{hosted:?}");
         assert!(approval_notes(Some("https://nightly.app.t3.codes/approve-agent/?x=1"))[0].contains("T3 Connect"));
+        // T3 Code 0.110.0 can make that page's browser wait for device approval on the host.
+        assert!(hosted[1].contains("Settings > Sharing & access > T3 Connect devices"), "{}", hosted[1]);
         for local in [Some("/connect-agent?response_type=code"), Some("http://127.0.0.1:3773/connect-agent"), None] {
             let notes = approval_notes(local);
             assert!(notes[0].contains("T3 starts at Read only when you approve without a code"), "{local:?}: {}", notes[0]);
             assert!(notes[1].contains("Settings > Sharing & access"), "{local:?}");
+            assert!(!notes[1].contains("T3 Connect devices"), "{local:?}");
         }
         // A query that names the hosted page doesn't count: only the redirect's path does.
         assert!(approval_notes(Some("/connect-agent?next=/approve-agent"))[0].contains("Read only"));
+    }
+
+    #[test]
+    fn a_timeout_on_t3_connects_page_names_device_approval() {
+        // A browser waiting for T3 Code 0.110.0's device approval, or denied it, never calls back.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let timed_out = wait_for_code(&listener, "s", Duration::ZERO, &|| false).unwrap_err();
+        let hosted = with_device_approval_note(timed_out.clone(), Some("https://app.t3.codes/approve-agent?x=1"));
+        assert!(hosted.starts_with(TIMED_OUT) && hosted.contains("T3 Connect devices"), "{hosted}");
+        assert_eq!(with_device_approval_note(timed_out, Some("/connect-agent?x=1")), TIMED_OUT);
+        let cancelled = "Sign-in cancelled.".to_string();
+        assert_eq!(with_device_approval_note(cancelled.clone(), Some("https://app.t3.codes/approve-agent")), cancelled);
     }
 
     #[test]
