@@ -739,7 +739,7 @@ end
 -- Settle and Snooze on a row, as in T3's sidebar. Snooze offers T3's snooze presets and
 -- Custom… for a typed time; T3 takes a time, which the companion works out, since the game's
 -- clock may not be the PC's. On a snoozed thread the clock wakes it. A settled thread has
--- only Unsettle. As in T3 0.18.0, a thread waiting on a question can be snoozed (the question
+-- only Unsettle. As in T3 0.1.8, a thread waiting on a question can be snoozed (the question
 -- stays open; a newer one wakes it), but one waiting on an approval, or on a turn still
 -- starting, has only Settle.
 do
@@ -4159,7 +4159,7 @@ do
         return names
     end
 
-    -- The thread's machine's models for an @ query, best first, as T3 0.18 ranks them
+    -- The thread's machine's models for an @ query, best first, as T3 0.1.8 ranks them
     -- (composer-model-mentions): every word typed starts a word of the model's or provider's
     -- name, and two letters at least. A pick writes @ and the model's name, which goes out
     -- as model:<instance>/<model>: it names a model for the agent and switches nothing.

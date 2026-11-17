@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runGame } from "./game.js";
 
-const LINE = "Update T3 Code to 0.19.0 (it runs 0.18.0): in T3 Code, Settings > About > Check for Updates";
-const SHORT = "Update T3 Code to 0.19.0";
+const LINE = "Update T3 Code to 0.1.9 (it runs 0.1.8): in T3 Code, Settings > About > Check for Updates";
+const SHORT = "Update T3 Code to 0.1.9";
 
 // `inbox(t3u, extra)` hands the window an update from the companion, with `t3u` left out
 // when nil, and `t3s` with it unless `extra` says otherwise.
@@ -35,8 +35,8 @@ test("an older T3 Code shows briefly on the pill, in full in its tooltip, and on
   assert.equal(
     run(`
 inbox(LINE)
-assert(showing("^|cffffd100Update T3 Code to 0%.19%.0|r$"), "the pill doesn't say it in a few words")
-assert(not showing("it runs 0%.18%.0"), "the pill says it in full")
+assert(showing("^|cffffd100Update T3 Code to 0%.1%.9|r$"), "the pill doesn't say it in a few words")
+assert(not showing("it runs 0%.1%.8"), "the pill says it in full")
 assert(hover():find("^|cffffd100" .. LINE:gsub("%p", "%%%0") .. "|r~"), "the tooltip doesn't start with it in full: " .. hover())
 assert(select(2, hover():gsub("Update T3 Code", "")) == 1, "the tooltip says it twice: " .. hover())
 assert(printed[#printed]:find(LINE, 1, true), "chat doesn't say it in full: " .. printed[#printed])
@@ -59,7 +59,7 @@ test("an older companion's update (only t3u) shows it in full on the pill", () =
   assert.equal(
     run(`
 inbox(LINE, { t3s = false })
-assert(showing("it runs 0%.18%.0"), "the pill doesn't say it")
+assert(showing("it runs 0%.1%.8"), "the pill doesn't say it")
 return "ok"
 `),
     "ok",

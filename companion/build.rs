@@ -89,6 +89,6 @@ fn made_for_t3() {
     println!("cargo:rerun-if-changed=../package.json");
     let package = std::fs::read_to_string("../package.json").expect("package.json, next to the companion folder");
     let field = package.split("\"t3Code\"").nth(1).expect("package.json has no t3Code (the T3 Code this release is made for)");
-    let version = field.split('"').nth(1).filter(|v| !v.is_empty() && v.split('.').all(|n| n.parse::<u64>().is_ok())).expect("package.json's t3Code reads like 0.19.0");
+    let version = field.split('"').nth(1).filter(|v| !v.is_empty() && v.split('.').all(|n| n.parse::<u64>().is_ok())).expect("package.json's t3Code reads like 0.1.9");
     println!("cargo:rustc-env=T3WOW_T3_CODE={version}");
 }

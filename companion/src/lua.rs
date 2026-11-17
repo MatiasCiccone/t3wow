@@ -240,7 +240,7 @@ pub fn name_thread_links(text: &str, name: impl Fn(&str, &str) -> String) -> Str
     out
 }
 
-/// Marks around a `model:<instance>/<model>` reference in prose and table cells, as T3 0.18
+/// Marks around a `model:<instance>/<model>` reference in prose and table cells, as T3 0.1.8
 /// writes one to name a model for the agent: the bridge puts the model's name in its place
 /// when the machine has that provider and model (`name_model_refs`), else the reference as
 /// written. T3's text can't hold them: they are taken out of it first.

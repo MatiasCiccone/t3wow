@@ -298,7 +298,7 @@ pub fn resolve_typed(text: &str, now: i64, zone: &Zone, max_minutes: i64) -> Res
 
 // ---- T3's presets ----
 
-/// T3 Code's own presets, when its settings have none (its DEFAULT_SNOOZE_PRESETS, 0.19.0).
+/// T3 Code's own presets, when its settings have none (its DEFAULT_SNOOZE_PRESETS, 0.1.9).
 pub fn t3_default_presets() -> Vec<Value> {
     vec![
         json!({ "kind": "after", "minutes": 60 }),

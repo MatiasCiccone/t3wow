@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn a_read_only_sign_in_is_known_from_the_scopes_t3_granted() {
         let file = temp_file("scope");
-        // T3 Code 0.18.0's Read only level grants only orchestration:read.
+        // T3 Code 0.1.8's Read only level grants only orchestration:read.
         Config::update_at(&file, |c| c.set_sign_in(LOCAL, "t", None, "orchestration:read").unwrap());
         let (config, _) = Config::read(&file).unwrap();
         assert!(config.sign_in_read_only(LOCAL), "the scopes are saved with the sign-in");

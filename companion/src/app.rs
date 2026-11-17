@@ -1181,7 +1181,7 @@ mod tests {
         let notice = older_t3_notice(Some(&older), &mut said).expect("the first time");
         assert_eq!(notice.level, Level::Warning);
         assert_eq!(notice.title, format!("Update T3 Code to {}", crate::made_for::T3_CODE));
-        assert!(notice.text.contains("T3 Code 0.17.0") && notice.text.contains("Settings > About > Check for Updates"), "{}", notice.text);
+        assert!(notice.text.contains("T3 Code 0.1.7") && notice.text.contains("Settings > About > Check for Updates"), "{}", notice.text);
         assert!(fits_a_toast(&notice.text), "{}", notice.text);
         assert_eq!(older_t3_notice(Some(&older), &mut said), None, "not with every poll");
         assert_eq!(older_t3_notice(None, &mut said), None);

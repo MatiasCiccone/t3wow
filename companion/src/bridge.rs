@@ -486,7 +486,7 @@ fn compact_picks(cache: &Value) -> Vec<Value> {
     picks
 }
 
-/// The first T3 whose sends take `freshContext` (T3 Code 0.18.0 reports its server as 0.1.8).
+/// The first T3 whose sends take `freshContext` (T3 Code 0.1.8).
 /// MCP doesn't list a server's capabilities, so its version stands in for that one.
 const FRESH_CONTEXT_SINCE: [u64; 3] = [0, 1, 8];
 
@@ -684,7 +684,7 @@ pub struct LinkState {
     pub started_threads: Vec<String>,
     /// The messages the game's /clear sent in a fresh session, oldest first, at most
     /// `FRESH_KEPT`. T3 draws its New session line above such a message, but its read
-    /// doesn't say which ones they are (T3 Code 0.19.0), so only this marks them.
+    /// doesn't say which ones they are (T3 Code 0.1.9), so only this marks them.
     pub fresh_messages: Vec<String>,
 }
 
@@ -4923,7 +4923,7 @@ impl Bridge {
                     entry["prs"] = json!(pull_request_links(t));
                 }
                 entry["at"] = json!(iso_seconds(str_of(&t["updatedAt"])));
-                // The row's age, as T3 0.18's sidebar tells it: a settled thread's from when it
+                // The row's age, as T3 0.1.8's sidebar tells it: a settled thread's from when it
                 // was settled, any other's from its last activity (`read_activity`).
                 let settled_at = iso_seconds(str_of(&t["settledAt"]));
                 if t["settled"] == true && settled_at > 0 {

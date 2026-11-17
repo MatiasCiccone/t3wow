@@ -89,12 +89,12 @@ test("with the companion note on the pill, the tooltip still shows the T3 Code u
   assert.equal(
     run(`
 UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = "0.9.1",
-  t3u = "Update T3 Code: this T3 WoW is made for 0.19.0" })
+  t3u = "Update T3 Code: this T3 WoW is made for 0.1.9" })
 assert(companionPill(), "the pill doesn't show the companion note")
-assert(hover():find("~|cffffd100Update T3 Code: this T3 WoW is made for 0.19.0|r~", 1, true), hover())
+assert(hover():find("~|cffffd100Update T3 Code: this T3 WoW is made for 0.1.9|r~", 1, true), hover())
 -- Once the companion is updated the T3 Code note has the pill, and the tooltip doesn't repeat it.
 UI.OnInbox({ k = "c1", u = Link.Session(), ack = 0, envs = {}, threads = {}, projects = {}, notes = {}, events = {}, now = time(), cv = "0.9.2",
-  t3u = "Update T3 Code: this T3 WoW is made for 0.19.0" })
+  t3u = "Update T3 Code: this T3 WoW is made for 0.1.9" })
 local _, n = hover():gsub("Update T3 Code", "")
 assert(n == 1, hover())
 return "ok"

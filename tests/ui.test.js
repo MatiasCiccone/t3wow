@@ -330,7 +330,7 @@ return "ok"
 
 test("a row and its header age from when T3 says (la), else from updatedAt (at)", () => {
   run(`
--- Touched just now, but its last reply came two hours ago: T3 0.18 says 2h.
+-- Touched just now, but its last reply came two hours ago: T3 0.1.8 says 2h.
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), la = time() - 7200, p = "" }
 inboxWith(ENVS, { threads = { thread } })
 assert(showing("^2h$"), "the row doesn't age from la")
@@ -1817,7 +1817,7 @@ end
 UI.Work.liveSince = time() - 5
 UI.Work.Tick()
 assert(row.text == "Working for 5s", row.text)
--- Seconds show whenever minutes do, as in T3 0.19.0; hours alone stay bare.
+-- Seconds show whenever minutes do, as in T3 0.1.9; hours alone stay bare.
 for seconds, said in pairs({ [60] = "1m 0s", [720] = "12m 0s", [736] = "12m 16s", [3600] = "1h", [3660] = "1h 1m 0s" }) do
   UI.Work.liveSince = time() - seconds
   UI.Work.Tick()
@@ -3368,7 +3368,7 @@ for _, status in ipairs({ "approval", "preparing", "queued", "starting" }) do
   assert(not row.snoozeAction.shown and row.settleAction.shown and row.settleAction.tip == "Settle thread", status .. " offers Snooze")
 end
 
--- Waiting on a question: Snooze too, as in T3 0.18.0. The status stands where the age was until hovered.
+-- Waiting on a question: Snooze too, as in T3 0.1.8. The status stands where the age was until hovered.
 thread.set, thread.s = false, "waiting"
 inboxWith(ENVS, { threads = { thread } })
 row = hoverRow("t1")
