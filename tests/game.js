@@ -178,7 +178,14 @@ controlDown = false
 function IsControlKeyDown() return controlDown end
 function ReloadUI() end
 function PlaySound() end
-C_AddOns = { LoadAddOn = function(name) loads[#loads + 1] = name; T3WoW_Inbox = inboxes[name]; return true end }
+-- A slot's inbox is a table (what its Inbox.lua sets T3WoW_Inbox to) or the file's text,
+-- which runs as the game would run it.
+C_AddOns = { LoadAddOn = function(name)
+  loads[#loads + 1] = name
+  local inbox = inboxes[name]
+  if type(inbox) == "string" then assert(load(inbox, name .. "/Inbox.lua"))() else T3WoW_Inbox = inbox end
+  return true
+end }
 
 -- Sends a game event (PLAYER_LOGOUT, say) to every frame that has an OnEvent script.
 function fire(event, ...)

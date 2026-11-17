@@ -1,5 +1,6 @@
 // The addon's link (Link.lua) in the simulated game: acks, slot budgets and backoff.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runGame } from "./game.js";
 
@@ -19,6 +20,31 @@ inboxes.T3WoW_S002 = { k = "c1", u = session, ack = 1, now = time() }
 inboxes.T3WoW_S003 = { k = "c1", ack = 2, now = time() }
 tick(30)
 assert(Link.Pending() == 0, "left " .. Link.Pending())
+return "ok"
+`);
+});
+
+test("a slot holding the companion's blank placeholder reads as empty", () => {
+  // The companion never leaves a slot's Inbox.lua empty (the game warns about an empty Lua
+  // file); what it writes instead must still read as "no update" here.
+  const slots = readFileSync(new URL("../companion/src/slots.rs", import.meta.url), "utf8");
+  const blank = JSON.parse(`"${slots.match(/pub const BLANK_INBOX: &str = "((?:[^"\\]|\\.)*)";/)[1]}"`);
+  assert.ok(blank.length > 0);
+  runGame(`
+Link.Init()
+Link.Send({ t = "send", id = "t1", m = "hi" })
+local pending = Link.Pending()
+inboxes.T3WoW_S001 = [==[${blank}]==]
+inboxes.T3WoW_S002 = 'T3WoW_Inbox = { k = "c1", u = Link.state.uiSession, ack = 1, now = time() }'
+tick(1)
+assert(#loads == 1, "loads " .. #loads)
+assert(Link.state.loadError == nil, "load error " .. tostring(Link.state.loadError))
+assert(Link.state.trace[#Link.state.trace]:find("slot was empty", 1, true), Link.state.trace[#Link.state.trace])
+assert(Link.Pending() == pending, "kept " .. Link.Pending())
+assert(T3WoW_Inbox == nil, "nothing left behind")
+-- The next slot, a real Inbox.lua, still delivers.
+tick(30)
+assert(#loads >= 2 and Link.Pending() < pending, "left " .. Link.Pending())
 return "ok"
 `);
 });
