@@ -37,7 +37,9 @@ function hoverRow(id)
     end
   end
 end
-function typeText(text) composer().text = text end
+-- Typing into the box, as the game keeps it: a typed | is held as || (its escape for a
+-- literal pipe), and GetText gives that back. typed() is what the box holds.
+function typeText(text) composer().text = (text:gsub("|", "||")) end
 function typed() return composer().text end
 function queue() return Link.Queue() end
 function sent() return queue()[#queue()] end
@@ -362,6 +364,63 @@ assert(showing("Not sent: T3 refused the message"), "no notice")
 typeText("")
 inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "T3 refused the message" } } })
 assert(typed() == "", "text put back twice")
+return "ok"
+`);
+});
+
+test("typed pipes reach T3 as typed, and come back to the box as the game keeps them", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Hi" } } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+-- A | typed on its own, and || typed on purpose (held as ||||).
+typeText("| A | B | and a || b")
+click("Send")
+local s = sent().s
+assert(sent().m == "| A | B | and a || b", sent().m)
+-- The "(sending)" line shows them as typed: escaped once for the game's text.
+assert(showing("\\n|| A || B || and a |||| b$"), "echo not as typed")
+inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "T3 refused the message" } } })
+assert(typed() == "|| A || B || and a |||| b", "box holds " .. typed())
+-- Sent again from the box, it is still what was typed.
+click("Send")
+assert(sent().m == "| A | B | and a || b", sent().m)
+return "ok"
+`);
+});
+
+test("a New Thread's typed pipes reach T3 as typed", () => {
+  run(`
+inboxWith(ENVS, { projects = { { e = 2, id = "pm", t = "mac app" } } })
+click("New Thread")
+typeText('preview "+---+---+ / | A | B | / +---+---+"')
+click("Start")
+assert(sent().t == "new" and sent().m == 'preview "+---+---+ / | A | B | / +---+---+"', tostring(sent().m))
+return "ok"
+`);
+});
+
+test("a typed answer and a note keep their pipes, and a refused answer comes back as the game keeps it", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local ask = { k = "abcd1234", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" }, { l = "Blue", d = "" } } } } }
+local view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask }
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+typeText("red | blue")
+click("Submit answer")
+local s = sent().s
+assert(sent().t == "answer" and sent().a[1] == "red | blue", tostring(sent().a[1]))
+inboxWith(ENVS, { threads = { thread }, view = view, out = { { s = s, ok = false, x = "timed out" } } })
+assert(typed() == "red || blue", "box holds " .. typed())
+-- A note with a pick.
+typeText("")
+click("Red")
+typeText("a || b")
+click("Submit answer")
+local a = sent().a
+assert(type(a[1]) == "table" and a[1][1] == 1 and a[1][2] == "a || b", tostring(type(a[1]) == "table" and a[1][2]))
 return "ok"
 `);
 });
