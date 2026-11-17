@@ -2250,15 +2250,32 @@ local projectMenu = dropdown(newPanel, "T3WoWProjectMenu", 240, {
         UI.Refresh()
     end,
 })
+-- The New Thread composer's project, if it is still listed.
+local function selectedProject()
+    for _, p in ipairs(UI.ProjectsFor(envIndexById(selected.env))) do
+        if p.id == selected.project then return p end
+    end
+end
+
 -- Where a project's thread runs, as T3 asks: a new worktree (from the checkout's current
 -- branch) or the project's checkout itself. A scratch thread has neither, so it's hidden.
+-- A project that isn't a Git repository (nr) has no worktrees: T3 refuses one, and its
+-- window offers only the folder.
 local WORKSPACE_NAME = { worktree = "New worktree", checkout = "Current checkout" }
+function UI.InWorktree()
+    local p = selectedProject()
+    return selected.worktree == true and not (p and p.nr)
+end
 local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 200, {
     entries = function()
+        local p = composing() and selectedProject()
+        if p and p.nr then
+            return { { text = WORKSPACE_NAME.checkout, value = "checkout" }, { text = "New worktree needs a Git repository", note = true } }
+        end
         return { { text = WORKSPACE_NAME.checkout, value = "checkout" }, { text = WORKSPACE_NAME.worktree, value = "worktree" } }
     end,
     isSelected = function(mode)
-        return composing() and (selected.worktree and "worktree" or "checkout") == mode
+        return composing() and (UI.InWorktree() and "worktree" or "checkout") == mode
     end,
     pick = function(mode)
         if not composing() then return end
@@ -2266,13 +2283,6 @@ local workspaceMenu = dropdown(newPanel, "T3WoWWorkspaceMenu", 200, {
         UI.Refresh()
     end,
 })
-
--- The New Thread composer's project, if it is still listed.
-local function selectedProject()
-    for _, p in ipairs(UI.ProjectsFor(envIndexById(selected.env))) do
-        if p.id == selected.project then return p end
-    end
-end
 
 function UI.ProjectsFor(envIndex)
     local list = {}
@@ -2939,7 +2949,7 @@ function renderView()
         projectMenu:SetLabel(project and project.t
             or (selected.project and "|cffff4040gone: pick another|r" or "No project"))
         workspaceMenu:SetShown(selected.project ~= nil)
-        workspaceMenu:SetLabel(WORKSPACE_NAME[selected.worktree and "worktree" or "checkout"])
+        workspaceMenu:SetLabel(WORKSPACE_NAME[UI.InWorktree() and "worktree" or "checkout"])
         return
     end
     newPanel:Hide()
@@ -3842,7 +3852,7 @@ local function sendCurrent()
         return
     end
     local command = selected.new
-        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and selected.worktree) or nil, m = UI.Picker.Expand(text),
+        and { t = "new", e = selected.env, p = selected.project, w = (selected.project and UI.InWorktree()) or nil, m = UI.Picker.Expand(text),
             pv = selected.pv, md = selected.m, ef = selected.ef, rm = selected.rm }
         or { t = "send", e = selected.env, id = selected.id, m = UI.Picker.Expand(text), fc = fresh or nil }
     local fits, why = ns.Link.Fits(command)
@@ -5290,7 +5300,14 @@ function UI.OnInbox(data)
         UI.companionSaid = true
         print("|cff8f8fffT3 WoW|r |cffff8000" .. UI.CompanionNote() .. UI.Companion.updateHint .. ".|r")
     end
-    notice = takeOutcomes(data)
+    -- A refused command's line stays 30 seconds through the updates after it, as the
+    -- companion's notes do: the next update would otherwise clear it within a second.
+    local said = takeOutcomes(data)
+    if said then
+        notice, UI.noticeKept = said, GetTime() + 30
+    elseif not UI.noticeKept or GetTime() >= UI.noticeKept then
+        notice, UI.noticeKept = nil, nil
+    end
     -- The run ended (or the thread dropped off the list's working states): Stop is done.
     local t = stopping and listedThread(stopping.env, stopping.id)
     if t and not UI.Stoppable(t.s) then stopping = nil end
@@ -5302,7 +5319,7 @@ end
 -- notifications and waiting outcomes go. What you typed stays in the box, and chat says
 -- "connected to T3" again once the new one's update is in.
 function UI.ForgetLogin()
-    inbox, selected, echo, notice, stopping = nil, nil, nil, nil, nil
+    inbox, selected, echo, notice, stopping, UI.noticeKept = nil, nil, nil, nil, nil, nil
     UI.History.list, UI.History.at, UI.History.pending = {}, 0, nil
     copyBox:Hide()
     UI.RowActions.snoozeBox:Hide()
@@ -5319,7 +5336,7 @@ function UI.ForgetLogin()
 end
 
 function UI.Notice(text)
-    notice = text
+    notice, UI.noticeKept = text, nil
     UI.Refresh()
 end
 
@@ -5484,6 +5501,7 @@ frame:SetScript("OnUpdate", function(_, delta)
     if stopping and GetTime() - stopping.at >= STOP_TIMEOUT then
         notice = stopping.taken and "Still running after Stop: press it again, or stop it in T3."
             or "No word back on Stop: press it again."
+        UI.noticeKept = nil
         stopping = nil
     end
     renderStatus()

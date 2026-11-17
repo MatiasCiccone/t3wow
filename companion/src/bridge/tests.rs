@@ -117,6 +117,15 @@ impl FakeT3 {
         threads.iter().chain(unlisted.iter()).find(|t| t["threadId"] == *id).unwrap_or(&threads[0]).clone()
     }
 
+    /// Whether a launch's project is listed with a folder that has no Git repository.
+    fn not_a_repository(&self, args: &Value) -> bool {
+        let env = args["environmentId"].as_str().unwrap_or("local");
+        let projects = self.projects.lock().unwrap().get(env).cloned().unwrap_or_default();
+        let Some(p) = projects.as_array().into_iter().flatten().find(|p| p["id"] == args["projectId"]).cloned() else { return false };
+        let root = std::path::Path::new(str_of(&p["workspaceRoot"]));
+        p["workspaceRoot"].is_string() && !root.ancestors().any(|dir| dir.join(".git").exists())
+    }
+
     fn calls_to(&self, name: &str) -> Vec<Value> {
         self.calls.lock().unwrap().iter().filter(|(n, _)| n == name).map(|(_, a)| a.clone()).collect()
     }
@@ -171,6 +180,17 @@ impl T3 for FakeT3 {
             }
             // The "local" server leaves its name out, as an older T3 might.
             "t3_environment_read" if *self.env_id.lock().unwrap() != "local" => json!({ "label": "Server B" }),
+            // As T3 Code 0.110.0 refuses a new worktree for a project whose folder isn't in
+            // a Git repository (it looks on disk), before making a thread.
+            "t3_thread_launch" if args["workspaceStrategy"]["type"] == "worktree" && self.not_a_repository(&args) => {
+                let env = args["environmentId"].as_str().unwrap_or("local");
+                let projects = self.projects.lock().unwrap().get(env).cloned().unwrap_or_default();
+                let p = projects.as_array().into_iter().flatten().find(|p| p["id"] == args["projectId"]).cloned().unwrap_or_default();
+                return Err(T3Error::Other(format!(
+                    "Project \"{}\" ({}) is not a Git repository. No thread was created. Use workspaceStrategy: {{type: \"root\"}}, or pass the projectId of a Git repository.",
+                    str_of(&p["title"]), str_of(&p["workspaceRoot"])
+                )));
+            }
             "t3_thread_launch" => json!({ "threadId": "new1" }),
             // T3 answers a send with the message it made, among other things.
             "t3_thread_send" => json!({ "threadId": args["threadId"], "messageId": format!("message:{}", str_of(&args["message"])), "delivery": "started" }),
@@ -2036,6 +2056,55 @@ fn new_thread_starts_in_a_new_worktree_or_the_checkout_and_defaults_as_t3_does()
     assert!(launches[1]["workspaceStrategy"].is_null(), "{}", launches[1]);
     // A scratch thread has no checkout to branch from.
     assert!(launches[2]["workspaceStrategy"].is_null() && launches[2]["scratch"] == true, "{}", launches[2]);
+}
+
+#[test]
+fn a_project_that_isnt_a_git_repository_starts_only_in_its_folder() {
+    // As T3 Code 0.110.0 lists them: a repository by its remote, a plain folder (or a
+    // repository without a remote) with none.
+    let dir = std::env::temp_dir().join(format!("t3wow-norepo-{}", std::process::id()));
+    let (plain, local_repo) = (dir.join("plain"), dir.join("local-repo"));
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::create_dir_all(local_repo.join(".git")).unwrap();
+    let mut rig = Rig::new(27_200_000);
+    rig.t3.thread_modes.lock().unwrap().insert("local".to_string(), "worktree");
+    rig.t3.projects.lock().unwrap().insert("local".to_string(), json!([
+        { "id": "p1", "title": "app", "workspaceRoot": "/elsewhere/app","repositoryIdentity": { "name": "app" } },
+        { "id": "p2", "title": "T3 WoW live tests", "workspaceRoot": plain, "repositoryIdentity": null },
+        { "id": "p3", "title": "lib", "workspaceRoot": local_repo, "repositoryIdentity": null, "defaultThreadEnvMode": "worktree" },
+    ]));
+
+    // Before the projects are read, a worktree asked for goes to T3, which refuses it: the
+    // game hears its words at once, and no thread is made.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "new", "p": "p2", "w": true, "m": "Try it" }] }));
+    rig.bridge.tick();
+    let refused = outcome(&rig, 1);
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(str_of(&refused["x"]).starts_with("Project \"T3 WoW live tests\" ("), "{refused}");
+    assert!(str_of(&refused["x"]).contains("is not a Git repository. No thread was created."), "{refused}");
+
+    rig.advance(61_000);
+    rig.bridge.tick();
+    // New Thread offers the folder only, by default too, where there's no repository.
+    let listed: Vec<(String, bool, bool)> = rig.bridge.snapshot()["projects"].as_array().unwrap().iter()
+        .filter(|p| p["e"] == 1)
+        .map(|p| (str_of(&p["id"]).to_string(), p["w"] == true, p["nr"] == true))
+        .collect();
+    assert_eq!(listed, vec![("p1".into(), true, false), ("p2".into(), false, true), ("p3".into(), true, false)]);
+
+    // An older addon's worktree for that project runs in its folder instead.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "p": "p2", "w": true, "m": "In the folder" },
+        { "s": 3, "t": "new", "p": "p3", "w": true, "m": "In a worktree" },
+    ] }));
+    rig.bridge.tick();
+    let launches = rig.t3.calls_to("t3_thread_launch");
+    assert_eq!(launches.len(), 3);
+    assert!(launches[1]["workspaceStrategy"].is_null(), "{}", launches[1]);
+    assert_eq!(launches[2]["workspaceStrategy"]["type"], "worktree");
+    assert_eq!(outcome(&rig, 2)["ok"], true);
+    assert_eq!(outcome(&rig, 3)["ok"], true);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
