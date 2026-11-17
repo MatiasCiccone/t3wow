@@ -603,6 +603,18 @@ fn is_scratch_project(project: &Value) -> bool {
     project["repositoryIdentity"].is_null() && (scratch_folder || project["projectIcon"]["name"] == "message-square-dashed")
 }
 
+/// Whether a project's thread can start in a new worktree: T3 refuses that for a folder
+/// that isn't in a Git repository. T3 names a repository only by its remote, so a project
+/// listed without one may still be a repository without a remote: its folder, if this PC
+/// has it, says. A T3 that lists no repositories at all is taken at its word as before.
+fn has_repository(project: &Value) -> bool {
+    if !project.get("repositoryIdentity").is_some_and(Value::is_null) {
+        return true;
+    }
+    let root = std::path::Path::new(str_of(&project["workspaceRoot"]));
+    root.is_dir() && root.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 /// The longest snooze the game may ask for: a year.
 const MAX_SNOOZE_MINUTES: i64 = 525_600;
 
@@ -2608,7 +2620,10 @@ impl Bridge {
                     }
                     // A new worktree branches from what the project's checkout has checked
                     // out; without one, the thread runs in that checkout (T3's default).
-                    if command["p"].is_string() && command["w"] == true {
+                    // T3 refuses a worktree for a project that isn't a Git repository, so an
+                    // older addon's ask for one runs in the folder instead.
+                    let no_repository = self.projects.get(&env).and_then(|list| list.iter().find(|p| p["id"] == command["p"])).is_some_and(|p| !has_repository(p));
+                    if command["p"].is_string() && command["w"] == true && !no_repository {
                         args["workspaceStrategy"] = json!({ "type": "worktree", "baseRef": "HEAD" });
                     }
                     if let Some(selection) = self.model_selection(&env, &command, Vec::new())? {
@@ -4891,11 +4906,14 @@ impl Bridge {
             for p in list.iter().filter(|p| !p["archivedAt"].is_string() && !p["deletedAt"].is_string() && !is_scratch_project(p)) {
                 let mut entry = json!({ "e": env_index(env), "id": str_of(&p["id"]), "t": plain(str_of(&p["title"]), 40) });
                 // Where New Thread starts it by default: the project's own mode, else the machine's.
+                // Without a repository, only in its folder, as T3's window offers it.
                 let worktree = match p["defaultThreadEnvMode"].as_str() {
                     Some(mode) => mode == "worktree",
                     None => machine_worktree,
                 };
-                if worktree {
+                if !has_repository(p) {
+                    entry["nr"] = json!(true);
+                } else if worktree {
                     entry["w"] = json!(true);
                 }
                 projects.push(entry);

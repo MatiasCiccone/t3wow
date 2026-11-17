@@ -231,6 +231,35 @@ return "ok"
 `);
 });
 
+test(`New Thread offers only the folder for a project that isn't a Git repository, and a refused Start stays readable`, () => {
+  run(`
+local projects = { { e = 1, id = "pa", t = "alpha", w = true }, { e = 1, id = "pl", t = "live tests", nr = true } }
+inboxWith(ENVS, { projects = projects })
+click("New Thread")
+pick("T3WoWProjectMenu", "alpha")
+pick("T3WoWProjectMenu", "live tests")
+-- As T3's window: the folder only, and why there's no worktree.
+assert(shown("T3WoWWorkspaceMenu") == "Current checkout", shown("T3WoWWorkspaceMenu"))
+assert(menuTexts("T3WoWWorkspaceMenu") == "Current checkout|New worktree needs a Git repository", menuTexts("T3WoWWorkspaceMenu"))
+assert(menuEntries("T3WoWWorkspaceMenu")[1].checked, "Current checkout isn't checked")
+typeText("try it")
+click("Start")
+local s = sent().s
+assert(sent().t == "new" and sent().p == "pl" and sent().w == nil, "w=" .. tostring(sent().w))
+-- T3 refuses it anyway: the words stay under the box through the next updates, the text back in the box.
+inboxWith(ENVS, { projects = projects, out = { { s = s, ok = false, x = "Project \\"live tests\\" is not a Git repository. No thread was created." } } })
+assert(showing("Couldn't start the thread: Project \\"live tests\\" is not a Git repository"), "refusal not shown")
+assert(typed() == "try it", typed())
+tick(5)
+inboxWith(ENVS, { projects = projects })
+assert(showing("Couldn't start the thread"), "refusal gone with the next update")
+tick(30)
+inboxWith(ENVS, { projects = projects })
+assert(not showing("Couldn't start the thread"), "refusal kept for good")
+return "ok"
+`);
+});
+
 test(`New Thread with no machines or no projects says so`, () => {
   run(`
 inboxWith({})

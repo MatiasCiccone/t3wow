@@ -672,6 +672,12 @@ impl McpClient {
     }
 }
 
+/// What a tool's refusal says: T3 Code 0.110.0 sends it as JSON (`{"_tag": …, "code": …,
+/// "message": …}`), and only its message reads as a sentence.
+fn tool_error(text: &str) -> String {
+    serde_json::from_str::<Value>(text).ok().and_then(|v| v["message"].as_str().map(str::to_string)).unwrap_or_else(|| text.to_string())
+}
+
 impl T3 for McpClient {
     /// One tool call: setting up the MCP session and a retry after it expired all share
     /// one CALL_TIMEOUT, so a call never takes longer than one request may.
@@ -694,7 +700,7 @@ impl T3 for McpClient {
                         .and_then(|p| p["text"].as_str())
                         .map(str::to_string);
                     if result["isError"] == true {
-                        return Err(T3Error::Other(text.unwrap_or_else(|| format!("{name} failed"))));
+                        return Err(T3Error::Other(text.map(|t| tool_error(&t)).unwrap_or_else(|| format!("{name} failed"))));
                     }
                     if let Some(structured) = result.get("structuredContent").filter(|v| !v.is_null()) {
                         return Ok(structured.clone());
@@ -832,6 +838,14 @@ mod tests {
         assert_eq!(encoded, "a%20b%26c%3Dd%2F%C3%A9");
         assert_eq!(query_param(&format!("x=1&code={encoded}&state=s"), "code").as_deref(), Some("a b&c=d/é"));
         assert_eq!(query_param("error=access_denied", "code"), None);
+    }
+
+    #[test]
+    fn a_tools_refusal_is_its_message() {
+        let refused = r#"{"_tag":"OrchestratorMcpFailure","code":"invalid_request","message":"Project \"T3 WoW live tests\" (C:\\t3wow\\live-tests) is not a Git repository. No thread was created."}"#;
+        assert_eq!(tool_error(refused), r#"Project "T3 WoW live tests" (C:\t3wow\live-tests) is not a Git repository. No thread was created."#);
+        assert_eq!(tool_error("Invalid parameters for tool 'x'"), "Invalid parameters for tool 'x'");
+        assert_eq!(tool_error(r#"{"code":"x"}"#), r#"{"code":"x"}"#);
     }
 
     #[test]
