@@ -32,6 +32,8 @@ struct FakeT3 {
     projects: Mutex<HashMap<String, Value>>,
     /// Each machine's "New thread mode" preference (left out when not set).
     thread_modes: Mutex<HashMap<String, &'static str>>,
+    /// The launches T3 made a new worktree for (their titles).
+    worktree_launches: Mutex<Vec<String>>,
     /// The server version each machine reports (left out when not set).
     versions: Mutex<HashMap<String, &'static str>>,
     /// Whether the threads' agents watch their pull requests.
@@ -94,6 +96,7 @@ impl FakeT3 {
             activity: Mutex::new(HashMap::new()),
             projects: Mutex::new(HashMap::new()),
             thread_modes: Mutex::new(HashMap::new()),
+            worktree_launches: Mutex::new(Vec::new()),
             versions: Mutex::new(HashMap::new()),
             item_texts: Mutex::new(HashMap::new()),
             watching: Mutex::new(false),
@@ -191,7 +194,24 @@ impl T3 for FakeT3 {
                     str_of(&p["title"]), str_of(&p["workspaceRoot"])
                 )));
             }
-            "t3_thread_launch" => json!({ "threadId": "new1" }),
+            // As T3 Code 0.1.11 launches for an outside caller: a project thread with no
+            // workspaceStrategy gets a new worktree when the project's own mode, or else its
+            // machine's preference, is a new worktree.
+            "t3_thread_launch" => {
+                let env = args["environmentId"].as_str().unwrap_or("local");
+                let projects = self.projects.lock().unwrap().get(env).cloned().unwrap_or_default();
+                let project = projects.as_array().into_iter().flatten().find(|p| p["id"] == args["projectId"]).cloned();
+                let default = project.as_ref().and_then(|p| p["defaultThreadEnvMode"].as_str().map(str::to_string))
+                    .or_else(|| self.thread_modes.lock().unwrap().get(env).map(|m| m.to_string()));
+                let worktree = match args["workspaceStrategy"]["type"].as_str() {
+                    Some(kind) => kind == "worktree",
+                    None => args["projectId"].is_string() && default.as_deref() == Some("worktree"),
+                };
+                if worktree {
+                    self.worktree_launches.lock().unwrap().push(str_of(&args["title"]).to_string());
+                }
+                json!({ "threadId": "new1" })
+            }
             // T3 answers a send with the message it made, among other things.
             "t3_thread_send" => json!({ "threadId": args["threadId"], "messageId": format!("message:{}", str_of(&args["message"])), "delivery": "started" }),
             "orchestrator_capabilities" => self.capabilities.lock().unwrap().clone(),
@@ -2083,10 +2103,12 @@ fn new_thread_starts_in_a_new_worktree_or_the_checkout_and_defaults_as_t3_does()
     assert_eq!(launches[0]["workspaceStrategy"], json!({ "type": "worktree", "baseRef": "HEAD" }));
     assert_eq!(launches[0]["projectId"], "p1");
     assert_eq!(launches[0]["environmentId"], "mac");
-    // Without "w", T3's own default: the project's checkout.
-    assert!(launches[1]["workspaceStrategy"].is_null(), "{}", launches[1]);
-    // A scratch thread has no checkout to branch from.
+    // Without "w", the project's checkout, said outright: since T3 Code 0.1.11 a launch
+    // that leaves it out gets a new worktree where the project's default is one.
+    assert_eq!(launches[1]["workspaceStrategy"], json!({ "type": "root" }), "{}", launches[1]);
+    // A scratch thread has no checkout to branch from, and T3 refuses a strategy with one.
     assert!(launches[2]["workspaceStrategy"].is_null() && launches[2]["scratch"] == true, "{}", launches[2]);
+    assert_eq!(*rig.t3.worktree_launches.lock().unwrap(), vec!["In a worktree".to_string()]);
 }
 
 #[test]
@@ -2131,8 +2153,9 @@ fn a_project_that_isnt_a_git_repository_starts_only_in_its_folder() {
     rig.bridge.tick();
     let launches = rig.t3.calls_to("t3_thread_launch");
     assert_eq!(launches.len(), 3);
-    assert!(launches[1]["workspaceStrategy"].is_null(), "{}", launches[1]);
+    assert_eq!(launches[1]["workspaceStrategy"], json!({ "type": "root" }), "{}", launches[1]);
     assert_eq!(launches[2]["workspaceStrategy"]["type"], "worktree");
+    assert_eq!(*rig.t3.worktree_launches.lock().unwrap(), vec!["In a worktree".to_string()]);
     assert_eq!(outcome(&rig, 2)["ok"], true);
     assert_eq!(outcome(&rig, 3)["ok"], true);
     let _ = std::fs::remove_dir_all(&dir);

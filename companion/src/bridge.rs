@@ -2656,12 +2656,18 @@ impl Bridge {
                         None => args["scratch"] = json!(true),
                     }
                     // A new worktree branches from what the project's checkout has checked
-                    // out; without one, the thread runs in that checkout (T3's default).
-                    // T3 refuses a worktree for a project that isn't a Git repository, so an
-                    // older addon's ask for one runs in the folder instead.
+                    // out; without one, the thread runs in that checkout ("root"), said
+                    // outright: since T3 Code 0.1.11 a launch that leaves it out gets a new
+                    // worktree where the project's default is one. T3 refuses a worktree for
+                    // a project that isn't a Git repository, so an older addon's ask for one
+                    // runs in the folder instead. A scratch thread takes no strategy.
                     let no_repository = self.projects.get(&env).and_then(|list| list.iter().find(|p| p["id"] == command["p"])).is_some_and(|p| !has_repository(p));
-                    if command["p"].is_string() && command["w"] == true && !no_repository {
-                        args["workspaceStrategy"] = json!({ "type": "worktree", "baseRef": "HEAD" });
+                    if command["p"].is_string() {
+                        args["workspaceStrategy"] = if command["w"] == true && !no_repository {
+                            json!({ "type": "worktree", "baseRef": "HEAD" })
+                        } else {
+                            json!({ "type": "root" })
+                        };
                     }
                     if let Some(selection) = self.model_selection(&env, &command, Vec::new())? {
                         args["modelSelection"] = selection;
