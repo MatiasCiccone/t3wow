@@ -100,7 +100,9 @@ mod tests {
         assert_eq!(older_t3(&format!("{current}-beta.1")), None);
         assert_eq!(older_t3(&format!("{}.{}.{}", made_for[0], made_for[1], made_for[2] + 1)), None);
         assert_eq!(older_t3("0.2.0"), None);
-        assert_eq!(older_t3("0.1.10"), None, "0.1.10 is newer than 0.1.9, not older");
+        // Part by part, as numbers: as text, 0.1.9 would read newer than 0.1.11 and 0.1.100 older.
+        assert!(older_t3("0.1.9").is_some(), "0.1.9 is older than 0.1.10 and later");
+        assert_eq!(older_t3("0.1.100"), None, "0.1.100 is newer than 0.1.11, not older");
     }
 
     #[test]
