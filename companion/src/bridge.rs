@@ -104,17 +104,19 @@ fn active(status: &str) -> bool {
     working(status) || status == WATCHING
 }
 
-/// A thread that may be watching a pull request: open on the sidebar, its run ended
-/// without waiting on you, with a pull request not yet merged or closed. Only such threads
+/// A thread that may be watching a pull request: open on the sidebar, its run ended (not
+/// failed) without waiting on you, with a pull request not yet merged or closed. Only such threads
 /// are asked whether they watch one.
 fn may_watch(thread: &Value) -> bool {
     run_over(thread) && thread["pullRequests"].as_array().is_some_and(|prs| prs.iter().any(pull_request_open))
 }
 
-/// Open on the sidebar, with its run ended and not waiting on you.
+/// Open on the sidebar, with its run ended, not waiting on you and not failed: since T3
+/// Code 0.1.11 a failed run returns its thread to you whatever background work (a pull
+/// request watch, a subagent) still holds it, and T3's sidebar says Failed.
 fn run_over(thread: &Value) -> bool {
     let status = str_of(&thread["status"]);
-    thread["settled"] != true && !working(status) && !needs_you(status)
+    thread["settled"] != true && !working(status) && !needs_you(status) && status != "failed"
 }
 
 /// The threads with a subagent in a list of threads still going. Forks have a parent too,
