@@ -1059,6 +1059,26 @@ fn a_thread_waiting_on_a_subagent_shows_as_watching_and_notifies_when_it_ends() 
 }
 
 #[test]
+fn a_failed_thread_shows_as_failed_while_it_watches_a_pull_request_or_waits_on_a_subagent() {
+    let mut rig = Rig::new(6_500_000);
+    rig.t3.threads.lock().unwrap()[0]["pullRequests"] = json!([{ "number": 31, "state": "open" }]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+
+    // Since T3 Code 0.1.11 a failed run returns its thread to you whatever background work
+    // still holds it: its sidebar row says Failed, not Waiting.
+    *rig.t3.watching.lock().unwrap() = true;
+    rig.t3.threads.lock().unwrap().push(json!({ "threadId": "kid", "projectId": "p1", "title": "Review", "status": "running", "parentThreadId": "t1", "relationshipToParent": "subagent", "updatedAt": "2026-11-06T10:01:00Z" }));
+    rig.t3.set("failed", "2026-11-06T10:01:00Z");
+    rig.advance(15_000);
+    rig.bridge.tick();
+    let snapshot = rig.bridge.snapshot();
+    assert_eq!(snapshot["threads"][0]["s"], "failed", "the row: {snapshot}");
+    let inbox = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(inbox.contains("e=\"local\",id=\"t1\",t=\"Fix tests\",s=\"failed\"}"), "an alert: {inbox}");
+}
+
+#[test]
 fn a_running_fork_doesnt_make_the_thread_it_came_from_wait() {
     let list = json!({ "threads": [
         { "threadId": "fork", "status": "running", "parentThreadId": "t1", "relationshipToParent": "fork" },
