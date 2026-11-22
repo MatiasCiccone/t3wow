@@ -696,6 +696,10 @@ const STARTED_KEPT: usize = 500;
 /// How many messages sent in a fresh session are remembered.
 const FRESH_KEPT: usize = 500;
 
+/// How many of this UI session's sends from the game are remembered with the message each
+/// made, for the view to say which it shows.
+const SENT_MESSAGES_KEPT: usize = 32;
+
 /// A picture in an image slot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -973,6 +977,9 @@ pub struct Bridge {
     pending_ask: Option<PendingAsk>,
     /// Outcomes of this UI session's recent commands, with when they ran.
     outcomes: Vec<(i64, Value)>,
+    /// This UI session's sends from the game (their command number) and the message id T3
+    /// answered each with.
+    sent_messages: Vec<(u64, String)>,
     /// Threads T3 is stopping at the game's word ("env:id"), with when it was asked: the
     /// next list that shows one no longer working says "Stopped.".
     stopping: HashMap<String, i64>,
@@ -1033,6 +1040,8 @@ pub struct Bridge {
     started_ms: i64,
     /// When the frame that brought the command being run was read (epoch ms).
     command_seen_at: i64,
+    /// The UI session of the frame that brought the command being run.
+    command_session: String,
     long_command: Option<LongCommand>,
 }
 
@@ -2095,6 +2104,7 @@ impl Bridge {
             polled_ok: false,
             pending_ask: None,
             outcomes: Vec::new(),
+            sent_messages: Vec::new(),
             stopping: HashMap::new(),
             signals_out: None,
             signal_failures: 0,
@@ -2122,6 +2132,7 @@ impl Bridge {
             pasted_count: 0,
             started_ms,
             command_seen_at: 0,
+            command_session: String::new(),
             long_command: None,
         }
     }
@@ -2212,6 +2223,7 @@ impl Bridge {
         self.events.clear();
         self.notes.clear();
         self.outcomes.clear();
+        self.sent_messages.clear();
         self.drafts.clear();
         self.sent.clear();
         self.list_errors.clear();
@@ -2296,6 +2308,20 @@ impl Bridge {
             fresh.drain(..excess);
             self.save_state();
         }
+    }
+
+    /// The message a send from the game made, by the id T3's send answered with, so the
+    /// view can tell the game when it shows it (see `sent` in the built view).
+    fn remember_message(&mut self, command: &Value, sent: &Value) {
+        let (Some(s), Some(message)) = (command["s"].as_u64(), sent["messageId"].as_str().filter(|m| !m.is_empty())) else { return };
+        // A command run again (after a crash) gets the same id back: kept once. One from an
+        // earlier UI session numbers its commands apart from this one's: not kept.
+        if self.sent_messages.iter().any(|(known, _)| *known == s) || Some(self.command_session.as_str()) != self.link.ui_session.as_deref() {
+            return;
+        }
+        self.sent_messages.push((s, message.to_string()));
+        let excess = self.sent_messages.len().saturating_sub(SENT_MESSAGES_KEPT);
+        self.sent_messages.drain(..excess);
     }
 
     fn log(&self, message: &str) {
@@ -2476,6 +2502,7 @@ impl Bridge {
             }
             self.queued.remove(k);
             self.outcomes.clear();
+            self.sent_messages.clear();
             // Show more lasts for the UI session it was asked in.
             self.list_limits = LIST_LIMITS;
             self.log(&format!("Game UI connected (session {u}, next slot {})", self.link.slot));
@@ -2630,11 +2657,17 @@ impl Bridge {
                         if !message.is_empty() {
                             args["message"] = json!(message);
                         }
-                        if let Err(error) = self.client.call("t3_thread_send_attachments", args) {
-                            self.discard_uploads(&attachments);
-                            return Err(error);
-                        }
+                        let sent = match self.client.call("t3_thread_send_attachments", args) {
+                            Ok(sent) => sent,
+                            Err(error) => {
+                                self.discard_uploads(&attachments);
+                                return Err(error);
+                            }
+                        };
                         self.remember_sent(&draft, &env, &id, &message);
+                        if !message.is_empty() {
+                            self.remember_message(&command, &sent);
+                        }
                     } else {
                         let mut args = json!({ "threadId": id, "message": message, "mode": "auto", "clientRequestId": request_id });
                         if fresh {
@@ -2644,6 +2677,7 @@ impl Bridge {
                         if fresh {
                             self.remember_fresh(&sent);
                         }
+                        self.remember_message(&command, &sent);
                     }
                     self.note(if fresh { "Sent in a fresh session." } else { "Sent." });
                     let depth = self.view.as_ref().filter(|v| v.id == id).map(|v| v.depth).unwrap_or(1);
@@ -4251,6 +4285,16 @@ impl Bridge {
             "more": more,
             "items": items,
         });
+        // The game's sends among the messages read, by command number: its "(sending)" line
+        // for one goes once it's in, however the view words it (a code fence's language or a
+        // link's address left out), and even once newer messages push it out of the view.
+        let read_ids: Vec<&str> = messages.iter().filter(|m| m["type"] == "user_message").map(|m| str_of(&m["messageId"])).filter(|id| !id.is_empty()).collect();
+        let sent: Vec<u64> = self.sent_messages.iter().filter(|(_, m)| read_ids.contains(&m.as_str())).map(|(s, _)| *s).collect();
+        if !sent.is_empty() {
+            built["sent"] = json!(sent);
+            // Its numbers are this UI session's: a view built before a new one starts drops them.
+            built["sentU"] = json!(self.link.ui_session);
+        }
         // The branch its checkout is on, for the header. Only a thread read has it, not T3's
         // list, so the game shows it for the open thread alone.
         let branch = plain(str_of(&thread["branch"]), 80);
@@ -5002,6 +5046,11 @@ impl Bridge {
         }
         let view = self.view_data.as_ref().map(|data| {
             let mut data = data.clone();
+            if let Some(fields) = data.as_object_mut() {
+                if fields.remove("sentU") != Some(json!(self.link.ui_session)) {
+                    fields.remove("sent");
+                }
+            }
             // From the list, read every poll: a merge needn't touch the thread, so the view
             // wouldn't be read again for it.
             let links = self.threads.get(str_of(&data["e"])).and_then(|list| list.iter().find(|t| t["threadId"] == data["id"])).map(pull_request_links);
@@ -5350,6 +5399,7 @@ impl Bridge {
         while let Some((client_key, session, login, command, seen_at, signed)) = self.commands.pop_front() {
             let s = command["s"].as_u64().unwrap_or(0);
             self.command_seen_at = seen_at;
+            self.command_session = session.clone();
             let outcome = self.run(&client_key, login.as_deref(), command, signed);
             if Some(session.as_str()) == self.link.ui_session.as_deref() && Some(client_key.as_str()) == self.link.client_key.as_deref() {
                 let entry = self.link.acked.entry(client_key).or_insert(0);
