@@ -909,6 +909,9 @@ pub struct Bridge {
     events: Vec<Value>,
     event_seq: i64,
     last_status: HashMap<String, String>,
+    /// When each thread was last seen in its `last_status` (ms): an event that thread raises
+    /// happened after then, which the game weighs against when you settled the thread.
+    status_seen: HashMap<String, i64>,
     /// The requests each thread waiting on you has notified for, until it stops waiting.
     shown_requests: HashMap<String, HashSet<String>>,
     /// Active threads off the lists whose last reads failed, and how many times in a row.
@@ -1832,6 +1835,8 @@ struct PollRun {
     steps: VecDeque<Step>,
     /// Each machine's list replies so far, while the lists are read.
     lists: Vec<(String, Result<Vec<Value>, T3Error>)>,
+    /// When the lists started to be read: what they show was so at least then.
+    lists_at: i64,
     /// The machine whose lists are being taken in.
     listed: Option<Listed>,
     /// The open thread, while it's read.
@@ -1901,6 +1906,8 @@ struct Listed {
     threads: Vec<Value>,
     settled_total: u64,
     more: [bool; LIST_COUNT],
+    /// When its lists started to be read (`PollRun::lists_at`).
+    at: i64,
     /// The working threads looked at: their pending counts stay, the machine's others go.
     seen: Vec<String>,
 }
@@ -2054,6 +2061,7 @@ impl Bridge {
             events: Vec::new(),
             event_seq: 0,
             last_status: HashMap::new(),
+            status_seen: HashMap::new(),
             shown_requests: HashMap::new(),
             unlisted_misses: HashMap::new(),
             pending_counts: HashMap::new(),
@@ -2235,6 +2243,7 @@ impl Bridge {
         self.settled_totals.clear();
         self.list_more.clear();
         self.last_status.clear();
+        self.status_seen.clear();
         self.shown_requests.clear();
         self.unlisted_misses.clear();
         self.pending_counts.clear();
@@ -3045,7 +3054,7 @@ impl Bridge {
         }
         steps.push_back(Step::List(0));
         steps.push_back(Step::View);
-        self.poll_run = Some(PollRun { started: t, steps, lists: Vec::new(), listed: None, reading: None });
+        self.poll_run = Some(PollRun { started: t, steps, lists: Vec::new(), lists_at: t, listed: None, reading: None });
         // This poll covers whatever asked for one.
         self.repoll = false;
     }
@@ -3166,9 +3175,13 @@ impl Bridge {
     /// the next step; after the last list, each machine's lists are taken in, one machine
     /// after another.
     fn read_lists(&mut self, n: usize) {
+        let now = self.now_ms();
         let mut lists = match self.poll_run.as_mut() {
             Some(run) if n > 0 || !run.lists.is_empty() => std::mem::take(&mut run.lists),
-            Some(_) => self.envs.iter().filter(|e| e.ok).map(|e| (e.id.clone(), Ok(Vec::new()))).collect(),
+            Some(run) => {
+                run.lists_at = now;
+                self.envs.iter().filter(|e| e.ok).map(|e| (e.id.clone(), Ok(Vec::new()))).collect()
+            }
             None => return,
         };
         let limit = self.list_limits[n];
@@ -3242,7 +3255,7 @@ impl Bridge {
                 steps.extend((0..threads.len()).filter(|i| ages_from_run(&threads[*i])).map(Step::Activity));
                 steps.extend([Step::Track, Step::Keep]);
                 if let Some(run) = self.poll_run.as_mut() {
-                    run.listed = Some(Listed { env, threads, settled_total, more, seen: Vec::new() });
+                    run.listed = Some(Listed { env, threads, settled_total, more, at: run.lists_at, seen: Vec::new() });
                 }
                 self.push_steps(steps);
                 Ok(())
@@ -3561,7 +3574,7 @@ impl Bridge {
     fn track_listed(&mut self) {
         let Some(listed) = self.poll_run.as_mut().and_then(|run| run.listed.take()) else { return };
         for thread in &listed.threads {
-            self.track_status(&listed.env, thread);
+            self.track_status(&listed.env, thread, listed.at);
         }
         let prefix = format!("{}:", listed.env);
         self.pending_counts.retain(|k, _| !k.starts_with(&prefix) || listed.seen.contains(k));
@@ -3579,11 +3592,13 @@ impl Bridge {
                 steps.push(Step::Unlisted(key, status));
             } else {
                 self.last_status.remove(&key);
+                self.status_seen.remove(&key);
                 self.unlisted_misses.remove(&key);
             }
         }
         let last_status = &self.last_status;
         self.shown_requests.retain(|k, _| last_status.contains_key(k));
+        self.status_seen.retain(|k, _| last_status.contains_key(k));
         if let Some(run) = self.poll_run.as_mut() {
             run.listed = Some(listed);
         }
@@ -3602,6 +3617,7 @@ impl Bridge {
         } else {
             let id = key.get(env.len() + 1..).unwrap_or("");
             let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1 }), &self.env_arg(&env));
+            let read_at = self.now_ms();
             match self.client.call("t3_thread_read", args) {
                 Ok(read) if read["thread"].is_object() => {
                     self.unlisted_misses.remove(&key);
@@ -3610,7 +3626,7 @@ impl Bridge {
                     if working(str_of(&thread["status"])) && thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
                         thread["status"] = json!(if needs_you(&status) { status.as_str() } else { "waiting" });
                     }
-                    self.track_status(&env, &thread);
+                    self.track_status(&env, &thread, read_at);
                     working(str_of(&thread["status"])) || needs_you(str_of(&thread["status"]))
                 }
                 Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
@@ -3625,6 +3641,7 @@ impl Bridge {
         };
         if !keep {
             self.last_status.remove(&key);
+            self.status_seen.remove(&key);
             self.unlisted_misses.remove(&key);
         }
         Ok(())
@@ -3712,6 +3729,7 @@ impl Bridge {
         self.list_more.retain(|env, _| linked(env));
         self.listed_envs.retain(|env| linked(env));
         self.last_status.retain(|key, _| linked(env_of(key)));
+        self.status_seen.retain(|key, _| linked(env_of(key)));
         self.shown_requests.retain(|key, _| linked(env_of(key)));
         self.unlisted_misses.retain(|key, _| linked(env_of(key)));
         self.pending_counts.retain(|key, _| linked(env_of(key)));
@@ -3924,13 +3942,15 @@ impl Bridge {
         Ok(Some(selection))
     }
 
-    fn track_status(&mut self, env: &str, thread: &Value) {
+    /// `seen_at`: when T3 was asked for the thread as it is here.
+    fn track_status(&mut self, env: &str, thread: &Value, seen_at: i64) {
         let key = format!("{env}:{}", str_of(&thread["threadId"]));
         let status = str_of(&thread["status"]).to_string();
         if !working(&status) && self.stopping.remove(&key).is_some() {
             self.note("Stopped.");
         }
         let before = self.last_status.insert(key.clone(), status.clone());
+        let seen = self.status_seen.insert(key.clone(), seen_at).filter(|_| before.is_some());
         // Each request a thread waits on notifies once, until the thread stops waiting on you
         // (as in T3): a second question that replaces the first notifies, and the first, back
         // when the second is answered, doesn't again. An approval has no id: its status rules.
@@ -3956,13 +3976,17 @@ impl Bridge {
         };
         if notify {
             self.event_seq = (self.event_seq + 1).max(self.now_ms());
-            self.events.push(json!({
-                "n": self.event_seq,
-                "e": env,
-                "id": str_of(&thread["threadId"]),
-                "t": plain(str_of(&thread["title"]), 80),
-                "s": status,
-            }));
+            // n: when a look saw it; p: the look before, which still saw the thread as it was.
+            let mut event = serde_json::Map::new();
+            event.insert("n".into(), json!(self.event_seq));
+            if let Some(seen) = seen {
+                event.insert("p".into(), json!(seen));
+            }
+            event.insert("e".into(), json!(env));
+            event.insert("id".into(), json!(str_of(&thread["threadId"])));
+            event.insert("t".into(), json!(plain(str_of(&thread["title"]), 80)));
+            event.insert("s".into(), json!(status));
+            self.events.push(Value::Object(event));
             let excess = self.events.len().saturating_sub(10);
             self.events.drain(..excess);
         }

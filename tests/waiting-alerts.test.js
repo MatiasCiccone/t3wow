@@ -1,5 +1,6 @@
-// What a /reload does for a thread that already waits on you: one silent notification,
-// unless one for this wait has already been on screen to its end or been clicked.
+// What a /reload or a login does for a thread that already waits on you: one silent notification,
+// unless one for this wait has already been on screen to its end or been clicked. And what the
+// first update's events, from before then, do for threads settled since: nothing.
 import { test } from "node:test";
 import { runGame } from "./game.js";
 
@@ -264,4 +265,161 @@ assert(not seen("box:t1") and not seen("mac:t2"), "another thread counted as see
 return "ok"
 `, { ui: true });
   }
+});
+
+// Events the companion saw while the game was closed (or before a /reload) come with the
+// first update. One for a thread settled since is old news.
+const EARLIER = `{ client = "c1", seq = 0, queue = {}, login = "aaaa", lastEvent = 1 }`;
+const EVENT = `
+-- seenAgo: the companion's look before (p), which still saw the thread as it was; none from an older companion.
+function event(id, status, ago, env, seenAgo)
+  return { n = (time() - ago) * 1000.0, p = seenAgo and (time() - seenAgo) * 1000.0, e = env or "mac", id = id, t = "Thread " .. id, s = status }
+end
+function settled(id, status, ago, extra)
+  local t = thread(id, status, { set = true, la = time() - ago })
+  for k, v in pairs(extra or {}) do t[k] = v end
+  return t
+end`;
+
+test("events from before the game started don't notify for threads settled since", () => {
+  runGame(`${HELPERS}
+${EVENT}
+local list = { settled("t1", "completed", 60), settled("t2", "failed", 60), settled("t3", "waiting", 60), thread("t4", "completed"),
+  settled("t5", "completed", 60), thread("t5", "completed", { e = 2 }) }
+local events = { event("t1", "completed", 600), event("t2", "failed", 500), event("t3", "waiting", 400), event("t4", "completed", 300),
+  event("t5", "completed", 250, "box"), event("t5", "completed", 200) }
+update(list, { events = events })
+assert(count() == 2, "shown " .. count())
+for _, toast in ipairs(shownToasts()) do
+  assert((toast.threadId == "t4" and toast.envId == "mac") or (toast.threadId == "t5" and toast.envId == "box"),
+    "shown for " .. toast.envId .. ":" .. toast.threadId)
+end
+assert(played == 2, "sounds: " .. played)
+assert(said("Thread t[123]") == 0, "a settled thread's chat line")
+-- Taken, not left for a later update.
+assert(T3WoWDB.lastEvent == events[6].n, "the events weren't taken")
+update(list, { events = events })
+assert(count() == 2 and played == 2, "they came back")
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("an earlier UI session's update left in a slot, from before you settled the thread, doesn't notify", () => {
+  runGame(`${HELPERS}
+${EVENT}
+local done = event("t1", "completed", 600)
+update({ thread("t1", "completed") }, { u = "an earlier session", events = { done } })
+assert(count() == 0, "the leftover update notified")
+update({ settled("t1", "completed", 60) }, { events = { done } })
+assert(count() == 0, "shown " .. count())
+assert(T3WoWDB.lastEvent == done.n)
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("a thread settled before its run ended while the game was closed notifies", () => {
+  runGame(`${HELPERS}
+${EVENT}
+update({ settled("t1", "completed", 3600) }, { events = { event("t1", "completed", 600) } })
+assert(count() == 1, "shown " .. count())
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("a settled thread whose run ends after the game started notifies, even in the first update", () => {
+  runGame(`${HELPERS}
+${EVENT}
+tick(5)
+update({ settled("t1", "completed", 1) }, { events = { event("t1", "completed", 1) } })
+assert(count() == 1, "shown " .. count())
+assert(played == 1)
+return "ok"
+`, { ui: true, db: EARLIER });
+  runGame(`${HELPERS}
+${EVENT}
+update({ settled("t1", "running", 600) })
+update({ settled("t1", "completed", 600) }, { events = { event("t1", "completed", 0) } })
+assert(count() == 1, "shown " .. count())
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("a backlog event notifies when the thread list it would go by may be another update's", () => {
+  runGame(`${HELPERS}
+${EVENT}
+update({ settled("t1", "completed", 60) }, { u = "an earlier session", hx = { threads = "h1" } })
+update(nil, { same = { "threads" }, hx = { threads = "h2" }, events = { event("t1", "completed", 600) } })
+assert(count() == 1, "shown " .. count())
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("from an older companion, settled seconds before the look that saw its run end counts as settled since", () => {
+  runGame(`${HELPERS}
+${EVENT}
+-- Settled 15 seconds before the poll that saw the run end, and a row with no settle time.
+update({ settled("t1", "completed", 615), thread("t2", "completed", { set = true }) },
+  { events = { event("t1", "completed", 600), event("t2", "completed", 500) } })
+assert(count() == 0, "shown " .. count())
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("a thread run again right after you settled it notifies: the companion saw it working after the settling", () => {
+  runGame(`${HELPERS}
+${EVENT}
+update({ settled("t1", "completed", 45) }, { events = { event("t1", "completed", 15, nil, 33) } })
+assert(count() == 1, "shown " .. count())
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("settled after the companion last saw it working counts as settled since, however late it saw the end", () => {
+  // A machine out of reach for hours: its run ended and you settled it, then the companion saw the end.
+  runGame(`${HELPERS}
+${EVENT}
+update({ settled("t1", "completed", 5 * 3600) }, { events = { event("t1", "completed", 3600, nil, 6 * 3600) } })
+assert(count() == 0, "shown " .. count())
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("an end the companion saw just after the game started, that could have come before, goes by when it was settled", () => {
+  runGame(`${HELPERS}
+${EVENT}
+tick(5)
+-- t1 ended and was settled while the game started; t2, settled long ago, ended since.
+update({ settled("t1", "completed", 8), settled("t2", "completed", 600) },
+  { events = { event("t1", "completed", 1, nil, 14), event("t2", "completed", 0, nil, 2) } })
+assert(count() == 1, "shown " .. count())
+assert(top().threadId == "t2", top().threadId)
+return "ok"
+`, { ui: true, db: EARLIER });
+});
+
+test("on a fresh install, an earlier UI session's update left in a slot doesn't set where news starts", () => {
+  runGame(`${HELPERS}
+${EVENT}
+update({ thread("t1", "running") }, { u = "an earlier session", now = time() - 3600.0 })
+update({ thread("t1", "completed") }, { now = time() + 0.0, events = { event("t1", "completed", 300) } })
+assert(count() == 0, "an event from before the last minute notified")
+return "ok"
+`, { ui: true, db: `{ client = "c1", seq = 0, queue = {}, login = "aaaa" }` });
+});
+
+test("an event shown before a logout or /reload isn't shown again after it", () => {
+  runGame(`${HELPERS}
+${EVENT}
+local done = event("t1", "completed", 30)
+update({ thread("t1", "completed") }, { events = { done } })
+assert(count() == 1)
+assert(T3WoWDB.lastEvent == done.n and done.n == 1793999970000, "lastEvent " .. tostring(T3WoWDB.lastEvent))
+return "ok"
+`, { ui: true, db: EARLIER });
+  runGame(`${HELPERS}
+${EVENT}
+update({ thread("t1", "completed") }, { events = { event("t1", "completed", 30) } })
+assert(count() == 0, "shown again")
+return "ok"
+`, { ui: true, db: `{ client = "c1", seq = 0, queue = {}, login = "aaaa", lastEvent = 1793999970000 }` });
 });

@@ -69,6 +69,7 @@ local state = {
     signals = "checking", -- "checking", "on" or "off"
     capability = nil,
     recentAlerts = {}, -- newest first, for /t3 status
+    startedAt = 0, -- when this UI session started, epoch seconds on the PC's clock
     trace = {},
     inbox = nil,
     inboxAt = nil,
@@ -400,6 +401,29 @@ local function keepParts(inbox, previous)
     return whole
 end
 
+-- The earliest an event can have happened, in epoch seconds: the companion's look before
+-- the one that saw it (p), which still saw the thread as it was. An older companion sends
+-- only when a look saw it (n), seconds after it happened at most poll gaps: hence the slack.
+local SETTLED_SLACK = 60
+local function happenedFrom(event)
+    return type(event.p) == "number" and event.p / 1000 or event.n / 1000 - SETTLED_SLACK
+end
+
+-- Whether an update lists an event's thread as settled since the event. A settled thread
+-- can run again and stay settled: its runs after the settling are news. A settled row's la
+-- is when it was settled (T3's clock, often on another machine; T3 0.1.11 sends settledAt
+-- for every settled thread). Without one, the thread counts as settled since.
+local function settledSince(inbox, event)
+    local envs = type(inbox.envs) == "table" and inbox.envs or {}
+    for _, t in ipairs(type(inbox.threads) == "table" and inbox.threads or {}) do
+        local e = envs[t.e]
+        if t.id == event.id and e and e.id == event.e then
+            return t.set == true and (type(t.la) ~= "number" or t.la >= happenedFrom(event))
+        end
+    end
+    return false
+end
+
 local function receive(inbox)
     if not takeLogin(inbox) then return end
     -- The update we're in step with (g in the strip's header): the companion leaves out of
@@ -463,15 +487,26 @@ local function receive(inbox)
     end
     state.inbox = inbox
     state.inboxAt = GetTime()
+    local current = inbox.u == nil or inbox.u == state.uiSession
     -- An answer from the companion: loads on the timer can go back to their quick pace.
-    if inbox.u == nil or inbox.u == state.uiSession then state.unanswered = 0 end
+    if current then state.unanswered = 0 end
+    -- Events only from this UI session's updates: one left in a slot by an earlier session
+    -- can list threads as they were before you settled them. The companion sends its last
+    -- events again in this session's first update.
+    local events = current and inbox.events or {}
     -- Nothing seen yet (a fresh install): only the last minute's events are news, not
     -- everything the companion still lists.
-    if db.lastEvent == nil then db.lastEvent = ((inbox.now or time()) - 60) * 1000 end
-    for _, event in ipairs(inbox.events or {}) do
+    if db.lastEvent == nil and current then db.lastEvent = ((inbox.now or time()) - 60) * 1000 end
+    for _, event in ipairs(events) do
         if event.n > (db.lastEvent or 0) then
             db.lastEvent = event.n
-            local result = ns.UI.Alert(event)
+            -- The companion keeps its last events from while the game was closed or reloading.
+            -- From before this UI session (the companion runs on the PC's clock too), a thread's
+            -- are old news once it's settled since. Taken, so they don't come back. Not when a
+            -- part this update left out wasn't ours: the thread list may be another update's.
+            local before = (type(event.p) == "number" and event.p or event.n) / 1000 < state.startedAt
+            local result = before and whole and settledSince(inbox, event)
+                and "not shown: settled since" or ns.UI.Alert(event)
             -- Kept for /t3 status: when it happened, how late and how it got here, what we did.
             table.insert(state.recentAlerts, 1, {
                 title = event.t, status = event.s, happened = floor(event.n / 1000), arrived = time(),
@@ -734,7 +769,8 @@ function Link.Init()
     -- Keep the previous UI session's record too: problems often show up just before a /reload.
     db.previousTrace = db.trace
     db.trace = state.trace
-    state.uiSession = format("%x%s", time(), randomHex(4))
+    state.startedAt = time()
+    state.uiSession = format("%x%s", state.startedAt, randomHex(4))
     trace("UI session " .. state.uiSession .. " started")
     hookAddonList()
     checkImages()
