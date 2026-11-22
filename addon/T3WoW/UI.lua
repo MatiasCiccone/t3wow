@@ -2320,8 +2320,8 @@ do
     end
 
     -- Where a picture couldn't be loaded (its file was emptied, by a reinstall say): a small
-    -- card saying so, yours against the right edge.
-    function Pictures.Lost(fs, mine)
+    -- card saying so, yours against the right edge. A video's still plays from it.
+    function Pictures.Lost(fs, mine, video)
         local PAD, ICON, GAP = 8, 16, 6
         if not rawget(fs, "lostBox") then
             fs.lostBox = Skin.Box(messageChild, { shape = "panel", fill = "card", ring = "border", free = true, sub = -8 })
@@ -2332,7 +2332,7 @@ do
         fs.bubble:Hide()
         fs:SetFontObject(Skin.fonts.muted)
         fs:SetWidth(full)
-        fs:SetText("Image couldn't be loaded")
+        fs:SetText(video and "Video preview couldn't be loaded" or "Image couldn't be loaded")
         local textWidth = math.ceil(fs:GetStringWidth() or 0) + 1
         fs:SetWidth(textWidth)
         local width = PAD + ICON + GAP + textWidth + PAD
@@ -3463,7 +3463,7 @@ function renderView()
             elseif changes then
                 placeChanges(fs, changes)
             elseif lost then
-                Pictures.Lost(fs, item.r == "u")
+                Pictures.Lost(fs, item.r == "u", play and play.v)
             elseif audio then
                 Pictures.Audio(fs, play, item.r == "u")
             elseif not picture then

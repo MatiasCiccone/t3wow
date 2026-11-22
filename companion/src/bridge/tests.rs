@@ -3479,6 +3479,63 @@ fn play_opens_a_video_on_this_pc_and_plays_or_stops_audio_named_by_the_open_thre
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Can't play anything, as Windows' own player can't play Ogg without a codec pack.
+struct DeafPlayer;
+
+impl crate::audio::Player for DeafPlayer {
+    fn play(&mut self, _path: &std::path::Path) -> Result<(), String> {
+        Err("Windows couldn't open it: unsupported format".into())
+    }
+    fn stop(&mut self) {}
+    fn playing(&mut self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn audio_the_player_cant_take_opens_in_the_default_one_and_audio_whose_card_goes_stops() {
+    let dir = std::env::temp_dir().join(format!("t3wow-play-more-{}", std::process::id()));
+    let (mut rig, _, player, _, audio) = media_rig(35_800_000, &dir, true);
+    let audio_key = play_key(&view_items(&rig), "Audio");
+    // As the addon draws every frame: it shows pictures, rows and cards.
+    let play = |rig: &mut Rig, s: u64| {
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "wk": 1, "dc": 1, "q": [{ "s": s, "t": "play", "id": "t1", "k": audio_key }] }));
+        rig.advance(1_000);
+        rig.bridge.tick();
+    };
+
+    // Playing, its file goes: the same click still stops it.
+    play(&mut rig, 3);
+    std::fs::remove_file(&audio).unwrap();
+    play(&mut rig, 4);
+    assert_eq!(outcome(&rig, 4), json!({ "s": 4, "ok": true }));
+    assert_eq!(player.calls().last().unwrap(), "stop");
+    std::fs::write(&audio, b"mp3 bytes").unwrap();
+
+    // Playing, its message leaves the view: it stops, as its card went.
+    play(&mut rig, 5);
+    assert!(player.calls().last().unwrap().starts_with("play "));
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["record it", "Never mind."]));
+    rig.t3.set("completed", "2026-11-06T11:00:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert!(!view_items(&rig).iter().any(|i| i["pl"].is_object()), "the card is gone: {:?}", view_items(&rig));
+    assert_eq!(player.calls().last().unwrap(), "stop", "and its audio with it");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A format the built-in player can't take opens in the default player.
+    let dir = std::env::temp_dir().join(format!("t3wow-play-deaf-{}", std::process::id()));
+    let (mut rig, _, _, _, _) = media_rig(35_900_000, &dir, true);
+    rig.bridge.player = Box::new(DeafPlayer);
+    let key = play_key(&view_items(&rig), "Audio");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "wk": 1, "dc": 1, "q": [{ "s": 3, "t": "play", "id": "t1", "k": key }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+    let opened = rig.opened();
+    assert!(opened.len() == 1 && opened[0].ends_with("tone.mp3"), "{opened:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn files_t3_plays_are_told_from_images_by_their_extension() {
     let kind = |p: &str| media_kind(std::path::Path::new(p));

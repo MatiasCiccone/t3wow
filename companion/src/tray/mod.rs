@@ -49,6 +49,9 @@ const NOTICE_GAP: Duration = Duration::from_secs(2);
 /// On a Mac in the app, through Launch Services (`open -n`), as if opened from Finder: a new
 /// copy of the app (the running one is still there), the one now on disk after an update.
 fn relaunch() -> ! {
+    // `afplay` would play on after this copy quits, and the next couldn't stop it.
+    #[cfg(target_os = "macos")]
+    crate::audio::quit();
     crate::single_instance::release();
     #[cfg(target_os = "macos")]
     if let Some(app) = crate::updater::running_app() {

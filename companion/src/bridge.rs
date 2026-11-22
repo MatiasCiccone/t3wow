@@ -443,11 +443,11 @@ fn playable(path: &std::path::Path, kind: MediaKind) -> Result<PathBuf, String> 
         return Err("its file isn't a video or audio file".into());
     }
     // Windows writes the full path as \\?\C:\..., which the players don't all take; one on
-    // the network (\\?\UNC\...) isn't a file on this PC.
+    // the network (\\?\UNC\...) or a volume with no drive letter isn't a file on this PC.
     let text = real.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
-        Some(rest) if rest.starts_with(r"UNC\") => Err("its file isn't on this PC".into()),
-        Some(rest) => Ok(PathBuf::from(rest)),
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => Ok(PathBuf::from(rest)),
+        Some(_) => Err("its file isn't on this PC".into()),
         None => Ok(real),
     }
 }
@@ -2970,6 +2970,13 @@ impl Bridge {
                     };
                     let (path, kind) = (path.clone(), *kind);
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    // The audio playing stops, even if its file has gone since it started.
+                    if kind == MediaKind::Audio && self.playing.as_deref() == Some(key) && self.player.playing() {
+                        self.stop_audio();
+                        self.note(&format!("Stopped {name}."));
+                        acked = true;
+                        return Ok(());
+                    }
                     let path = playable(&path, kind).map_err(T3Error::Other)?;
                     let here = THIS_MACHINE.replacen("This", "this", 1);
                     match kind {
@@ -2977,15 +2984,21 @@ impl Bridge {
                             (self.opener)(&path.display().to_string());
                             self.note(&format!("Opening {name} on {here}."));
                         }
-                        MediaKind::Audio if self.playing.as_deref() == Some(key) && self.player.playing() => {
-                            self.stop_audio();
-                            self.note(&format!("Stopped {name}."));
-                        }
                         MediaKind::Audio => {
                             self.playing = None;
-                            self.player.play(&path).map_err(T3Error::Other)?;
-                            self.playing = Some(key.to_string());
-                            self.note(&format!("Playing {name} on {here}."));
+                            match self.player.play(&path) {
+                                Ok(()) => {
+                                    self.playing = Some(key.to_string());
+                                    self.note(&format!("Playing {name} on {here}."));
+                                }
+                                // A format the built-in player can't take (Ogg on a Windows
+                                // without a codec pack, say) goes to the default player.
+                                Err(error) => {
+                                    self.log(&format!("{name}: {error}; opening it in the default player"));
+                                    (self.opener)(&path.display().to_string());
+                                    self.note(&format!("Opening {name} in {here}'s player."));
+                                }
+                            }
                         }
                     }
                     acked = true;
@@ -5009,6 +5022,11 @@ impl Bridge {
         }
         if !placed.is_empty() {
             self.save_state();
+        }
+        // Audio whose card is no longer shown (another thread, or scrolled out of the view)
+        // stops: the card is the only way to stop it.
+        if self.playing.as_ref().is_some_and(|k| !self.media.iter().any(|m| &m.key == k)) {
+            self.stop_audio();
         }
         if self.cards_ok {
             let first = self.view_read().and_then(|r| r.positions.first().copied()).unwrap_or(u64::MAX);
