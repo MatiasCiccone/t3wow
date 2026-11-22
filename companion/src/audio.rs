@@ -75,9 +75,9 @@ mod windows {
     impl Player for Mci {
         fn play(&mut self, path: &Path) -> Result<(), String> {
             self.stop();
-            // "mpegvideo" is Windows' media player behind MCI: on Windows 11 MP3, WAV, FLAC,
-            // Ogg, Opus, AAC, M4A and AIFF all play through it (Ogg and Opus through the Web
-            // Media Extensions it comes with). A path can't hold a quote.
+            // "mpegvideo" is DirectShow behind MCI: MP3 and WAV on any Windows, other formats
+            // only with a DirectShow codec for them (Ogg, Opus and FLAC need a codec pack); the
+            // bridge opens what it refuses in the default player. A path can't hold a quote.
             send(&format!("open \"{}\" type mpegvideo alias {ALIAS}", path.display())).map_err(|e| format!("Windows couldn't open it: {e}"))?;
             self.open = true;
             if let Err(error) = send(&format!("play {ALIAS}")) {
