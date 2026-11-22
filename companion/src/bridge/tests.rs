@@ -1903,6 +1903,43 @@ fn a_thread_answered_and_finished_between_two_looks_still_notifies() {
 }
 
 #[test]
+fn an_event_says_when_the_thread_was_last_seen_as_it_was() {
+    let mut rig = Rig::new(21_500_000);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
+    rig.bridge.tick();
+    // The lists take a while: the thread was seen when the first was asked for, not when
+    // the poll got round to taking them in.
+    rig.t3.delays.lock().unwrap().insert("t3_thread_list".into(), 3_000);
+    rig.advance(15_000);
+    let poll = *rig.clock.lock().unwrap();
+    for _ in 0..20 {
+        rig.bridge.tick();
+        if rig.bridge.poll_run.is_none() {
+            break;
+        }
+    }
+    let listed_at = rig.t3.calls_at("t3_thread_list").iter().map(|(_, at)| *at).filter(|at| *at >= poll).min().unwrap();
+    let seen = rig.bridge.status_seen["local:t1"];
+    assert_eq!(seen, listed_at);
+    assert_eq!(rig.bridge.last_status["local:t1"], "running");
+    assert!(*rig.clock.lock().unwrap() >= seen + 6_000, "the lists took no time");
+
+    rig.t3.set("completed", "2026-11-06T10:02:00Z");
+    rig.advance(15_000);
+    for _ in 0..20 {
+        rig.bridge.tick();
+        if rig.bridge.poll_run.is_none() {
+            break;
+        }
+    }
+    let event = rig.bridge.events.last().cloned().unwrap();
+    assert_eq!((event["id"].clone(), event["s"].clone(), event["p"].clone()), (json!("t1"), json!("completed"), json!(seen)));
+    assert!(event["n"].as_i64().unwrap() >= seen + 15_000, "{event}");
+    let latest = rig.written.lock().unwrap().slots.values().last().cloned().unwrap();
+    assert!(latest.contains(&format!("p={seen},e=\"local\",id=\"t1\"")), "{latest}");
+}
+
+#[test]
 fn a_working_thread_that_drops_off_the_list_still_notifies_when_it_ends() {
     let mut rig = Rig::new(22_000_000);
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": false }] }));
