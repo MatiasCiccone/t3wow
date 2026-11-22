@@ -3493,7 +3493,7 @@ impl crate::audio::Player for DeafPlayer {
 }
 
 #[test]
-fn audio_the_player_cant_take_opens_in_the_default_one_and_audio_whose_card_goes_stops() {
+fn audio_the_player_cant_take_opens_in_the_default_one_on_windows_and_audio_whose_card_goes_stops() {
     let dir = std::env::temp_dir().join(format!("t3wow-play-more-{}", std::process::id()));
     let (mut rig, _, player, _, audio) = media_rig(35_800_000, &dir, true);
     let audio_key = play_key(&view_items(&rig), "Audio");
@@ -3543,9 +3543,18 @@ fn audio_the_player_cant_take_opens_in_the_default_one_and_audio_whose_card_goes
     let key = play_key(&view_items(&rig), "Audio");
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "wk": 1, "dc": 1, "q": [{ "s": 3, "t": "play", "id": "t1", "k": key }] }));
     rig.bridge.tick();
-    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
-    let opened = rig.opened();
-    assert!(opened.len() == 1 && opened[0].ends_with("tone.mp3"), "{opened:?}");
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+        let opened = rig.opened();
+        assert!(opened.len() == 1 && opened[0].ends_with("tone.mp3"), "{opened:?}");
+    }
+    // A stock Mac has no app for what afplay refuses: the game hears why.
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(outcome(&rig, 3)["x"], "Windows couldn't open it: unsupported format");
+        assert!(rig.opened().is_empty());
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
