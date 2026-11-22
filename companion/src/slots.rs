@@ -98,6 +98,7 @@ pub const ADDON_FILES: &[(&str, &[u8])] = &[
     ("Media/brain.tga", include_bytes!("../../addon/T3WoW/Media/brain.tga")),
     ("Media/eye.tga", include_bytes!("../../addon/T3WoW/Media/eye.tga")),
     ("Media/globe.tga", include_bytes!("../../addon/T3WoW/Media/globe.tga")),
+    ("Media/copy.tga", include_bytes!("../../addon/T3WoW/Media/copy.tga")),
     ("Media/notification-completion.mp3", include_bytes!("../../addon/T3WoW/Media/notification-completion.mp3")),
     ("Media/notification-input.mp3", include_bytes!("../../addon/T3WoW/Media/notification-input.mp3")),
     ("Media/Sounds.txt", include_bytes!("../../addon/T3WoW/Media/Sounds.txt")),

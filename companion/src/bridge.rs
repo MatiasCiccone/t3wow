@@ -7,7 +7,7 @@ use crate::clip::{self, Clipped};
 use crate::codec::{decode_cells, Unreadable};
 use crate::config::Trust;
 use crate::made_for::{self, older_t3, OlderT3};
-use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, to_lua, wow_markup, wow_segments, wow_text, Font, MODEL_MARK};
+use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, segment_source, to_lua, wow_markup, wow_segments, wow_text, Font, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::snooze::{civil_from_days, days_from_civil};
@@ -398,6 +398,32 @@ fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
             absolute.then(|| (c[1].trim().to_string(), PathBuf::from(path)))
         })
         .collect()
+}
+
+/// A code block's mark: its first line as T3 has it (`lua::code_blocks`), less trailing
+/// spaces, hashed. Each drawn block carries it and the game sends it back with a copy of the
+/// block, so the companion can tell the block it finds is the one that was drawn.
+fn block_key(code: &str) -> String {
+    let first = code.split('\n').next().unwrap_or("").trim_end();
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in first.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
+
+/// The markdown the view cuts a message into segments from (`build_view`): your quotes taken
+/// out to stand as marks, and with `cut`, exactly the text `wow_segments` parses (cut as it
+/// cuts). Copying a code block finds it in this, so it counts the blocks the game numbered.
+fn view_markdown(message: &Value, cut: bool) -> String {
+    let text = str_of(&message["text"]);
+    let (raw, cites) = if message["type"] == "user_message" { take_cites(text, message["textTruncated"] == true) } else { (text.to_string(), Vec::new()) };
+    if !cut {
+        return raw;
+    }
+    let shown = if cites.is_empty() { raw } else { cites::capped(&raw, VIEW_TEXT_CHARS) };
+    segment_source(&shown, VIEW_TEXT_CHARS)
 }
 
 /// A message's text with each quote's mark (see cites::take_cites) put as the quote, its
@@ -805,6 +831,20 @@ const MAX_LONG_JSON: usize = 64_000;
 /// Stands in for a long command whose parts joined into nothing readable.
 const GARBLED: &str = "garbled";
 const GARBLED_REASON: &str = "T3 WoW couldn't read that long message: send it again";
+/// Allowed at every "Commands from the game" level, but only signed: playing a thread's video
+/// or audio, and copying, which changes nothing in T3 but replaces what your clipboard held.
+const SIGNED_ONLY: [&str; 2] = ["play", "copy"];
+/// Copying a message: T3 reads this much of an item at once, so a long message takes several
+/// reads, this many at most (200,000 characters); and a copy that waited longer than this
+/// many seconds after its click is refused.
+const COPY_CHARS: u64 = 20_000;
+const COPY_PIECES: usize = 10;
+const COPY_WAIT_S: i64 = 15;
+fn too_long_to_copy() -> T3Error {
+    T3Error::Other(format!("it's over {} characters: copy it in T3", COPY_CHARS as usize * COPY_PIECES))
+}
+/// What of a message the view reads, and the game draws: its first 6,000 characters.
+const VIEW_TEXT_CHARS: usize = 6000;
 /// Why a command from a frame that isn't signed with this install's key is refused, when
 /// it would change T3. Another addon can draw a strip but can't sign it; T3 WoW's own
 /// frames go unsigned when the game started before the companion wrote the key.
@@ -1089,6 +1129,9 @@ pub struct Bridge {
     picture_errors: HashMap<String, (String, i64)>,
     /// Reads the images on the clipboard (`clip::read_images`); replaced in tests.
     pub clipboard: Box<dyn Fn() -> Result<Vec<Clipped>, String> + Send>,
+    /// Puts text copied from the game's conversation on the clipboard (`clip::write_text`);
+    /// replaced in tests.
+    pub copy_text: CopyText,
     /// Ctrl+V presses seen in WoW, and when the last was (`keys::presses`); replaced in tests.
     pub presses: Box<dyn Fn() -> (u64, i64) + Send>,
     /// Turns the look for Ctrl+V on or off (`keys::arm`); replaced in tests.
@@ -1701,7 +1744,8 @@ impl FoundChanges {
             cf["a"] = json!(added);
             cf["d"] = json!(removed);
         }
-        json!({ "r": "a", "x": lines.join("\n"), "cf": cf })
+        // Where the turn's checkpoint is in the thread: what the game's copy icon names it by.
+        json!({ "r": "a", "x": lines.join("\n"), "cf": cf, "p": self.position })
     }
 }
 
@@ -1910,6 +1954,9 @@ fn with_args(base: Value, extra: &Map<String, Value>) -> Value {
     }
     base
 }
+
+/// Puts text on the clipboard, or says why it couldn't (`Bridge::copy_text`).
+pub type CopyText = Box<dyn Fn(&str) -> Result<(), String> + Send>;
 
 /// A machine's sidebar threads, its settled count, and which lists have more.
 type ThreadLists = Result<(Vec<Value>, u64, [bool; LIST_COUNT]), T3Error>;
@@ -2231,6 +2278,7 @@ impl Bridge {
             scan: None,
             picture_errors: HashMap::new(),
             clipboard: Box::new(clip::read_images),
+            copy_text: Box::new(clip::write_text),
             presses: Box::new(crate::keys::presses),
             arm_keys: Box::new(crate::keys::arm),
             keys_hidden: Box::new(crate::keys::keys_hidden),
@@ -2722,7 +2770,7 @@ impl Bridge {
         }
         // Any addon can draw commands, but only T3 WoW can sign them: an unsigned one may
         // only read.
-        if !signed && (!Trust::ReadOnly.allows(&kind) || kind == "play") {
+        if !signed && (!Trust::ReadOnly.allows(&kind) || SIGNED_ONLY.contains(&kind.as_str())) {
             self.log(&format!("{kind} from the game {UNSIGNED_REASON}"));
             return Some(json!({ "s": command["s"], "ok": false, "x": UNSIGNED_REASON }));
         }
@@ -3057,6 +3105,23 @@ impl Bridge {
                     });
                     acked = true;
                 }
+                // The game's copy icon: a message of the open thread (its code block `b`, from
+                // 1), or a turn's changed files, onto the clipboard. The game names it; the text
+                // is T3's, never the game's, so no addon can put text of its own there.
+                "copy" if !id.is_empty() => {
+                    let position = command["p"].as_u64().ok_or_else(|| T3Error::Other("the game didn't say what to copy".into()))?;
+                    // A copy means the moment it was clicked: one that waited (the companion
+                    // was busy or closed, the game gave up on it) doesn't replace what you
+                    // copied since, and isn't read for. `at` is when it was clicked, on this
+                    // PC's clock; it's checked before each read and right before writing.
+                    let at = command["at"].as_i64().unwrap_or(i64::MIN);
+                    let block = command["b"].as_u64().map(|b| (b, str_of(&command["k"]).to_string()));
+                    let text = self.copy_source(&env, &id, position, block, at)?;
+                    self.copy_in_time(at)?;
+                    (self.copy_text)(&text).map_err(T3Error::Other)?;
+                    self.log(&format!("Copied {} characters from the open thread to the clipboard", text.chars().count()));
+                    acked = true;
+                }
                 "unpaste" => {
                     let n = command["i"].as_u64().unwrap_or(0);
                     if let Some(images) = self.drafts.get_mut(str_of(&command["d"])) {
@@ -3108,6 +3173,117 @@ impl Bridge {
                 .or_else(|| stop_state.map(|st| json!({ "s": command["s"], "ok": true, "st": st })))
                 .or_else(|| acked.then(|| json!({ "s": command["s"], "ok": true }))),
         }
+    }
+
+    // ---- copying ----
+
+    /// What the game's copy icon copies: the message at `position` in the open thread as T3
+    /// has its markdown (a long one read again whole), or its code block `block` (from 1)
+    /// without the fences; or a turn's changed files, as their card lists them.
+    fn copy_source(&mut self, env: &str, id: &str, position: u64, block: Option<(u64, String)>, at: i64) -> Result<String, T3Error> {
+        self.copy_in_time(at)?;
+        let gone = || T3Error::Other("that message isn't in the open thread any more".into());
+        if !self.view.as_ref().is_some_and(|v| v.env == env && v.id == id) {
+            return Err(T3Error::Other("that thread isn't open any more".into()));
+        }
+        let changes = self.scan.as_ref().filter(|s| s.env == env && s.id == id).and_then(|s| s.changes.iter().find(|c| c.position == position));
+        if let Some(changes) = changes.filter(|_| block.is_none()) {
+            // The card's lines, its paths as written (the game's text doubles a pipe).
+            return Ok(str_of(&changes.shown()["x"]).replace("||", "|"));
+        }
+        let cached = self.cached_message(env, id, position);
+        let message = match &cached {
+            Some(message) if message["textTruncated"] != true => message.clone(),
+            _ => self.read_whole_message(env, id, position, at)?,
+        };
+        if !matches!(str_of(&message["type"]), "user_message" | "assistant_message") {
+            return Err(gone());
+        }
+        let text = str_of(&message["text"]);
+        let text = match block {
+            None => text.to_string(),
+            Some((b, key)) => {
+                // The game numbers the blocks it drew, from the view's read of the message,
+                // which may stop partway (through a closing fence, even): the block is the one
+                // whose opening fence is on the same line in the whole message.
+                let missing = || T3Error::Other("that code block isn't in the message any more".into());
+                // Not in the cache (a read failed, or one is under way): what the game drew can
+                // be told from the whole message only when nothing was cut from it and it has
+                // no quotes, which the view lays out from a read of their own.
+                // (Measured as T3 cuts the view's read: in UTF-16 units of the text as it is.)
+                let certain = cached.is_some() || {
+                    let text = str_of(&message["text"]);
+                    view_markdown(&message, false) == text.replace(QUOTE_MARK, "") && text.encode_utf16().count() <= VIEW_TEXT_CHARS
+                };
+                if !certain {
+                    return Err(T3Error::Other("that message is being read again: copy the block in a moment".into()));
+                }
+                let drawn = view_markdown(cached.as_ref().unwrap_or(&message), true);
+                let (line, _) = crate::lua::code_blocks(&drawn).into_iter().nth((b as usize).wrapping_sub(1)).ok_or_else(missing)?;
+                let code = crate::lua::code_blocks(&view_markdown(&message, false)).into_iter().find(|(l, _)| *l == line).map(|(_, code)| code).ok_or_else(missing)?;
+                // Not the block the game drew (its first line differs): refused, never a guess.
+                if !key.is_empty() && block_key(&code) != key {
+                    return Err(T3Error::Other("that code block changed since it was drawn: copy it again".into()));
+                }
+                code
+            }
+        };
+        if text.trim().is_empty() {
+            return Err(T3Error::Other("there's no text to copy".into()));
+        }
+        // However it was read (a quote's whole read keeps more), no more than the limit.
+        if text.chars().count() > COPY_CHARS as usize * COPY_PIECES {
+            return Err(too_long_to_copy());
+        }
+        Ok(text)
+    }
+
+    /// Refuses a copy clicked (`at`) more than COPY_WAIT_S ago.
+    fn copy_in_time(&self, at: i64) -> Result<(), T3Error> {
+        if self.now_seconds().saturating_sub(at) > COPY_WAIT_S {
+            return Err(T3Error::Other("it waited too long to be copied: click it again".into()));
+        }
+        Ok(())
+    }
+
+    /// The open thread's message at `position`, read from T3 with all of its text: a long one
+    /// takes several reads of its item, COPY_PIECES at most.
+    fn read_whole_message(&mut self, env: &str, id: &str, position: u64, at: i64) -> Result<Value, T3Error> {
+        let args = json!({ "threadId": id, "view": "messages", "afterPosition": from_after(position.checked_sub(1)), "limit": 1, "maxCharsPerItem": COPY_CHARS });
+        let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(env)))?;
+        let mut message = result["items"]
+            .as_array()
+            .and_then(|items| items.first())
+            .filter(|m| m["position"].as_u64() == Some(position))
+            .cloned()
+            .ok_or_else(|| T3Error::Other("that message isn't in the open thread any more".into()))?;
+        let mut text = str_of(&message["text"]).to_string();
+        let mut last = message.clone();
+        for _ in 1..COPY_PIECES {
+            let Some(offset) = last["nextTextOffset"].as_u64().filter(|_| last["textTruncated"] == true) else { break };
+            self.copy_in_time(at)?;
+            let args = json!({ "threadId": id, "itemId": message["itemId"], "textOffset": offset, "maxCharsPerItem": COPY_CHARS });
+            let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(env)))?;
+            last = result["items"].as_array().and_then(|items| items.iter().find(|it| it["itemId"] == message["itemId"])).cloned().unwrap_or(Value::Null);
+            text.push_str(str_of(&last["text"]));
+        }
+        if last["textTruncated"] == true || last.is_null() {
+            return Err(too_long_to_copy());
+        }
+        message["text"] = json!(text);
+        message["textTruncated"] = json!(false);
+        Ok(message)
+    }
+
+    /// The open thread's message at `position`, as last read (the cache, or the read under way).
+    fn cached_message(&self, env: &str, id: &str, position: u64) -> Option<Value> {
+        let reading = self.poll_run.as_ref().and_then(|run| run.reading.as_ref()).filter(|r| r.view.env == env && r.view.id == id);
+        let lists = [
+            self.view_cache.as_ref().filter(|c| c.env == env && c.id == id).map(|c| c.messages.as_slice()),
+            reading.map(|r| r.messages.as_slice()),
+            reading.and_then(|r| r.cache.as_ref()).map(|c| c.messages.as_slice()),
+        ];
+        lists.into_iter().flatten().flatten().find(|m| m["position"].as_u64() == Some(position)).cloned()
     }
 
     // ---- pasted images ----
@@ -4331,7 +4507,7 @@ impl Bridge {
     /// found too few widens, VIEW_PASSES at most; then the view for the game is built.
     fn read_view_page(&mut self) -> Result<(), T3Error> {
         let Some(read) = self.view_read() else { return Ok(()) };
-        let args = json!({ "threadId": read.view.id, "view": "messages", "afterPosition": from_after(read.after), "limit": 100, "maxCharsPerItem": 6000 });
+        let args = json!({ "threadId": read.view.id, "view": "messages", "afterPosition": from_after(read.after), "limit": 100, "maxCharsPerItem": VIEW_TEXT_CHARS });
         let env = read.view.env.clone();
         let result = self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env)))?;
         let Some(read) = self.view_read() else { return Ok(()) };
@@ -4507,15 +4683,19 @@ impl Bridge {
             // line of their own, drawn as a quote. The agent's own text is as it wrote it.
             let (raw, cites) = if kind == "user_message" { take_cites(str_of(&item["text"]), truncated) } else { (str_of(&item["text"]).to_string(), Vec::new()) };
             // With quotes, cut to size here ("…" and all), never inside a quote's mark.
-            let cut_here = !cites.is_empty() && raw.chars().count() > 6000;
-            let raw = if cites.is_empty() { raw } else { cites::capped(&raw, 6000) };
+            let cut_here = !cites.is_empty() && raw.chars().count() > VIEW_TEXT_CHARS;
+            let raw = if cites.is_empty() { raw } else { cites::capped(&raw, VIEW_TEXT_CHARS) };
             let more_mark = if truncated && !cut_here { "\n…" } else { "" };
-            let text = quotes_in_text(&wow_text(&raw, 6000), &cites, true) + more_mark;
+            let text = quotes_in_text(&wow_text(&raw, VIEW_TEXT_CHARS), &cites, true) + more_mark;
             let mut length = text.encode_utf16().count();
             let mut shown = json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text });
+            // Where it is in the thread: what the game's copy icon names it by.
+            if let Some(position) = item["position"].as_u64() {
+                shown["p"] = json!(position);
+            }
             // Copying gives every character as T3 has it, those the game draws as others or
             // leaves out included.
-            let written = quotes_in_text(&wow_markup(&raw, 6000), &cites, false) + more_mark;
+            let written = quotes_in_text(&wow_markup(&raw, VIEW_TEXT_CHARS), &cites, false) + more_mark;
             if written != text {
                 length += written.encode_utf16().count();
                 shown["cx"] = json!(written);
@@ -4523,11 +4703,24 @@ impl Bridge {
             // A message with code, a table or a quote also comes cut into segments, which this
             // addon draws in its own fonts. Copying reads the text; an addon older than quotes
             // leaves a quote out of the segments (it shows after a /reload with this one).
-            let mut segments = wow_segments(&raw, 6000);
+            let mut segments = wow_segments(&raw, VIEW_TEXT_CHARS);
             for seg in segments.iter_mut().filter(|s| s["q"].is_u64()) {
                 *seg = cites.get(seg["q"].as_u64().unwrap_or(0) as usize).map_or(Value::Null, cites::segment);
             }
             segments.retain(|s| !s.is_null());
+            // Each code block carries a mark of its first line (`block_key`), from the very text
+            // the segments came from, which a copy of it sends back: the companion copies a
+            // block only if it still starts with that line. The last block of a message cut
+            // short goes without: the cut may split its first line.
+            let source = view_markdown(item, true);
+            let cut = truncated || source.ends_with("\n…");
+            let drawn = crate::lua::code_blocks(&source);
+            let count = segments.iter().filter(|s| s["c"].is_string()).count();
+            for (n, (seg, (_, code))) in segments.iter_mut().filter(|s| s["c"].is_string()).zip(drawn.iter()).enumerate() {
+                if !(cut && n + 1 == count) {
+                    seg["k"] = json!(block_key(code));
+                }
+            }
             if !segments.is_empty() {
                 if truncated && !cut_here {
                     segments.push(json!("…"));
@@ -5519,6 +5712,10 @@ impl Bridge {
         // Windows and macOS can read the clipboard (`clip::read_images`).
         #[cfg(any(windows, target_os = "macos"))]
         out.insert("pi".into(), json!(true));
+        // This companion copies from the conversation onto the clipboard (`clip::write_text`):
+        // the game's copy icon asks it to. With an older one, the icon opens the copy box.
+        #[cfg(any(windows, target_os = "macos"))]
+        out.insert("cp".into(), json!(true));
         let pasted: Vec<Value> = self
             .drafts
             .iter()

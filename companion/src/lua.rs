@@ -581,10 +581,7 @@ fn table_at(lines: &[&str], at: usize) -> Option<(Value, usize)> {
 /// code and no table: its `wow_text` draws it the same.
 pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
     let p = patterns();
-    let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE, LINK_MARK, MODEL_MARK], "");
-    if text.chars().count() > max_length {
-        text = text.chars().take(max_length).collect::<String>() + "\n…";
-    }
+    let text = segment_source(markdown, max_length);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut segments = Vec::new();
     let mut prose: Vec<String> = Vec::new();
@@ -669,6 +666,60 @@ pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
     segments
 }
 
+/// The text `wow_segments` cuts into segments: line breaks as LF, the marks T3's text can't
+/// hold taken out, and only its first `max_length` characters (then a "…" line). Copying a
+/// code block numbers the blocks in this, as the game does.
+pub fn segment_source(markdown: &str, max_length: usize) -> String {
+    let text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE, LINK_MARK, MODEL_MARK], "");
+    if text.chars().count() > max_length {
+        return text.chars().take(max_length).collect::<String>() + "\n…";
+    }
+    text
+}
+
+/// A message's code blocks as T3 has them, for copying: each without its fences, its lines
+/// as written (tabs and all), less the indent of a fence indented in a list, each with the
+/// line its opening fence is on. They are the code segments of `wow_segments`, in the same
+/// order and count (a block with nothing in it is left out there, so here too), but whole:
+/// `wow_segments` stops at its length.
+pub fn code_blocks(markdown: &str) -> Vec<(usize, String)> {
+    let p = patterns();
+    let text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([CODE_OPEN, CODE_CLOSE, LINK_MARK, MODEL_MARK], "");
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if p.fence.is_match(line) {
+            let start = i;
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            let mut code = Vec::new();
+            i += 1;
+            while i < lines.len() && !p.fence.is_match(lines[i]) {
+                let l = lines[i];
+                let spaces = l.len() - l.trim_start_matches(' ').len();
+                code.push(&l[spaces.min(indent)..]);
+                i += 1;
+            }
+            i += 1;
+            while code.last().is_some_and(|l| l.trim_end().is_empty()) {
+                code.pop();
+            }
+            if !code.is_empty() {
+                blocks.push((start, code.join("\n")));
+            }
+            continue;
+        }
+        // A table's rows can't hold a fence (they end at one), so they are passed over as
+        // `wow_segments` takes them.
+        match table_at(&lines, i) {
+            Some((_, end)) => i = end,
+            None => i += 1,
+        }
+    }
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +746,28 @@ mod tests {
             let input = case["input"].as_str().unwrap();
             assert_eq!(json!(wow_segments(input, 6000)), case["segments"], "{input}");
         }
+    }
+
+    #[test]
+    fn code_blocks_are_copied_whole_and_counted_as_the_game_draws_them() {
+        // Every fixture: as many blocks, in the same order, as the code segments the game draws.
+        let cases: Value = serde_json::from_str(include_str!("../tests/fixtures/segments.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            let drawn = wow_segments(input, 6000).iter().filter(|s| s["c"].is_string()).count();
+            assert_eq!(code_blocks(input).len(), drawn, "{input}");
+        }
+        let text = "Intro\n\n```rust\nfn main() {\n\tprintln!(\"|\");  \n}\n\n```\n\n| a | b |\n|---|---|\n| ``` | x |\n\n```\n\n```\n\n- item\n  ```sh\n  npm test\n    --watch\n  ```\nAfter";
+        // Tabs and trailing spaces stay, the fences and the empty block don't, a list's
+        // indent goes, and a table's cell that looks like a fence is still a cell.
+        // Each with the line its opening fence is on.
+        assert_eq!(code_blocks(text), [(2, "fn main() {\n\tprintln!(\"|\");  \n}".to_string()), (18, "npm test\n  --watch".to_string())]);
+        assert_eq!(wow_segments(text, 6000).iter().filter(|s| s["c"].is_string()).count(), 2);
+        // A block the game cuts short is copied whole; one left open runs to the end.
+        let long = format!("```\n{}\n```", "x".repeat(7000));
+        assert_eq!(code_blocks(&long), [(0, "x".repeat(7000))]);
+        assert_eq!(code_blocks("```\nopen\nto the end"), [(0, "open\nto the end".to_string())]);
+        assert!(code_blocks("No code here").is_empty());
     }
 
     #[test]
