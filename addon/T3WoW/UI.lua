@@ -3475,6 +3475,9 @@ do
     probeHost:SetSize(1, 1)
     probeHost:SetPoint("TOPLEFT")
     local probe = probeHost:CreateFontString(nil, "OVERLAY")
+    -- A font from the start: the game refuses SetText on a string with none, and Clear
+    -- empties it on every thread opened, before any quote was looked for.
+    probe:SetFontObject(Skin.fonts.text)
     probe:SetWordWrap(true)
     probe:SetSpacing(2)
     probe:SetPoint("TOPLEFT")
