@@ -66,6 +66,174 @@ pub fn to_lua(value: &Value) -> String {
     }
 }
 
+/// Which font draws a run of text: the window's text font (Inter, which ships with the
+/// addon) or JetBrains Mono, which draws code, tables and previews and has a few more marks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Font {
+    Text,
+    Mono,
+}
+
+/// Marks JetBrains Mono has that Inter lacks: in code they stay as written.
+const MONO_HAS: &str = "➜➔➝➞⇨⚠✕▸⚡";
+
+/// A stand-in for a mark agents write that `font` doesn't have: one both fonts have, as
+/// close as there is. None when the font has it, or there is no stand-in.
+fn stand_in(c: char, font: Font) -> Option<&'static str> {
+    if font == Font::Mono && MONO_HAS.contains(c) {
+        return None;
+    }
+    Some(match c {
+        '⟶' | '➜' | '➔' | '➡' | '➝' | '➞' | '⮕' | '⇨' => "→",
+        '⟵' | '⬅' | '⇦' => "←",
+        '⟷' | '⬌' => "↔",
+        '⬆' => "↑",
+        '⬇' | '⇩' => "↓",
+        '⟹' => "⇒",
+        '⟸' => "⇐",
+        '⟺' => "⇔",
+        '✅' | '✔' | '☑' => "✓",
+        '❌' | '✘' | '✖' | '❎' | '✕' => "✗",
+        '⚠' => "△",
+        // Not "!": with a number after it, the game reads one as a merge request's (!157).
+        '❗' | '❕' => "‼",
+        '❓' | '❔' => "?",
+        '⭐' | '★' => "◆",
+        '☆' => "◇",
+        '➕' => "+",
+        '➖' => "-",
+        '➗' => "÷",
+        '☐' | '◻' | '◽' | '⬜' => "□",
+        '☒' | '◼' | '◾' | '⬛' => "■",
+        'ℹ' => "i",
+        '▸' => "►",
+        '🔴' | '🟠' | '🟡' | '🟢' | '🔵' | '🟣' | '🟤' | '⚫' => "●",
+        '⚪' => "○",
+        _ => return None,
+    })
+}
+
+/// A picture character `font` doesn't have, with no stand-in: every emoji in the emoji
+/// blocks past the first plane, and the common ones among the symbols.
+fn emoji(c: char, font: Font) -> bool {
+    if font == Font::Mono && MONO_HAS.contains(c) {
+        return false;
+    }
+    ('\u{1F000}'..='\u{1FAFF}').contains(&c) || "✨⚡❤⏳⌛⏰⏱☕✏⛔⭕♻☀✋✌☝✊✍✈❄✂✉☁☔⚓⚔⚖⌚⏩⏪⏭⏸⏹⏺⏲⚙♠♣♥♦✦✧✳✴❇❣⤴⤵".contains(c)
+}
+
+/// A symbol written as an emoji (followed by U+FE0F) that `font` doesn't have: the
+/// symbol and dingbat blocks, where Inter has only ✓ and ✗ (✉️, ☎️, ⚕️, …).
+fn symbol_emoji(c: char, font: Font) -> bool {
+    (('\u{2600}'..='\u{27BF}').contains(&c) || ('\u{2B00}'..='\u{2BFF}').contains(&c))
+        && !"✓✗".contains(c)
+        && !(font == Font::Mono && MONO_HAS.contains(c))
+}
+
+/// What styles an emoji or ties its sequence together, and draws nothing in the game: the
+/// text and emoji selectors, the keycap, a subdivision flag's tags.
+fn emoji_glue(c: char) -> bool {
+    matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{20E3}' | '\u{E0020}'..='\u{E007F}')
+}
+
+/// Whether the end of `out` starts a run of text: nothing yet, a space or a line break, a
+/// color code, or the start of inline code.
+fn run_starts(out: &str) -> bool {
+    let n = out.len();
+    let color = n >= 10
+        && out.is_char_boundary(n - 10)
+        && out[n - 10..].starts_with("|c")
+        && out[n - 8..].bytes().all(|b| b.is_ascii_hexdigit())
+        && !out[..n - 10].ends_with('|');
+    out.is_empty() || out.ends_with([' ', '\t', '\n', CODE_OPEN, '"', '“', '‘', '(', '[']) || color
+}
+
+/// Game text (T3's markdown already made WoW markup) with each mark `font` doesn't have put
+/// as one it does (see `stand_in`), and the emoji it can't draw left out: the game draws an
+/// empty box for a character its font lacks. In `Font::Text`, inline code (between CODE_OPEN
+/// and CODE_CLOSE) is JetBrains Mono's. An emoji goes with its whole sequence (joined people,
+/// skin tones, flags). In text, one that starts a run takes the spaces after it, and one that
+/// ends a sentence the space before it: "🚀 Shipped" reads "Shipped", "Done 🎉." "Done.". In
+/// code it leaves one space, so columns stay put. Text left with nothing stays as it was.
+pub fn drawable(text: &str, font: Font) -> String {
+    if text.is_ascii() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut run = font;
+    // Inside a marked thread link or model reference (LINK_MARK, MODEL_MARK): the bridge
+    // looks it up as written, so it stays so.
+    let mut verbatim = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if verbatim.is_some() || c == LINK_MARK || c == MODEL_MARK {
+            verbatim = match verbatim {
+                Some(mark) if mark == c => None,
+                None => Some(c),
+                open => open,
+            };
+            out.push(c);
+        } else if font == Font::Text && (c == CODE_OPEN || c == CODE_CLOSE) {
+            run = if c == CODE_OPEN { Font::Mono } else { Font::Text };
+            out.push(c);
+        } else if let Some(mark) = stand_in(c, run) {
+            out.push_str(mark);
+            while chars.next_if(|&n| emoji_glue(n)).is_some() {}
+        } else if emoji(c, run)
+            || (chars.peek() == Some(&'\u{FE0F}') && symbol_emoji(c, run))
+            // A keycap whose sign would read as markdown or a pull request's number (#️⃣).
+            || ((c == '#' || c == '*') && chars.peek().is_some_and(|&n| emoji_glue(n)))
+        {
+            // The rest of its sequence: what styles it, and whatever a joiner ties to it (not
+            // markup: a joiner left dangling at the end of a run). In code, each emoji of a
+            // row leaves a space of its own.
+            let mut emojis = 1;
+            loop {
+                if chars.next_if(|&n| emoji_glue(n)).is_some() {
+                    continue;
+                }
+                if chars.next_if(|&n| emoji(n, run) && stand_in(n, run).is_none()).is_some() {
+                    emojis += 1;
+                    continue;
+                }
+                if chars.next_if_eq(&'\u{200D}').is_some() {
+                    chars.next_if(|&n| !n.is_ascii() && !n.is_alphanumeric());
+                    continue;
+                }
+                break;
+            }
+            // Whether what follows ends the sentence or the run: punctuation, a line break, the
+            // end, a color's end (|r) or inline code's.
+            let mut ahead = chars.clone();
+            let ends = match ahead.next() {
+                None => true,
+                Some('|') => ahead.next() == Some('r'),
+                Some(n) => ".,;:!?)]\n\"”’'".contains(n) || n == CODE_CLOSE,
+            };
+            if run == Font::Mono {
+                out.push_str(&" ".repeat(emojis));
+            } else if ends {
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+            } else if run_starts(&out) {
+                while chars.next_if(|&n| n == ' ' || n == '\t').is_some() {}
+            }
+        } else if !emoji_glue(c) {
+            out.push(c);
+        }
+    }
+    if blank(&out) && !blank(text) {
+        return text.to_string();
+    }
+    out
+}
+
+/// Whether game text shows nothing: only spaces, color codes and the companion's marks.
+fn blank(text: &str) -> bool {
+    patterns().markup.replace_all(text, "").trim().is_empty()
+}
+
 /// Text for a one-line field: pipes escaped for WoW, whitespace collapsed, at most `max` chars.
 pub fn plain(text: &str, max: usize) -> String {
     let collapsed = text.replace('|', "||").split_whitespace().collect::<Vec<_>>().join(" ");
@@ -85,7 +253,7 @@ pub fn preview_text(text: &str, max: usize, max_lines: usize) -> String {
     if kept.len() < lines.len() {
         kept.push('…');
     }
-    kept.replace('|', "||")
+    drawable(&kept.replace('|', "||"), Font::Mono)
 }
 
 const CODE: &str = "|cffc8c8a0";
@@ -105,6 +273,7 @@ struct Patterns {
     br: Regex,
     span: Regex,
     thread: Regex,
+    markup: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -122,6 +291,8 @@ fn patterns() -> &'static Patterns {
         delimiter: Regex::new(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$").unwrap(),
         br: Regex::new(r"(?i)<br\s*/?>").unwrap(),
         span: Regex::new(r"\x03(\d+)\x03").unwrap(),
+        // What draws nothing in game text: color codes and the companion's marks.
+        markup: Regex::new(r"\|c[0-9a-fA-F]{8}|\|r|[\x01-\x05]").unwrap(),
         // A T3 thread link: <t3-thread://v2/{env}/{thread}> as T3's tools write it, or bare
         // (its last character not punctuation that ends a sentence).
         thread: Regex::new(r#"<t3-thread://v2/([^/\s<>]+)/([^\s<>]+)>|t3-thread://v2/([^/\s<>]+)/([^\s<>()\[\]]*[^\s<>()\[\].,;:!?'"])"#).unwrap(),
@@ -187,9 +358,23 @@ fn color_runs(text: &str, color: &str) -> String {
     out
 }
 
-/// Markdown to WoW FontString markup. `|` starts an escape sequence in WoW text, so
-/// literal pipes are doubled before any color codes are added.
+/// Markdown to WoW FontString markup, for the game to draw: as `wow_markup`, with the marks
+/// and emoji its fonts can't draw put as ones they can, or left out (`drawable`).
 pub fn wow_text(markdown: &str, max_length: usize) -> String {
+    prose_drawable(&wow_markup(markdown, max_length))
+}
+
+/// Prose made drawable (`drawable` in the text font), without the empty lines an emoji
+/// alone on its line leaves.
+fn prose_drawable(text: &str) -> String {
+    let out = drawable(text, Font::Text);
+    if out == text { out } else { patterns().gaps.replace_all(&out, "\n\n").trim().to_string() }
+}
+
+/// Markdown to WoW FontString markup, every character as T3 has it (for copying). `|` starts
+/// an escape sequence in WoW text, so literal pipes are doubled before any color codes are
+/// added.
+pub fn wow_markup(markdown: &str, max_length: usize) -> String {
     let p = patterns();
     let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([LINK_MARK, MODEL_MARK], "");
     if text.chars().count() > max_length {
@@ -449,7 +634,30 @@ pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
         i += 1;
     }
     flush(&mut prose, &mut segments);
-    if special { segments } else { Vec::new() }
+    if !special {
+        return Vec::new();
+    }
+    // What the game's fonts can't draw, put as what they can: prose in the text font, code
+    // and tables in JetBrains Mono.
+    for segment in &mut segments {
+        match segment {
+            Value::String(prose) => *prose = prose_drawable(prose),
+            Value::Object(fields) => {
+                if let Some(Value::String(code)) = fields.get_mut("c") {
+                    *code = drawable(code, Font::Mono);
+                }
+                for row in fields.get_mut("t").and_then(Value::as_array_mut).into_iter().flatten() {
+                    for cell in row.as_array_mut().into_iter().flatten() {
+                        if let Value::String(text) = cell {
+                            *text = drawable(text, Font::Mono);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    segments
 }
 
 #[cfg(test)]
@@ -518,6 +726,66 @@ mod tests {
             (instance == "claudeAgent" && model == "claude-opus-5-5").then(|| "Claude Opus 5.5".to_string())
         });
         assert_eq!(named, "ask Claude Opus 5.5 or model:claudeAgent/gone.", "one the machine lacks stays as written");
+    }
+
+    #[test]
+    fn marks_the_fonts_lack_get_stand_ins_and_emoji_go() {
+        let text = |s: &str| drawable(s, Font::Text);
+        let mono = |s: &str| drawable(s, Font::Mono);
+        assert_eq!(text("✅ tests pass, ❌ lint, ⚠️ flaky"), "✓ tests pass, ✗ lint, △ flaky");
+        assert_eq!(text("a ➜ b ⟶ c, ⬅ d, ⬆ up ⬇ down, x ⟹ y"), "a → b → c, ← d, ↑ up ↓ down, x ⇒ y");
+        assert_eq!(text("🟢 green 🔴 red ⚪ off, ★★☆ ➕ added ☐ todo ℹ️ note"), "● green ● red ○ off, ◆◆◇ + added □ todo i note");
+        // What the fonts draw stays: arrows, check marks, punctuation, accents, CJK, a joiner in Devanagari.
+        let kept = "→ ← ⇒ ✓ ✗ — … • “q” ≥ ș ț é 日本 क्\u{200D}ष";
+        assert_eq!(text(kept), kept);
+        // An emoji that starts a run takes the spaces after it; one that ends a sentence, the space before it.
+        assert_eq!(text("🚀 Shipped\n🎉\tDone"), "Shipped\nDone");
+        assert_eq!(text("Done 🎉 now. Done 🎉. Shipped 🚀!"), "Done now. Done. Shipped!");
+        assert_eq!(text("“🚀 Launch” and \"Done 🎉\""), "“Launch” and \"Done\"");
+        // An emoji alone on its line leaves no empty lines behind.
+        assert_eq!(wow_text("🎉\n\nAll done!\n\n🚀\n\nNext\n\n👍", 6000), "All done!\n\nNext");
+        assert_eq!(text("|cffffd100🚀 Launch 🎉|r"), "|cffffd100Launch|r");
+        // A sequence goes whole: joined people and what they hold, skin tones, flags, tags.
+        assert_eq!(text("by 👩🏽‍💻 🤷‍♀️ 👨‍⚕️ ✋🏽 at 🇺🇸 🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F} end"), "by at end");
+        // A stand-in after an emoji is still put; a keycap keeps its digit; ✉️ and the like go by their selector.
+        assert_eq!(text("🚀🟢 live, step 1️⃣, ✉️ mail, ☎️ call"), "● live, step 1, mail, call");
+        // Text left with nothing stays as written.
+        assert_eq!(text("👍"), "👍");
+        assert_eq!(text("plain ascii | stays"), "plain ascii | stays");
+        // JetBrains Mono's own marks stay in code, and an emoji leaves a space so columns stay put.
+        assert_eq!(mono("➜ ⚠ ⚡ ✕ ▸ ✅"), "➜ ⚠ ⚡ ✕ ▸ ✓");
+        assert_eq!(mono("│ 🚀 Deploy │"), "│   Deploy │");
+        assert_eq!(mono("│🚀🎉│ │👩‍💻│"), "│  │ │ │");
+        assert_eq!(text("run \u{1}➜ 🚀 go\u{2} ➜"), "run \u{1}➜   go\u{2} →");
+    }
+
+    #[test]
+    fn what_the_fonts_lack_is_put_after_the_markdown_is_read_and_copying_keeps_it() {
+        // Markdown is read from T3's text: a dropped emoji or a stand-in can't make or break it.
+        assert_eq!(wow_text("**✅ Done** ➜ next", 6000), "✓ Done → next");
+        assert_eq!(wow_text("⭐ Recommended, **⭐⭐ great ⭐⭐**", 6000), "◆ Recommended, ◆◆ great ◆◆");
+        assert_eq!(wow_text("⚠️[the docs](https://x)", 6000), "△the docs");
+        // Nor make a pull request's number, which the game links: #️⃣157, ⚠️157.
+        assert_eq!(wow_text("#️⃣ not a heading, #️⃣157 tests, ⚠️157 fails, ❗157 left", 6000), "not a heading, 157 tests, △157 fails, ‼157 left");
+        // A heading of nothing but an emoji stays as written.
+        assert_eq!(wow_text("## 🚀", 6000), "|cffffd100🚀|r");
+        // A model reference is looked up as written.
+        assert_eq!(wow_text("ask model:example/foo🚀 now ⏲️", 6000), "ask \u{5}model:example/foo🚀\u{5} now");
+        // A joiner left dangling at the end of inline code doesn't take the code's end.
+        let dangling = wow_segments("`go 🚀\u{200D}` later ➜ next", 6000);
+        assert_eq!(dangling, vec![json!("\u{1}go  \u{2} later → next")]);
+        assert_eq!(wow_text("🚀\u{200D}élan", 6000), "élan", "nor a letter after it");
+        let table = wow_segments("| A | 🚀 |\n| --- | --- |\n| ✅ | x |", 6000);
+        assert_eq!(table, vec![json!({ "t": [["A", "🚀"], ["✓", "x"]] })], "a cell left with nothing stays");
+        let code = wow_segments("the `🚀` and `npm test`\n```\n❌ fail ➜ retry\n```", 6000);
+        assert_eq!(code, vec![json!("the \u{1} \u{2} and \u{1}npm test\u{2}"), json!({ "c": "✗ fail ➜ retry" })]);
+        assert_eq!(preview_text("⚠️ careful | 🚀 go", 200, 12), "⚠ careful ||   go");
+        // A symbol the font has keeps its place, written as an emoji or not.
+        assert_eq!(wow_text("↔️ ©️ ™️ ✓️", 6000), "↔ © ™ ✓");
+        // The markup as T3 has it, for copying.
+        assert_eq!(wow_markup("✅ `cat logs/✅.txt`", 6000), "✅ |cffc8c8a0cat logs/✅.txt|r");
+        // One-line fields (titles, paths) stay as T3 has them.
+        assert_eq!(plain("logs/✅.txt", 200), "logs/✅.txt");
     }
 
     #[test]

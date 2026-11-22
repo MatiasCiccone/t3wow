@@ -1980,6 +1980,18 @@ fn a_message_with_code_also_comes_in_segments_and_its_text_stays_as_before() {
 }
 
 #[test]
+fn a_message_shows_what_the_fonts_draw_and_copies_as_t3_has_it() {
+    let mut rig = Rig::new(23_000_000);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["plain", "✅ done: `cat logs/🚀.txt`"]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = rig.bridge.snapshot()["view"]["items"].clone();
+    assert!(items[0]["cx"].is_null(), "no copy text when nothing changed");
+    assert_eq!(items[1]["x"], "✓ done: |cffc8c8a0cat logs/.txt|r");
+    assert_eq!(items[1]["cx"], "✅ done: |cffc8c8a0cat logs/🚀.txt|r");
+}
+
+#[test]
 fn the_open_thread_reads_only_whats_new_and_still_sees_its_last_message_grow() {
     let mut rig = Rig::new(23_000_000);
     rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["one", "two", "three"]));

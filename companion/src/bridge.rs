@@ -6,7 +6,7 @@ use crate::clip::{self, Clipped};
 use crate::codec::{decode_cells, Unreadable};
 use crate::config::Trust;
 use crate::made_for::{self, older_t3, OlderT3};
-use crate::lua::{name_model_refs, name_thread_links, plain, preview_text, to_lua, wow_segments, wow_text, MODEL_MARK};
+use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, to_lua, wow_markup, wow_segments, wow_text, Font, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::snooze::{civil_from_days, days_from_civil};
@@ -1364,6 +1364,7 @@ fn tool_output(output: &Value) -> String {
 
 /// Text in code boxes, DETAIL_PIECE characters or so each, from what `left` allows.
 fn push_code(out: &mut Vec<Value>, left: &mut usize, text: &str) {
+    let text = drawable(text, Font::Mono);
     let mut piece = String::new();
     let mut length = 0;
     for c in text.trim_end().chars().take(*left) {
@@ -4163,9 +4164,17 @@ impl Bridge {
                 continue;
             }
             let truncated = item["textTruncated"] == true;
-            let text = wow_text(str_of(&item["text"]), 6000) + if truncated { "\n…" } else { "" };
+            let more_mark = if truncated { "\n…" } else { "" };
+            let text = wow_text(str_of(&item["text"]), 6000) + more_mark;
             let mut length = text.encode_utf16().count();
             let mut shown = json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text });
+            // Copying gives every character as T3 has it, those the game draws as others or
+            // leaves out included.
+            let written = wow_markup(str_of(&item["text"]), 6000) + more_mark;
+            if written != text {
+                length += written.encode_utf16().count();
+                shown["cx"] = json!(written);
+            }
             // A message with code or a table also comes cut into segments, which this addon
             // draws in its monospace font. Older addons read only the text, as does copying.
             let mut segments = wow_segments(str_of(&item["text"]), 6000);
@@ -4731,12 +4740,15 @@ impl Bridge {
         for item in items {
             // Copying keeps each model T3 names as T3 has it (model:...), which the view
             // shows by name.
-            let marked = item["x"].as_str().filter(|x| x.contains(MODEL_MARK)).map(str::to_string);
+            // The copy text (cx), when the view's text leaves characters out, already has them.
+            let marked = item["cx"].as_str().or(item["x"].as_str()).filter(|x| x.contains(MODEL_MARK)).map(str::to_string);
             walk(item, &name, &prose, &cells);
             if let Some(text) = marked {
                 let copy = name_thread_links(&name_model_refs(&text, |_, _| None), name);
                 if item["x"] != copy.as_str() {
                     item["cx"] = json!(copy);
+                } else if let Some(fields) = item.as_object_mut() {
+                    fields.remove("cx");
                 }
             }
         }
