@@ -1470,7 +1470,7 @@ local function messageString(index)
             if self.work then
                 Skin.Tooltip:AddLine(UI.Work.open[self.work.l] and "Click to collapse" or "Click to expand")
             elseif self.play then
-                Skin.Tooltip:AddLine(self.play.v and "Click to play it on your computer" or "Click to play it on your computer; click again to stop")
+                Skin.Tooltip:AddLine(self.play.v and "Click to play it on your computer" or "Click to play it on your computer; click again to stop (a file it opens in another player stops there)")
             else
                 Skin.Tooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
             end

@@ -3521,6 +3521,19 @@ fn audio_the_player_cant_take_opens_in_the_default_one_and_audio_whose_card_goes
     rig.bridge.tick();
     assert!(!view_items(&rig).iter().any(|i| i["pl"].is_object()), "the card is gone: {:?}", view_items(&rig));
     assert_eq!(player.calls().last().unwrap(), "stop", "and its audio with it");
+
+    // Playing, a message goes to another thread, which opens: it stops too.
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["record it", &format!("![]({})", audio.display())]));
+    rig.t3.set("completed", "2026-11-06T11:10:00Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let key = play_key(&view_items(&rig), "Audio");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "wk": 1, "dc": 1, "q": [{ "s": 6, "t": "play", "id": "t1", "k": key }] }));
+    rig.bridge.tick();
+    assert!(player.calls().last().unwrap().starts_with("play "));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "im": 1, "wk": 1, "dc": 1, "q": [{ "s": 7, "t": "send", "id": "t2", "m": "hi" }] }));
+    rig.bridge.tick();
+    assert_eq!(player.calls().last().unwrap(), "stop", "the thread it came from was left");
     let _ = std::fs::remove_dir_all(&dir);
 
     // A format the built-in player can't take opens in the default player.
