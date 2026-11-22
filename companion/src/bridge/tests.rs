@@ -43,7 +43,8 @@ struct FakeT3 {
     /// What each thread runs on (`t3_thread_configure`), and what the machines offer.
     configs: Mutex<HashMap<String, Value>>,
     capabilities: Mutex<Value>,
-    /// A thread's latest runs, as a read of it lists them.
+    /// A thread's latest runs, as a read of it lists them (one that continued the agent's
+    /// work when not set: T3 sends when that work started).
     runs: Mutex<Value>,
 }
 
@@ -103,7 +104,10 @@ impl FakeT3 {
             uploads: Mutex::new(Vec::new()),
             configs: Mutex::new(HashMap::new()),
             capabilities: Mutex::new(json!({})),
-            runs: Mutex::new(json!([])),
+            runs: Mutex::new(json!([{
+                "runId": "r0", "status": "completed", "requestedAt": "2026-11-06T09:59:58.000Z", "startedAt": "2026-11-06T09:59:59.000Z",
+                "workStartedAt": "2026-11-06T09:50:00.000Z", "completedAt": "2026-11-06T10:00:00.000Z"
+            }])),
         })
     }
 
@@ -2431,6 +2435,23 @@ fn a_working_thread_says_when_its_run_started_from_one_read_per_run() {
     rig.advance(61_000);
     rig.bridge.tick();
     assert_eq!(started(&rig), iso_seconds("2026-11-06T10:30:00.000Z"));
+
+    // A run that continues the agent's work keeps that work's start, as T3 0.19.0 does.
+    rig.t3.threads.lock().unwrap()[0]["latestRunId"] = json!("r3");
+    *rig.t3.runs.lock().unwrap() = json!([{ "runId": "r3", "startedAt": "2026-11-06T10:40:00.000Z", "workStartedAt": "2026-11-06T10:30:00.000Z" }]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(started(&rig), iso_seconds("2026-11-06T10:30:00.000Z"));
+
+    // A queued run has no start yet: it's read again until it has one.
+    rig.t3.threads.lock().unwrap()[0]["latestRunId"] = json!("r4");
+    *rig.t3.runs.lock().unwrap() = json!([{ "runId": "r4", "requestedAt": "2026-11-06T10:50:00.000Z" }]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    rig.t3.runs.lock().unwrap()[0]["startedAt"] = json!("2026-11-06T10:51:00.000Z");
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(started(&rig), iso_seconds("2026-11-06T10:51:00.000Z"));
 }
 
 #[test]
@@ -4988,6 +5009,11 @@ fn the_turn_still_going_is_headed_by_when_it_started() {
     assert_eq!(items[0]["x"], "go");
     assert_eq!(items[1]["w"]["live"], iso_seconds("2026-11-06T10:00:00Z"));
     assert_eq!(items[1]["w"]["still"], 1);
+    // A run that continues the agent's work keeps that work's start, as T3 0.19.0 does.
+    let mut continued = run_of("r1", "running");
+    continued["workStartedAt"] = json!("2026-11-06T09:55:00Z");
+    let rig = fold_rig(64_500_000, "running", a_turn(), json!([continued]));
+    assert_eq!(view_items(&rig)[1]["w"]["live"], iso_seconds("2026-11-06T09:55:00Z"));
     // Not once it has ended.
     let done = fold_rig(65_000_000, "completed", a_turn(), json!([run_of("r1", "completed")]));
     assert!(view_items(&done).iter().all(|i| i["w"]["live"].is_null()));

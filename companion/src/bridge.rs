@@ -179,6 +179,13 @@ fn run_activity(run: &Value) -> i64 {
     ["requestedAt", "startedAt", "completedAt"].iter().map(|k| iso_seconds(str_of(&run[*k]))).max().unwrap_or(0)
 }
 
+/// When a working run's clock starts, in epoch seconds; 0 if none. As in T3 0.19.0, a run
+/// that continues the agent's work keeps that work's start (`workStartedAt`).
+fn work_start(run: &Value) -> i64 {
+    let at = ["workStartedAt", "startedAt", "requestedAt"].iter().map(|k| &run[*k]).find(|v| v.is_string());
+    at.map_or(0, |v| iso_seconds(str_of(v)))
+}
+
 /// Only a web page goes to the browser: T3's record could hold anything Windows would run.
 fn is_web_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
@@ -1293,7 +1300,7 @@ fn fold_turns(all: &mut Vec<(u64, Value)>, positions: &[u64], run_at: &BTreeMap<
     let mut folds: Vec<(usize, Value, Vec<usize>)> = Vec::new();
     let latest = recent.as_array().and_then(|runs| runs.first()).filter(|r| working(str_of(&r["status"])));
     if let Some(latest) = latest {
-        let started = iso_seconds(str_of(if latest["startedAt"].is_string() { &latest["startedAt"] } else { &latest["requestedAt"] }));
+        let started = work_start(latest);
         if started > 0 {
             let at = turns.iter().find(|t| latest["runId"] == t.run).map_or(all.len(), |t| t.members[0]);
             folds.push((at, json!({ "r": "a", "x": "Working…", "w": { "l": "live", "live": started, "still": 1 } }), Vec::new()));
@@ -3512,7 +3519,9 @@ impl Bridge {
             let args = with_args(json!({ "threadId": id, "limit": 1, "maxCharsPerItem": 1, "runLimit": 1 }), &self.env_arg(&env));
             match self.client.call("t3_thread_read", args) {
                 Ok(read) => {
-                    let started = read["recentRuns"].as_array().and_then(|runs| runs.iter().find(|r| r["runId"] == run.as_str())).and_then(|r| r["startedAt"].as_str()).map(iso_seconds);
+                    // Kept for the run, so not a queued run's requestedAt: read again until it starts.
+                    let started = read["recentRuns"].as_array().and_then(|runs| runs.iter().find(|r| r["runId"] == run.as_str()));
+                    let started = started.filter(|r| r["workStartedAt"].is_string() || r["startedAt"].is_string()).map(work_start);
                     if let Some(started) = started.filter(|s| *s > 0) {
                         self.run_starts.insert(key.clone(), (run.clone(), started));
                     }
