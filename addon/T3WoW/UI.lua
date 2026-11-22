@@ -525,6 +525,11 @@ do
         open(anchor)
     end
 
+    -- Closes the list if it was opened from anchor.
+    function UI.CloseMenu(anchor)
+        if owner == anchor then list:Hide() end
+    end
+
     function dropdown(parent, name, width, menu)
         local dd = CreateFrame("Button", name, parent)
         dd:SetSize(width, 26)
@@ -1440,8 +1445,313 @@ local openCopy -- the copy box, made after the composer
 -- into image slot files (img\NNNN.tga). A message item with `im` = { f = slot, w, h }.
 local Pictures = { used = 0, pool = {} }
 
--- Each message has a button over it: clicking a message opens it in the copy box. Your
--- messages sit in a bubble on the right; the agent's run the full width.
+-- ---------------------------------------------------------------- copy icons
+-- While the pointer is on a message, a copy icon shows at its top right, as in T3, and one
+-- on each of its code blocks (a turn's changed files have one too). A click asks the
+-- companion to put the message on the clipboard as T3 has its markdown, or the block's code
+-- without its fences: the game names it by its place in the thread (item.p, and b, the
+-- block's number), never sends its text, and the icon says "Copying…", then "Copied" or
+-- "Couldn't copy" (the reason goes on the notice line). A companion older than that (no
+-- inbox.cp), or a game whose commands aren't signed, opens the copy box instead.
+-- Shift-click or right-click a message to select part of it in the copy box.
+-- Fields hold false rather than nil: the test game answers any missing field.
+UI.Copy = { pool = {}, used = 0, hovered = false, state = false }
+do
+    local Copy = UI.Copy
+    local DONE_FOR, FAILED_FOR, WAIT = 2, 4, 20
+    local LABEL = { copying = "Copying…", copied = "Copied", failed = "Couldn't copy" }
+    local GLYPH = { copying = "spinner", copied = "check", failed = "close" }
+    local COLOR = { copied = "accent", failed = "warn" }
+    local SELECT = "Shift-click or right-click the message to select part of it."
+    local SELECT_LIST = "Shift-click or right-click the card to select part of the list."
+
+    -- What a button copies: { env, id, p, b, key, boxText }, p false when the companion
+    -- didn't say where the message is (an older one).
+    local function key(env, id, p, b)
+        return format("%s|%s|%s|%s", tostring(env), tostring(id), tostring(p), tostring(b or 0))
+    end
+
+    -- Whether the companion copies it, or the copy box opens instead.
+    function Copy.ByCompanion(target)
+        return target.p ~= false and inbox ~= nil and inbox.cp == true and not inbox.uns
+    end
+
+    local function make()
+        local b = UI.IconButton(messageChild, "copy", "Copy", "Copy", function(self) Copy.Click(self) end)
+        b:SetSize(22, 22)
+        b.glyph:SetSize(14, 14)
+        -- Over the message's button and the links in it, on a backing of its own over the text.
+        b:SetFrameLevel(messageChild:GetFrameLevel() + 4)
+        Skin.Box(b, { shape = "control", fill = "raised", ring = "border" })
+        b.status = b:CreateFontString(nil, "OVERLAY")
+        b.status:SetFontObject(Skin.fonts.small)
+        b.status:SetPoint("RIGHT", b, "LEFT", -8, 0)
+        b.statusBox = Skin.Box(b, { shape = "control", fill = "raised", ring = "border", free = true })
+        b.statusBox:SetPoint("TOPLEFT", b.status, "TOPLEFT", -6, 5)
+        b.statusBox:SetPoint("BOTTOMRIGHT", b.status, "BOTTOMRIGHT", 6, -5)
+        b.own, b.dy = false, false
+        b:HookScript("OnEnter", function(self)
+            if self.more then
+                Skin.Tooltip:AddLine(self.more)
+                Skin.Tooltip:Show()
+            end
+            Copy.Hover(self.owner)
+        end)
+        return b
+    end
+
+    -- Hides every icon, before a render hands them out again.
+    function Copy.Release()
+        for _, b in ipairs(Copy.pool) do
+            b:Hide()
+            b.owner = false
+        end
+        Copy.used = 0
+    end
+
+    -- A message's own icon sits at its top right, or, with its top scrolled out of view, at
+    -- the top of the view (never below the message's end), so it and what it says show.
+    local function pin(b)
+        local hit = b.owner.hit
+        local dy = -2
+        local top, hitTop, hitBottom = messageScroll:GetTop(), hit:GetTop(), hit:GetBottom()
+        if top and hitTop and hitTop > top then
+            dy = top - hitTop - 2
+            if hitBottom then dy = math.max(dy, hitBottom - hitTop + 24) end
+        end
+        if dy ~= b.dy then
+            b.dy = dy
+            b:ClearAllPoints()
+            b:SetPoint("TOPRIGHT", hit, "TOPRIGHT", -2, dy)
+            return true
+        end
+    end
+
+    -- Whether code icon b sits where its message's own icon, pinned down the view, is: the
+    -- pinned one takes the place, so a click there can't mean either.
+    local function covered(b)
+        local own = rawget(b.owner, "copyIcon")
+        if b.own or not own or not own.dy or own.dy == -2 then return false end
+        local top, bottom, ownTop, ownBottom = b:GetTop(), b:GetBottom(), own:GetTop(), own:GetBottom()
+        return top ~= nil and bottom ~= nil and ownTop ~= nil and ownBottom ~= nil and top > ownBottom and bottom < ownTop
+    end
+
+    -- The message one of whose icons says how its copy went: its other icons stay hidden
+    -- meanwhile, so none covers what that one says.
+    local function busyOwner()
+        local st = Copy.state
+        for i = 1, Copy.used do
+            local b = Copy.pool[i]
+            if st and b.p ~= false and st.key == b.key then return b.owner end
+        end
+        return false
+    end
+
+    -- Shows a button as what it copies stands: being copied, copied, refused, or the icon.
+    function Copy.Paint(b, busy)
+        if busy == nil then busy = busyOwner() end
+        local st = Copy.state
+        local phase = st and b.p ~= false and st.key == b.key and st.phase or nil
+        Skin.SetGlyphFile(b.glyph, GLYPH[phase] or "copy")
+        Skin.SetGlyphColor(b.glyph, COLOR[phase] or "muted")
+        local drawn = UI.GlyphKnown(b.glyph)
+        b.glyph:SetShown(drawn)
+        b.short:SetShown(not drawn)
+        b:SetWidth(drawn and 22 or 40)
+        b.status:SetText(LABEL[phase] or "")
+        b.status:SetShown(phase ~= nil)
+        b.statusBox:SetShown(phase ~= nil)
+        local shown = phase ~= nil or (b.owner ~= false and b.owner == Copy.hovered and b.owner ~= busy)
+        if shown and b.own then pin(b) end
+        b:SetShown(shown and (phase ~= nil or not covered(b)))
+    end
+
+    function Copy.PaintAll()
+        local busy = busyOwner()
+        for i = 1, Copy.used do Copy.Paint(Copy.pool[i], busy) end
+    end
+
+    -- An icon on message fs copying `what` = { p, b, text (for the copy box), tip, more },
+    -- placed by the SetPoint arguments that follow (none: the message's own, pinned).
+    function Copy.Add(fs, what, ...)
+        Copy.used = Copy.used + 1
+        local b = Copy.pool[Copy.used]
+        if not b then
+            b = make()
+            Copy.pool[Copy.used] = b
+        end
+        b.owner, b.p, b.b, b.k, b.boxText = fs, what.p, what.b or false, what.k or false, what.text
+        b.env, b.id = selected and selected.env or false, selected and selected.id or false
+        b.key = key(b.env, b.id, b.p, b.b)
+        b.tip, b.more = what.tip, what.more or false
+        b.own, b.dy = select("#", ...) == 0, false
+        b:ClearAllPoints()
+        if b.own then b:SetPoint("TOPRIGHT", fs.hit, "TOPRIGHT", -2, -2) else b:SetPoint(...) end
+        Copy.Paint(b)
+        return b
+    end
+
+    -- The icons of a message (or a turn's changed files): its own, and one for each code block
+    -- drawn (codes, from Mono.Place), each at its top right.
+    function Copy.ForItem(fs, item, codes)
+        local p = type(item.p) == "number" and item.p or false
+        local list = type(item.cf) == "table"
+        local own = Copy.Add(fs, { p = p, text = item.cx or item.x, tip = list and "Copy the list" or "Copy", more = list and SELECT_LIST or SELECT })
+        fs.copyIcon = own
+        for _, code in ipairs(codes or {}) do
+            local what = { p = p, b = code.b, k = code.k, text = code.text, tip = "Copy code", more = "Copies the code alone, without the rest of the message." }
+            Copy.Add(fs, what, unpack(code.at))
+        end
+    end
+
+    -- The pointer is on message fs (false: on none): its icons show.
+    function Copy.Hover(fs)
+        if Copy.hovered == fs then return end
+        local was = Copy.hovered
+        Copy.hovered = fs or false
+        if was and was ~= fs then was.hover:Hide() end
+        Copy.PaintAll()
+    end
+    messageScroll:HookScript("OnHide", function() Copy.Reset() end)
+
+    -- Whether the pointer is still on message fs, or on one of its icons (which can stick
+    -- out of a narrow message), inside the conversation.
+    -- (Or between them: an icon of a narrow message can sit a little apart from it, and the
+    -- box around the message and its shown icons counts as on it.)
+    function Copy.Over(fs)
+        if not messageScroll:IsMouseOver() then return false end
+        if fs.hit:IsShown() and fs.hit:IsMouseOver() then return true end
+        local left, right, bottom, top = fs.hit:GetLeft(), fs.hit:GetRight(), fs.hit:GetBottom(), fs.hit:GetTop()
+        for i = 1, Copy.used do
+            local b = Copy.pool[i]
+            if b.owner == fs and b:IsShown() then
+                if b:IsMouseOver() then return true end
+                local l, r, bo, t = b:GetLeft(), b:GetRight(), b:GetBottom(), b:GetTop()
+                if left and l and r and bo and t then
+                    left, right, bottom, top = math.min(left, l), math.max(right, r), math.min(bottom, bo), math.max(top, t)
+                end
+            end
+        end
+        local x, y = GetCursorPosition()
+        local scale = fs.hit:GetEffectiveScale()
+        if not (left and x and y and scale and scale > 0) then return false end
+        x, y = x / scale, y / scale
+        return x >= left and x <= right and y >= bottom and y <= top
+    end
+
+    -- Copies `target` (a button, or what one held when a menu opened).
+    function Copy.Click(target)
+        if not Copy.ByCompanion(target) then return openCopy(target.boxText) end
+        -- When it was clicked: a copy that waits too long is refused, not run later.
+        -- A block goes with the companion's mark of its first line (k), so the block copied
+        -- is the one drawn.
+        local s = ns.Link.Send({ t = "copy", e = target.env, id = target.id, p = target.p, b = target.b or nil, k = target.b and target.k or nil, at = time() })
+        if not s then return end
+        -- An earlier copy's failure on the notice line is old news now.
+        if type(notice) == "string" and notice:find("Couldn't copy", 1, true) then
+            notice, UI.noticeKept = nil, nil
+            UI.Refresh()
+        end
+        awaiting[s] = { kind = "copy", at = GetTime() }
+        Copy.state = { key = target.key, s = s, phase = "copying", at = GetTime() }
+        Copy.PaintAll()
+    end
+
+    -- What the companion said of copy command s; true when it's the copy being shown.
+    function Copy.Outcome(s, ok)
+        local st = Copy.state
+        if not st or st.s ~= s then return false end
+        st.phase, st.untilT = ok and "copied" or "failed", GetTime() + (ok and DONE_FOR or FAILED_FOR)
+        Copy.PaintAll()
+        return true
+    end
+
+    -- Right-click on a message: copy it, or select part of it in the copy box. What the
+    -- message holds is taken now: the conversation can be drawn again, its strings and
+    -- icons handed to other messages, before an entry is picked.
+    local anchor = CreateFrame("Frame", nil, UIParent)
+    anchor:SetSize(1, 1)
+    function Copy.Menu(fs)
+        local icon = rawget(fs, "copyIcon")
+        local target = icon and { env = icon.env, id = icon.id, p = icon.p, b = icon.b, key = icon.key, boxText = icon.boxText }
+        local text = fs.hit.copyText
+        local env, id = selected and selected.env, selected and selected.id
+        local x, y = GetCursorPosition()
+        local scale = UIParent:GetEffectiveScale()
+        if not scale or scale <= 0 then scale = 1 end
+        anchor:ClearAllPoints()
+        anchor:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", (x or 0) / scale, (y or 0) / scale)
+        UI.OpenMenu(anchor, {
+            entries = function()
+                local list = {}
+                if target then list[1] = { text = "Copy", value = "copy" } end
+                list[#list + 1] = { text = "Select text…", value = "select" }
+                return list
+            end,
+            isSelected = function() return false end,
+            pick = function(value)
+                -- The conversation moved on (another thread, another sign-in): nothing to do.
+                if not selected or selected.env ~= env or selected.id ~= id then return end
+                if value == "copy" and target then
+                    Copy.Click(target)
+                elseif value == "select" and text then
+                    openCopy(text)
+                end
+            end,
+        })
+    end
+
+    -- Leaving the conversation (another thread, another sign-in, the window hidden): no
+    -- message is hovered, and a menu opened on one closes.
+    function Copy.Reset()
+        Copy.Hover(false)
+        UI.CloseMenu(anchor)
+    end
+
+    -- The pointer on a message (its quote or a pull request it names take the pointer from
+    -- its button, so it's found by where the pointer is) shows its icons, and leaving it
+    -- hides them; its own icon follows the view; a copy's outcome shows for a moment.
+    local driver = CreateFrame("Frame", nil, messageScroll)
+    local nextLook = 0
+    driver:SetScript("OnUpdate", function()
+        local fs = Copy.hovered
+        if fs and not Copy.Over(fs) then Copy.Hover(false) end
+        if not Copy.hovered and GetTime() >= nextLook and messageScroll:IsMouseOver() then
+            nextLook = GetTime() + 0.1
+            for _, other in pairs(messageStrings) do
+                if other.hit:IsShown() and other.hit:IsMouseOver() then
+                    if not other.bubble.shown then other.hover:Show() end
+                    Copy.Hover(other)
+                    break
+                end
+            end
+        end
+        local moved = false
+        for i = 1, Copy.used do
+            local b = Copy.pool[i]
+            if b.own and b:IsShown() and pin(b) then moved = true end
+        end
+        if moved then Copy.PaintAll() end
+        local st = Copy.state
+        if not st then return end
+        local now = GetTime()
+        if st.phase == "copying" and now - st.at > WAIT then
+            -- Given up: a late answer says nothing more (the companion refuses it by then).
+            awaiting[st.s] = nil
+            Copy.Outcome(st.s, false)
+            notice, UI.noticeKept = "|cffff4040Couldn't copy: the companion didn't answer in time.|r", now + 30
+            UI.Refresh()
+        elseif st.untilT and now >= st.untilT then
+            Copy.state = false
+            Copy.PaintAll()
+        end
+    end)
+end
+
+-- Each message has a button over it, for the pointer: it shows the message's copy icons,
+-- and Shift-click or right-click selects part of it in the copy box. A picture's enlarges
+-- it, and a row of the agent's work opens. Your messages sit in a bubble on the right; the
+-- agent's run the full width.
 local function messageString(index)
     local fs = messageStrings[index]
     if not fs then
@@ -1459,31 +1769,44 @@ local function messageString(index)
         -- The hover tint sits behind the text, on the conversation itself.
         fs.hover = Skin.Box(messageChild, { shape = "control", fill = "hover", free = true, sub = -7 })
         fs.hover:Hide()
-        hit:SetScript("OnClick", function(self)
-            if self.work then return UI.Work.Toggle(self.work) end
-            if self.play then return Pictures.Play(self.play) end
-            if self.picture then return Pictures.Zoom(self.picture) end
-            openCopy(self.copyText)
+        hit:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        hit:SetScript("OnClick", function(self, mouse)
+            if mouse ~= "RightButton" then
+                if self.work then return UI.Work.Toggle(self.work) end
+                if self.play then return Pictures.Play(self.play) end
+                if self.picture then return Pictures.Zoom(self.picture) end
+            end
+            -- A plain click on a message does nothing: its icon copies.
+            if not self.copyText then return end
+            if mouse == "RightButton" then return UI.Copy.Menu(fs) end
+            if IsShiftKeyDown() then openCopy(self.copyText) end
         end)
         hit:SetScript("OnEnter", function(self)
+            if not self.work and not self.picture and not self.play then return end
             Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
             if self.work then
                 Skin.Tooltip:AddLine(UI.Work.open[self.work.l] and "Click to collapse" or "Click to expand")
             elseif self.play then
                 Skin.Tooltip:AddLine(self.play.v and "Click to play it on your computer" or "Click to play it on your computer; click again to stop (a file it opens in another player stops there)")
             else
-                Skin.Tooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
+                Skin.Tooltip:AddLine("Click to enlarge")
             end
             Skin.Tooltip:Show()
         end)
         hit:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
-        hit:HookScript("OnEnter", function() if not fs.bubble.shown then fs.hover:Show() end end)
-        hit:HookScript("OnLeave", function() fs.hover:Hide() end)
+        hit:HookScript("OnEnter", function()
+            if not fs.bubble.shown then fs.hover:Show() end
+            UI.Copy.Hover(fs)
+        end)
+        -- Onto its copy icon, the pointer is still on the message.
+        hit:HookScript("OnLeave", function() if not UI.Copy.Over(fs) then fs.hover:Hide() end end)
         hit:HookScript("OnHide", function() fs.hover:Hide() end)
         hit:Hide()
         hit.picture = false
         hit.play = false
         hit.work = false
+        hit.copyText = false
+        fs.copyIcon = false
         fs.hit = hit
         messageStrings[index] = fs
     end
@@ -1607,7 +1930,7 @@ end
 -- text. Each is a piece of its own in the flow: code and tables in the monospace font on a
 -- code box, so each theme styles them. A string has one font, so prose with inline code is
 -- laid out run by run. Pieces come from pools and are handed out again on every render.
-local Mono = { pools = {}, used = {} }
+local Mono = { pools = {}, used = {}, codes = {} }
 do
     local WHITE = "Interface\\Buttons\\WHITE8X8"
     local PAD, CHIP = 8, 3 -- inside a code box; around inline code
@@ -1937,7 +2260,7 @@ do
             local link = take("mention", function()
                 local b = PullRequests.NewLink(messageChild, function() return selected.env, selected.id end)
                 b.label:SetFontObject(Skin.fonts.text)
-                -- Over the message's own button, which copies it.
+                -- Over the message's own button.
                 b:SetFrameLevel(messageChild:GetFrameLevel() + 3)
                 b.box, b.chip = false, false
                 return b
@@ -2012,10 +2335,16 @@ do
         local first, last
         local cited = Skin.Hex("cited")
         Mono.placed = {}
+        local blocks = 0
         for n, seg in ipairs(segments) do
             local region, inset, dx
             local ranges = marks and marks[n]
             if type(seg) == "string" and ranges then seg = UI.Quote.Mark(seg, ranges, cited) end
+            -- Each code block drawn gets a copy icon at its box's top right (UI.Copy.ForItem):
+            -- its number among the message's blocks, and its code as the copy box shows it.
+            if type(seg) == "table" and seg.c then
+                blocks = blocks + 1
+            end
             if type(seg) == "string" and (seg:find("\1", 1, true) or PullRequests.FindMention(seg)) then
                 region, inset = inlineBlock(seg, room), 0
             elseif type(seg) == "string" then
@@ -2038,6 +2367,12 @@ do
                 region.chip:Show()
             end
             if region then
+                if type(seg) == "table" and seg.c then
+                    -- A block at the message's top leaves room for the message's own icon, as wide as
+                    -- it gets (the word "Copy", until WoW has restarted with its glyph).
+                    Mono.codes[#Mono.codes + 1] = { b = blocks, k = type(seg.k) == "string" and seg.k or false, text = (tostring(seg.c):gsub("|", "||")),
+                        at = { "TOPRIGHT", region, "TOPRIGHT", PAD - 4 - (first == nil and 46 or 0), PAD - 4 } }
+                end
                 if not first and mine then flow.gap = flow.gap + SIZE.bubbleY end
                 flow.gap = flow.gap + inset
                 place(region, x + inset + (dx or 0), inset + (dx and 6 or 10))
@@ -2081,6 +2416,7 @@ end
 -- `marks`: what to put in the cited color, as Mono.Place takes it (0 for the text).
 local function placeMessage(fs, text, mine, segments, marks)
     local full = messageWidth() - 8
+    Mono.codes = {}
     fs:SetFontObject(Skin.fonts.text)
     fs.bubble:SetShown(mine)
     -- Naming one of the thread's pull requests, it is laid out run by run, the link a run.
@@ -2165,7 +2501,7 @@ end
 -- message: how many, with the lines added and removed, then a line a file (its name, then
 -- its folder dimmed, its own counts on the right). A big diff lists a few and counts the
 -- rest. cf = { n, a, d (no a or d: not all were read, and cut = 1), f = { { p, a, d } },
--- more = files not listed }, from the companion; clicking it copies the list (item.x).
+-- more = files not listed }, from the companion; its copy icon copies the list (item.x).
 local Changes = { ADDED = "40c040", REMOVED = "ff4040" }
 
 -- A count as T3 writes it: 999, 1.2k, 12k, 1.5m.
@@ -3375,6 +3711,7 @@ function renderView()
     UI.Work.live = nil
     PullRequests.SetInView(nil)
     Mono.Release()
+    UI.Copy.Release()
     Pictures.Release()
     Handoff.Release()
     hideAsk()
@@ -3471,10 +3808,17 @@ function renderView()
                 placeMessage(fs, item.x, item.r == "u", item.g, marks)
                 if UI.Quote.On(i) then UI.Quote.Target(fs, marks, item) end
             end
-            -- Copying takes the message's text, not its segments: the code with its markdown.
-            -- cx is that text as T3 has it, where the view's differs: each model T3 names
-            -- written as model:..., and the marks and emoji the game's fonts can't draw.
-            fs.hit.copyText = item.cx or item.x
+            -- A message, and a turn's changed files, can be copied: by the companion, or in the
+            -- copy box, which takes the message's text, not its segments (the code with its
+            -- markdown). cx is that text as T3 has it, where the view's differs: each model T3
+            -- names written as model:..., and the marks and emoji the game's fonts can't draw.
+            -- A companion that copies says where each message is (p): a line with none is
+            -- a picture's placeholder, not a message.
+            local copyable = not work and not rule and not card and not lost and not picture and not play
+                and (type(item.p) == "number" or not (inbox and inbox.cp))
+            fs.hit.copyText = copyable and (item.cx or item.x) or false
+            fs.copyIcon = false
+            if copyable then UI.Copy.ForItem(fs, item, not changes and Mono.codes or nil) end
             -- A picture enlarges instead.
             fs.hit.picture = picture and item.im or false
             -- A video or audio plays instead.
@@ -4224,9 +4568,9 @@ do
 end
 
 -- ---------------------------------------------------------------- copying
--- The game can't write to the clipboard, so a clicked message opens over the conversation
--- in a read-only box, highlighted: Ctrl+C copies it (or the part you select), and closes
--- the box, as does Escape.
+-- The copy box: a message (Shift-click or right-click it, or its icon when the companion
+-- can't copy) opens over the conversation in a read-only box, highlighted: Ctrl+C copies it
+-- (or the part you select), and closes the box, as does Escape.
 local copyBox = CreateFrame("Frame", nil, right)
 copyBox:SetPoint("TOPLEFT", messageScroll, -8, 8)
 copyBox:SetPoint("BOTTOMRIGHT", messageScroll, 24, -8)
@@ -5722,6 +6066,9 @@ local function takeOutcomes(data)
             awaiting[o.s] = nil
             if sent.kind == "snoozeAt" then
                 UI.RowActions.SnoozeOutcome(o)
+            elseif sent.kind == "copy" then
+                -- A copy a newer click replaced says nothing: the newer one's icon speaks.
+                if UI.Copy.Outcome(o.s, o.ok) and not o.ok then said = format("|cffff4040Couldn't copy: %s|r", tostring(o.x or "failed")) end
             elseif o.ok then
                 if sent.kind == "new" and o.id and selected and selected.new then
                     selected = { env = o.env or selected.env, id = o.id }
@@ -5802,6 +6149,8 @@ function UI.ForgetLogin()
     inbox, selected, echo, notice, stopping, UI.noticeKept = nil, nil, nil, nil, nil, nil
     UI.History.list, UI.History.at, UI.History.pending = {}, 0, nil
     UI.Quote.Clear()
+    UI.Copy.state = false
+    UI.Copy.Reset()
     copyBox:Hide()
     UI.RowActions.snoozeBox:Hide()
     awaiting = {}
@@ -5826,6 +6175,7 @@ function UI.IsShown() return frame:IsShown() end
 function selectThread(envId, threadId)
     selected = { env = envId, id = threadId }
     UI.Quote.Clear()
+    UI.Copy.Reset()
     UI.History.Visit(envId, threadId)
     scrollToEnd = true
     copyBox:Hide()

@@ -55,7 +55,7 @@ function inboxWith(envs, extra)
   data.auth = extra and extra.auth
   data.cv = extra and extra.cv
   data.more = extra and extra.more
-  data.att, data.pi = extra and extra.att, extra and extra.pi
+  data.att, data.pi, data.cp = extra and extra.att, extra and extra.pi, extra and extra.cp
   data.sel, data.models, data.picks = extra and extra.sel, extra and extra.models, extra and extra.picks
   data.snz = extra and extra.snz
   data.uns = extra and extra.uns
@@ -97,6 +97,9 @@ end
 -- What a dropdown shows while closed.
 function shown(name) return _G[name].text end
 ENVS = { LOCAL, MAC }
+-- Shift held, for a click.
+shiftDown = false
+function IsShiftKeyDown() return shiftDown end
 Link.Init()
 UI.Toggle()
 `;
@@ -1672,10 +1675,13 @@ assert(not shownString("companion/src/bridge.rs  "), "the text for older addons 
 assert(below(head, shownString("^Done%.$")), "not below the turn's last message")
 assert(below(first, head) and below(second, first) and below(more, second), "the lines aren't one under another")
 assert(below(shownString("^thanks$"), more), "the next message isn't below the card")
--- Clicking it copies the list.
+-- Its copy icon copies the list (and the copy box, Shift-clicked, shows it).
 local copyable = false
 for _, f in ipairs(frames) do copyable = copyable or (f.kind == "Button" and f.shown and rawget(f, "copyText") == copy) end
-assert(copyable, "the card can't be clicked to copy its list")
+assert(copyable, "the card can't be Shift-clicked to select its list")
+local icon
+for _, f in ipairs(frames) do if f.kind == "Button" and rawget(f, "tip") == "Copy the list" and rawget(f, "boxText") == copy then icon = f end end
+assert(icon, "the card has no copy icon")
 -- Not all of it read: it says there are more, and gives no totals it can't stand behind.
 changes.cf = { n = 2, cut = 1, more = 1, f = { { p = "a.rs", a = 1, d = 1 } } }
 inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
@@ -1896,7 +1902,7 @@ return "ok"
   assert.equal(out, "ok");
 });
 
-test("clicking a message opens it highlighted in a read-only copy box, without game text codes", () => {
+test("Shift-clicking a message opens it highlighted in a read-only copy box, without game text codes", () => {
   run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
 local text = "Run |cffc8c8a0npm test|r in a || pipe"
@@ -1905,6 +1911,10 @@ inboxWith(ENVS, { threads = { thread }, view = view })
 UI.Select(thread)
 local hit = shownString("npm test").hit
 assert(hit and hit.shown, "the message can't be clicked")
+-- A plain click does nothing: a stray one opens no box.
+hit.scripts.OnClick(hit, "LeftButton")
+for _, f in ipairs(frames) do assert(not (f.kind == "EditBox" and f.text == "Run npm test in a | pipe"), "a plain click opened the copy box") end
+shiftDown = true
 hit.scripts.OnClick(hit, "LeftButton")
 local edit
 for _, f in ipairs(frames) do
@@ -1946,6 +1956,7 @@ UI.Select(thread)
 assert(showing("^Cmd%+C copies the highlighted text%. Escape closes%.$"), "the hint")
 assert(not showing("Ctrl%+C"), "Ctrl+C is offered on a Mac")
 local hit = shownString("Copy me").hit
+shiftDown = true
 hit.scripts.OnClick(hit, "LeftButton")
 local edit
 for _, f in ipairs(frames) do
@@ -1959,6 +1970,221 @@ metaDown = false
 assert(not box.shown, "Cmd+C didn't close it")
 return "ok"
 `, { before: ON_MAC + "\nmetaDown = false\nfunction IsMetaKeyDown() return metaDown end" });
+});
+
+// The copy icons shown now, by tooltip: { [tip] = { button, ... } }.
+const ICONS = `
+function icons()
+  local out = {}
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and f.shown and rawget(f, "boxText") ~= nil and rawget(f, "owner") then
+      out[f.tip] = out[f.tip] or {}
+      table.insert(out[f.tip], f)
+    end
+  end
+  return out
+end
+function count(list) return list and #list or 0 end
+`;
+
+test("a message's copy icon shows on hover and has the companion copy it, then says it's copied", () => {
+  run(SHOWN + ICONS + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local x = "Run:\\n|cffc8c8a0npm test|r\\nthen\\n|cffc8c8a0a || b|r"
+local g = { "Run:", { c = "npm test" }, "then", { c = "a | b", k = "0badcafe" } }
+local items = { { r = "u", x = "go", p = 0 }, { r = "a", x = x, g = g, p = 3 } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items }
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true })
+UI.Select(thread)
+-- Hidden until the pointer is on the message.
+assert(count(icons()["Copy"]) == 0, "an icon shows with no pointer on the message")
+local hit = shownString("^then$") and nil
+for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "copyText") == x then hit = f end end
+hit.scripts.OnEnter(hit)
+local shown = icons()
+assert(count(shown["Copy"]) == 1 and count(shown["Copy code"]) == 2, "the message's icon and one a code block don't show")
+-- Its icon: the companion copies it, named by its place in the thread; the game sends no text.
+local own = shown["Copy"][1]
+own.scripts.OnClick(own, "LeftButton")
+local c = sent()
+assert(c.t == "copy" and c.e == "local" and c.id == "t1" and c.p == 3 and c.b == nil, "copy command: " .. tostring(c.t) .. " " .. tostring(c.p))
+for k in pairs(c) do assert(k == "t" or k == "e" or k == "id" or k == "p" or k == "s" or k == "at", "the command carries " .. k) end
+-- With when it was clicked, so a copy that waits is refused rather than run later.
+assert(c.at == time(), "no click time: " .. tostring(c.at))
+assert(showing("^Copying…$"), "no Copying…")
+-- Shown while it's copied, with the pointer gone.
+UI.Copy.Over = function() return false end
+tick(0.5)
+assert(own.shown and showing("^Copying…$"), "the icon went before the copy was done")
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true, out = { { s = c.s, ok = true } } })
+assert(showing("^Copied$") and not showing("^Copying…$"), "no Copied")
+tick(2.5)
+assert(not showing("^Copied$") and not own.shown, "Copied stays")
+-- While one icon says how its copy went, the message's others stay hidden, so none covers it.
+UI.Copy.Over = function() return true end
+hit.scripts.OnEnter(hit)
+own.scripts.OnClick(own, "LeftButton")
+assert(count(icons()["Copy code"]) == 0 and showing("^Copying…$"), "a code block's icon shows over Copying…")
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true, out = { { s = sent().s, ok = true } } })
+tick(2.5)
+assert(count(icons()["Copy code"]) == 2, "the code blocks' icons didn't come back")
+UI.Copy.Over = function() return false end
+tick(0.25)
+-- A code block's icon copies that block alone, by its number among the message's.
+hit.scripts.OnEnter(hit)
+local blocks = icons()["Copy code"]
+blocks[2].scripts.OnClick(blocks[2], "LeftButton")
+assert(sent().t == "copy" and sent().p == 3 and sent().b == 2 and sent().k == "0badcafe", "block copy: " .. tostring(sent().b) .. " " .. tostring(sent().k))
+-- Refused: it says so, and why.
+local s = sent().s
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true, out = { { s = s, ok = false, x = "another program is using the clipboard: try again" } } })
+assert(showing("^Couldn't copy$"), "no Couldn't copy")
+assert(showing("Couldn't copy: another program is using the clipboard: try again"), "the reason isn't said")
+tick(5)
+-- No answer at all: it gives up and says so.
+hit.scripts.OnEnter(hit)
+own = icons()["Copy"][1]
+own.scripts.OnClick(own, "LeftButton")
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true })
+-- (A new click clears the last copy's failure from the notice line.)
+assert(not showing("another program is using the clipboard"), "an earlier copy's failure stayed after a new click")
+tick(21)
+assert(showing("Couldn't copy: the companion didn't answer"), "a copy that never comes back is never given up")
+-- Allowed under Read-only: copying changes nothing in T3.
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true, trust = "readonly" })
+hit.scripts.OnEnter(hit)
+own = icons()["Copy"][1]
+own.scripts.OnClick(own, "LeftButton")
+assert(sent().t == "copy", "Read-only blocks copying")
+return "ok"
+`);
+});
+
+test("without a companion that copies, the icons open the copy box: the message, or the code alone", () => {
+  run(SHOWN + ICONS + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local x = "Run:\\n|cffc8c8a0a || b|r"
+local items = { { r = "a", x = x, g = { "Run:", { c = "a | b" } }, p = 1 } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items }
+local function boxed(text)
+  for _, f in ipairs(frames) do
+    if f.kind == "EditBox" and f.text == text and f.parent.parent.shown then return f end
+  end
+end
+-- An older companion (no cp).
+inboxWith(ENVS, { threads = { thread }, view = view })
+UI.Select(thread)
+local hit
+for _, f in ipairs(frames) do if f.kind == "Button" and rawget(f, "copyText") == x then hit = f end end
+local before = #queue()
+hit.scripts.OnEnter(hit)
+local own = icons()["Copy"][1]
+own.scripts.OnClick(own, "LeftButton")
+assert(boxed("Run:\\na | b"), "the icon doesn't open the message in the copy box")
+assert(#queue() == before, "a command went to a companion that can't copy")
+local block = icons()["Copy code"][1]
+block.scripts.OnClick(block, "LeftButton")
+assert(boxed("a | b"), "the code block's icon doesn't open its code alone, pipes kept")
+-- This game's commands aren't signed: the companion would refuse, so the box opens.
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true, uns = true })
+before = #queue()
+hit.scripts.OnEnter(hit)
+own = icons()["Copy"][1]
+own.scripts.OnClick(own, "LeftButton")
+assert(#queue() == before and boxed("Run:\\na | b"), "an unsigned game sent a copy")
+return "ok"
+`);
+});
+
+test("a copy a newer click replaced says nothing when it fails, and a picture's placeholder line has no icon", () => {
+  run(SHOWN + ICONS + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "x", g = { "Intro", { c = "code" } }, p = 3 }, { r = "a", x = "[Image: chart] (drawing it for the game…)" } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items }
+inboxWith(ENVS, { threads = { thread }, cp = true, view = view })
+UI.Select(thread)
+local placeholder = shownString("drawing it for the game").hit
+assert(not rawget(placeholder, "copyText"), "the placeholder line can be copied")
+local hit
+for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "copyText") == "x" then hit = f end end
+UI.Copy.Over = function() return true end
+hit.scripts.OnEnter(hit)
+local own, block = icons()["Copy"][1], icons()["Copy code"][1]
+own.scripts.OnClick(own, "LeftButton")
+local first = sent().s
+-- Its icons hide while it shows Copying…; a click on the block before the answer.
+UI.Copy.state = false
+UI.Copy.PaintAll()
+block.scripts.OnClick(block, "LeftButton")
+local second = sent().s
+inboxWith(ENVS, { threads = { thread }, cp = true, view = view, out = { { s = first, ok = false, x = "another program is using the clipboard: try again" }, { s = second, ok = true } } })
+assert(showing("^Copied$"), "the block's copy doesn't say Copied")
+assert(not showing("Couldn't copy"), "the replaced copy's failure was said")
+return "ok"
+`);
+});
+
+test("a block at a message's top has its icon on the block, beside the message's", () => {
+  run(SHOWN + ICONS + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "x", g = { { c = "first block" }, "then", { c = "second" } }, p = 3 } }
+inboxWith(ENVS, { threads = { thread }, cp = true, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local hit
+for _, f in ipairs(frames) do if f.kind == "Button" and f.shown and rawget(f, "copyText") == "x" then hit = f end end
+hit.scripts.OnEnter(hit)
+local own, blocks = icons()["Copy"][1], icons()["Copy code"]
+assert(count(blocks) == 2, "the blocks' icons don't show")
+for _, b in ipairs(blocks) do
+  -- Hung from its block, not from the message's own icon (which follows the view).
+  assert(b.point[2] ~= own and b.point[2].text ~= nil, "a block's icon hangs from " .. tostring(b.point[2]))
+end
+assert(blocks[1].point[2].text == "first block" and blocks[1].point[4] < blocks[2].point[4], "the first block's icon doesn't leave room for the message's")
+return "ok"
+`);
+});
+
+test("right-clicking a message offers Copy and Select text…, and a plain click does nothing", () => {
+  run(SHOWN + ICONS + `
+function GetCursorPosition() return 300, 200 end
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "a", x = "Plain reply", p = 1 } }
+local view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items }
+inboxWith(ENVS, { threads = { thread }, view = view, cp = true })
+UI.Select(thread)
+local hit = shownString("^Plain reply$").hit
+local before = #queue()
+hit.scripts.OnClick(hit, "LeftButton")
+assert(#queue() == before, "a plain click sent something")
+local list = T3WoWDropdownList
+hit.scripts.OnClick(hit, "RightButton")
+assert(list.shown, "no menu")
+local texts, rows = {}, {}
+for _, r in ipairs(list.rows) do if r.shown then texts[#texts + 1] = r.text; rows[r.text] = r end end
+assert(table.concat(texts, "|") == "Copy|Select text…", table.concat(texts, "|"))
+rows["Copy"].scripts.OnClick(rows["Copy"], "LeftButton")
+assert(sent().t == "copy" and sent().p == 1, "Copy didn't copy")
+hit.scripts.OnClick(hit, "RightButton")
+rows["Select text…"].scripts.OnClick(rows["Select text…"], "LeftButton")
+local boxed = false
+for _, f in ipairs(frames) do boxed = boxed or (f.kind == "EditBox" and f.text == "Plain reply" and f.parent.parent.shown) end
+assert(boxed, "Select text… doesn't open the copy box")
+-- The conversation drawn again while the menu is open, another message now where that one
+-- was: the menu still copies the one right-clicked.
+hit.scripts.OnClick(hit, "RightButton")
+inboxWith(ENVS, { threads = { thread }, cp = true, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "Newer reply", p = 7 } } } })
+assert(shownString("^Newer reply$").hit == hit, "the test needs the same string reused")
+rows["Copy"].scripts.OnClick(rows["Copy"], "LeftButton")
+assert(sent().t == "copy" and sent().p == 1, "the menu copied the message drawn since: " .. tostring(sent().p))
+-- Another thread opened while it's open: it closes, and a pick from it does nothing.
+hit.scripts.OnClick(hit, "RightButton")
+local before = #queue()
+UI.Select({ e = 1, id = "t2" })
+assert(not list.shown, "the menu stayed open on another thread")
+rows["Copy"].scripts.OnClick(rows["Copy"], "LeftButton")
+assert(#queue() == before + 1 and sent().t == "open", "a pick from the old thread's menu went out: " .. tostring(sent().t))
+return "ok"
+`);
 });
 
 test("a table's columns are padded to one width, and cut down to fit a narrow window", () => {
@@ -2057,13 +2283,15 @@ assert(below(shownExactly("Done."), tbl), "the prose after the table isn't below
 -- Your message's inline code too.
 assert(shownExactly("x") and shownExactly("x").fontObject == mono, "your inline code isn't monospace")
 assert(not shownString("^see |c"), "your message was drawn from its text as well as its segments")
--- Clicking copies the message's text, as before.
+-- The copy box takes the message's text, as before.
 local hit
 for _, f in ipairs(frames) do
   if f.kind == "Button" and f.copyText == x and f.shown then hit = f end
 end
 assert(hit, "the message can't be clicked")
+shiftDown = true
 hit.scripts.OnClick(hit, "LeftButton")
+shiftDown = false
 local copied
 for _, f in ipairs(frames) do
   if f.kind == "EditBox" and f.text == "Run npm test:\\nok | fail\\n| k | v |" then copied = f end

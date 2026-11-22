@@ -3,6 +3,9 @@
 //! screenshot from Snipping Tool or macOS's Cmd+Ctrl+Shift+4, an image copied in a browser or
 //! an editor, or on Windows image files copied in Explorer) and keeps it as a PNG to send with
 //! the message, plus a small picture for the game to show above the box.
+//!
+//! The other way, text copied from the conversation: the game can't write to the clipboard
+//! either, so its copy icon asks the companion to put a message there (`write_text`).
 
 use crate::render::{decode_png, Bitmap};
 #[cfg(any(windows, test))]
@@ -58,6 +61,30 @@ pub fn read_images() -> Result<Vec<Clipped>, String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn read_images() -> Result<Vec<Clipped>, String> {
     Ok(Vec::new())
+}
+
+/// Puts text on the clipboard, in place of what it held: a message copied from the game's
+/// conversation. Windows keeps its line breaks as CR LF.
+#[cfg(windows)]
+pub fn write_text(text: &str) -> Result<(), String> {
+    win::write_text(&crlf(text))
+}
+
+/// Puts text on a Mac's clipboard (the general pasteboard), in place of what it held.
+#[cfg(target_os = "macos")]
+pub fn write_text(text: &str) -> Result<(), String> {
+    mac::write_text(text)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn write_text(_text: &str) -> Result<(), String> {
+    Err("T3 WoW can't copy to the clipboard on this system".into())
+}
+
+/// Line breaks as Windows programs expect them on the clipboard: CR LF.
+#[cfg(any(windows, test))]
+fn crlf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n")
 }
 
 /// The paths in a CF_HDROP (files copied in Explorer): a DROPFILES header, whose first field
@@ -305,14 +332,16 @@ mod win {
         BitmapData, GdipBitmapLockBits, GdipBitmapUnlockBits, GdipCreateBitmapFromFile, GdipDisposeImage, GdipGetImageHeight, GdipGetImageWidth, GdipGetPropertyItem,
         GdipGetPropertyItemSize, GdipImageRotateFlip, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpImage, ImageLockModeRead, Ok as GDIPLUS_OK, PropertyItem, Rect,
     };
-    use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW};
-    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 
     const CF_DIB: u32 = 8;
     const CF_HDROP: u32 = 15;
+    const CF_UNICODETEXT: u32 = 13;
 
     /// Closes the clipboard when dropped.
-    struct Open;
+    pub(super) struct Open;
     impl Drop for Open {
         fn drop(&mut self) {
             unsafe { CloseClipboard() };
@@ -320,7 +349,7 @@ mod win {
     }
 
     /// The clipboard's data in `format`, copied out.
-    unsafe fn data(format: u32) -> Option<Vec<u8>> {
+    pub(super) unsafe fn data(format: u32) -> Option<Vec<u8>> {
         unsafe {
             if IsClipboardFormatAvailable(format) == 0 {
                 return None;
@@ -347,26 +376,60 @@ mod win {
         pub files: Vec<std::path::PathBuf>,
     }
 
+    /// Opens the clipboard, closed when the result is dropped. Another program may hold it
+    /// for a moment.
+    pub(super) fn open() -> Result<Open, String> {
+        for _ in 0..10 {
+            if unsafe { OpenClipboard(null_mut()) } != 0 {
+                return Ok(Open);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Err("another program is using the clipboard: try again".into())
+    }
+
     pub fn read() -> Result<Copied, String> {
         unsafe {
-            // Another program may hold the clipboard for a moment.
-            let mut opened = false;
-            for _ in 0..10 {
-                if OpenClipboard(null_mut()) != 0 {
-                    opened = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            if !opened {
-                return Err("another program is using the clipboard: try again".into());
-            }
-            let _open = Open;
+            let _open = open()?;
             let name: Vec<u16> = "PNG".encode_utf16().chain(Some(0)).collect();
             let png_format = RegisterClipboardFormatW(name.as_ptr());
             let png = if png_format != 0 { data(png_format) } else { None };
             let files = data(CF_HDROP).map(|drop| super::dropped_files(&drop)).unwrap_or_default();
             Ok(Copied { png, dib: data(CF_DIB), files })
+        }
+    }
+
+    /// Puts `text` on the clipboard as Unicode text, in place of everything it held.
+    pub fn write_text(text: &str) -> Result<(), String> {
+        let units: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let failed = || "Windows didn't take the text onto the clipboard: try again".to_string();
+        unsafe {
+            // The text is ready before the clipboard is emptied, so a failure to make it or to
+            // open the clipboard leaves what it held. Once set, the clipboard owns the memory;
+            // until then it's ours to free.
+            let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2);
+            if memory.is_null() {
+                return Err(failed());
+            }
+            let ptr = GlobalLock(memory) as *mut u16;
+            if ptr.is_null() {
+                GlobalFree(memory);
+                return Err(failed());
+            }
+            std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
+            GlobalUnlock(memory);
+            let set = open().and_then(|_open| {
+                // Opened with no window, as clipboard-win does: Windows takes the text all the
+                // same (the ignored test below reads it back).
+                if EmptyClipboard() == 0 || SetClipboardData(CF_UNICODETEXT, memory).is_null() {
+                    return Err(failed());
+                }
+                Ok(())
+            });
+            if set.is_err() {
+                GlobalFree(memory);
+            }
+            set
         }
     }
 
@@ -471,8 +534,8 @@ mod win {
 mod mac {
     use super::MacCopied;
     use objc2::rc::autoreleasepool;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF};
-    use objc2_foundation::{NSData, NSDictionary};
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF};
+    use objc2_foundation::{NSData, NSDictionary, NSString};
 
     pub fn read() -> MacCopied {
         autoreleasepool(|_| {
@@ -482,6 +545,21 @@ mod mac {
             let data = |kind| board.dataForType(kind).map(|d| d.to_vec());
             let file = board.types().is_some_and(|types| types.containsObject(file));
             MacCopied { png: data(png), tiff: data(tiff), file }
+        })
+    }
+
+    /// Puts `text` on the pasteboard as plain text, in place of everything it held.
+    pub fn write_text(text: &str) -> Result<(), String> {
+        autoreleasepool(|_| {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            // SAFETY: AppKit's constant type name, valid for the life of the process.
+            let kind = unsafe { NSPasteboardTypeString };
+            if board.setString_forType(&NSString::from_str(text), kind) {
+                Ok(())
+            } else {
+                Err("macOS didn't take the text onto the clipboard: try again".into())
+            }
         })
     }
 
@@ -576,6 +654,25 @@ mod tests {
         let mut eight_bit = full.clone();
         eight_bit[14] = 8;
         assert!(dib_bitmap(&eight_bit).is_err());
+    }
+
+    /// Writes this PC's clipboard, so it runs only when asked (`cargo test -- --ignored`).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn text_written_to_the_windows_clipboard_reads_back_as_unicode_text() {
+        let text = "copied from T3 WoW ✓\n\tline two | pipe";
+        write_text(text).unwrap();
+        let _open = win::open().unwrap();
+        let units = unsafe { win::data(13) }.expect("no text on the clipboard");
+        let read: Vec<u16> = units.as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b)).take_while(|&u| u != 0).collect();
+        assert_eq!(String::from_utf16(&read).unwrap(), "copied from T3 WoW ✓\r\n\tline two | pipe");
+    }
+
+    #[test]
+    fn text_copied_on_windows_breaks_its_lines_with_cr_lf() {
+        assert_eq!(crlf("one\ntwo\r\nthree\rfour\n"), "one\r\ntwo\r\nthree\r\nfour\r\n");
+        assert_eq!(crlf("no breaks"), "no breaks");
     }
 
     #[test]

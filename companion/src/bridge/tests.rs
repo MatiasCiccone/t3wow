@@ -471,6 +471,8 @@ impl Rig {
         // The keys come through, whatever this Mac's Input Monitoring says.
         bridge.keys_hidden = Box::new(|| false);
         bridge.set_game_key(Some(TEST_KEY.to_vec()));
+        // Nor touch this PC's clipboard: a test that copies records what it would copy.
+        bridge.copy_text = Box::new(|_| Err("no clipboard in tests".into()));
         Rig { bridge, t3, written, clock, opened, signer: Some(TEST_KEY) }
     }
 
@@ -543,7 +545,7 @@ fn commands_from_a_frame_run_once_reach_the_linked_machine_and_are_acked() {
     let inbox = rig.slot(1);
     assert!(inbox.starts_with("T3WoW_Inbox = {v=1,k=\"c1\",u=\"ui1\",ack=2,"), "{inbox}");
     assert!(inbox.contains("{id=\"mac\",name=\"Mac\",ok=true}"));
-    assert!(inbox.contains("{r=\"a\",x=\"done\"}"));
+    assert!(inbox.contains("{r=\"a\",x=\"done\",p=1}"), "{inbox}");
     assert!(inbox.contains(",slot=1,ns=5,"));
 
     // Nothing changed: no slot is spent.
@@ -2019,9 +2021,9 @@ fn a_message_with_code_also_comes_in_segments_and_its_text_stays_as_before() {
     rig.bridge.tick();
     let view = rig.bridge.snapshot()["view"].clone();
     let items = view["items"].as_array().unwrap();
-    assert_eq!(items[0], json!({ "r": "u", "x": "plain" }), "no segments without code");
+    assert_eq!(items[0], json!({ "r": "u", "x": "plain", "p": 0 }), "no segments without code");
     assert_eq!(items[1]["x"], "Run |cffc8c8a0npm test|r:\n|cffc8c8a0ok || fail|r");
-    assert_eq!(items[1]["g"], json!(["Run \u{1}npm test\u{2}:", { "c": "ok | fail" }]));
+    assert_eq!(items[1]["g"], json!(["Run \u{1}npm test\u{2}:", { "c": "ok | fail", "k": block_key("ok | fail") }]));
 }
 
 #[test]
@@ -2034,6 +2036,237 @@ fn a_message_shows_what_the_fonts_draw_and_copies_as_t3_has_it() {
     assert!(items[0]["cx"].is_null(), "no copy text when nothing changed");
     assert_eq!(items[1]["x"], "✓ done: |cffc8c8a0cat logs/.txt|r");
     assert_eq!(items[1]["cx"], "✅ done: |cffc8c8a0cat logs/🚀.txt|r");
+}
+
+/// A rig with thread t1 open and every copy recorded instead of reaching the clipboard.
+fn copy_rig(start_ms: i64, messages: Vec<Value>) -> (Rig, Arc<Mutex<Vec<String>>>) {
+    let mut rig = Rig::new(start_ms);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&copied);
+    rig.bridge.copy_text = Box::new(move |text| {
+        sink.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    (rig, copied)
+}
+
+#[test]
+fn the_copy_icon_puts_t3s_markdown_or_one_code_block_on_the_clipboard() {
+    let reply = "Run this:\n\n```sh\nnpm test\n\t--watch\n```\n\nThen **model:codex/gpt-5** and\n\n```\nsecond\n```";
+    let (mut rig, copied) = copy_rig(23_100_000, conversation(&["plain", reply]));
+    // The game names each message by its place in the thread.
+    let items = view_items(&rig);
+    assert_eq!((items[0]["p"].clone(), items[1]["p"].clone()), (json!(0), json!(2)));
+    // The whole message, as T3 has it: its markdown, fences and model reference included.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+    // A code block: its code alone, tabs and all.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1 }, { "s": 5, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(*copied.lock().unwrap(), [reply, "npm test\n\t--watch", "second"]);
+    // Read from what the companion already has: no read of T3 for it.
+    let reads = rig.t3.calls_to("t3_thread_read").len();
+    // A block or a message that isn't there: the reason, and nothing copied.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 6, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 3 }, { "s": 7, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 0, "b": 1 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 6)["x"], "that code block isn't in the message any more");
+    assert_eq!(outcome(&rig, 7)["x"], "that code block isn't in the message any more");
+    // Another thread than the one open: refused, whatever it names.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 5, "q": [{ "s": 8, "t": "copy", "at": rig.now_s(), "id": "t2", "p": 0 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 8)["x"], "that thread isn't open any more");
+    assert_eq!(copied.lock().unwrap().len(), 3);
+    assert_eq!(rig.t3.calls_to("t3_thread_read").len(), reads, "copying read T3 again");
+    // The clipboard refusing: its reason.
+    rig.bridge.copy_text = Box::new(|_| Err("another program is using the clipboard: try again".into()));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 6, "q": [{ "s": 9, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 0 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 9)["x"], "another program is using the clipboard: try again");
+    // The game is only told it can copy where the clipboard can be written.
+    #[cfg(any(windows, target_os = "macos"))]
+    assert_eq!(rig.bridge.snapshot()["cp"], true);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    assert!(rig.bridge.snapshot().get("cp").is_none());
+}
+
+#[test]
+fn a_long_message_is_read_again_whole_to_copy_it() {
+    let long = format!("start {} end", "x".repeat(7000));
+    // The view's read stops at 6,000 characters, as T3 cuts it.
+    let (mut rig, copied) = copy_rig(23_200_000, conversation(&["plain", &long]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+    assert_eq!(*copied.lock().unwrap(), [long]);
+    let read = rig.t3.calls_to("t3_thread_read").into_iter().find(|a| a["maxCharsPerItem"] == json!(COPY_CHARS)).expect("not read again");
+    assert_eq!((read["afterPosition"].clone(), read["limit"].clone()), (json!(1), json!(1)));
+
+    // Longer than one read: the rest of it is read by its item, piece by piece.
+    let huge = format!("begin {} finish", "y".repeat(45_000));
+    rig.t3.messages.lock().unwrap().get_mut("t1").unwrap()[1] = json!({ "position": 2, "itemId": "m2", "type": "assistant_message", "text": huge });
+    rig.t3.item_texts.lock().unwrap().insert("m2".into(), huge.clone());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 4), json!({ "s": 4, "ok": true }));
+    assert_eq!(copied.lock().unwrap().last(), Some(&huge));
+    let pieces: Vec<Value> = rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| a["itemId"] == "m2").map(|a| a["textOffset"].clone()).collect();
+    assert_eq!(pieces, [json!(20_000), json!(40_000)]);
+
+    // Past what the companion reads (10 pieces): refused, not cut short.
+    let endless = "z".repeat(210_000);
+    rig.t3.item_texts.lock().unwrap().insert("m2".into(), endless.clone());
+    rig.t3.messages.lock().unwrap().get_mut("t1").unwrap()[1]["text"] = json!(endless);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 5, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 5)["x"], "it's over 200000 characters: copy it in T3");
+    assert_eq!(copied.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_code_block_the_view_cut_through_its_closing_fence_isnt_mistaken_for_a_later_one() {
+    // The view's read stops two backticks into the closing fence of an empty block: the game
+    // draws those backticks as block 1. The whole message has no such block.
+    let whole = format!("{}\n```\n```\n\n```\nsecond\n```", "p".repeat(5_993));
+    let cut: String = whole.chars().take(6_000).collect();
+    assert!(cut.ends_with("```\n``"), "{}", &cut[5_990..]);
+    let (mut rig, copied) = copy_rig(23_250_000, conversation(&["plain", &whole]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3)["x"], "that code block isn't in the message any more");
+    assert!(copied.lock().unwrap().is_empty(), "copied {:?}", copied.lock().unwrap());
+}
+
+#[test]
+fn a_code_block_after_cr_lf_lines_is_counted_where_the_game_cut_the_message() {
+    // CR LF line breaks: the game cuts the message after making them LF, so a block it drew
+    // near the 6,000th character is the companion's too. The read cut it short, so the
+    // companion reads it whole and counts against what the view had.
+    let whole = format!("{}```\necho hi\n```\n\n```\nnext\n```\n{}", "x\r\n".repeat(1_990), "y".repeat(500));
+    let (mut rig, copied) = copy_rig(23_320_000, conversation(&["plain", &whole]));
+    let g = view_items(&rig)[1]["g"].clone();
+    assert_eq!(g.as_array().unwrap().iter().filter(|s| s["c"].is_string()).count(), 2, "{}", g.to_string().chars().rev().take(200).collect::<String>());
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1 }, { "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(*copied.lock().unwrap(), ["echo hi", "next"]);
+}
+
+#[test]
+fn without_its_read_cached_a_block_is_copied_only_when_what_the_game_drew_is_certain() {
+    let long = format!("{}\n```\nfirst\n```\n```\nsecond\n```", "p".repeat(6_100));
+    let (mut rig, copied) = copy_rig(23_310_000, conversation(&["```\nshort\n```", &long]));
+    // The cache gone (a read failed, or one is under way when the copy comes).
+    rig.bridge.view_cache = None;
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 0, "b": 1 }, { "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1 }] }));
+    rig.bridge.tick();
+    // A short message is drawn whole: its block is certain. A long one may have been cut
+    // anywhere, so its block isn't guessed.
+    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+    assert_eq!(outcome(&rig, 4)["x"], "that message is being read again: copy the block in a moment");
+    assert_eq!(*copied.lock().unwrap(), ["short"]);
+}
+
+#[test]
+fn a_code_block_is_copied_only_if_it_still_starts_as_the_block_the_game_drew() {
+    let reply = "```\n\tfirst line ✅\nmore\n```\n```\nsecond\n```";
+    let (mut rig, copied) = copy_rig(23_315_000, conversation(&["plain", reply]));
+    let g = view_items(&rig)[1]["g"].clone();
+    let keys: Vec<String> = g.as_array().unwrap().iter().filter(|s| s["c"].is_string()).map(|s| str_of(&s["k"]).to_string()).collect();
+    assert_eq!(keys.len(), 2);
+    // The game sends each block's mark back; T3's text, tabs and emoji and all, matches it.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1, "k": keys[0] },
+        { "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 2, "k": keys[1] },
+        // A block found where the game drew another (its mark differs): refused.
+        { "s": 5, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 2, "k": keys[0] },
+    ] }));
+    rig.bridge.tick();
+    assert_eq!(*copied.lock().unwrap(), ["\tfirst line ✅\nmore", "second"]);
+    assert_eq!(outcome(&rig, 5)["x"], "that code block changed since it was drawn: copy it again");
+}
+
+#[test]
+fn a_block_starting_with_emoji_or_cut_in_its_first_line_still_copies() {
+    // A first line of emoji only (drawn as spaces), and a message whose cut falls in its last
+    // block's first line: both copy, whole.
+    let cut = format!("{}\n```\nabcdefghijklmnopqrstuvwxyz0123456789\nmore\n```", "x".repeat(5_980));
+    let (mut rig, copied) = copy_rig(23_316_000, conversation(&["```\n🎉\necho hi\n```", &cut]));
+    let items = view_items(&rig);
+    let key_of = |item: &Value| item["g"].as_array().unwrap().iter().find(|s| s["c"].is_string()).map(|s| s["k"].clone()).unwrap();
+    let (emoji, last) = (key_of(&items[0]), key_of(&items[1]));
+    assert!(emoji.is_string(), "{emoji}");
+    assert!(last.is_null(), "a block the cut may split has a mark: {last}");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 0, "b": 1, "k": emoji },
+        { "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1 },
+    ] }));
+    rig.bridge.tick();
+    assert_eq!(*copied.lock().unwrap(), ["🎉\necho hi", "abcdefghijklmnopqrstuvwxyz0123456789\nmore"]);
+}
+
+#[test]
+fn a_cache_miss_on_a_message_t3_cut_counts_its_cut_as_t3_does() {
+    // CR LF lines make T3's read (6,000 of its characters) stop two backticks into an empty
+    // block's closing fence, though the text is under 6,000 once its line breaks are LF.
+    let whole = format!("{}pp\n```\n```\n\n```\necho later\n```", "x\r\n".repeat(1_997));
+    let (mut rig, copied) = copy_rig(23_318_000, conversation(&["plain", &whole]));
+    let g = view_items(&rig)[1]["g"].clone();
+    let first = g.as_array().unwrap().iter().find(|s| s["c"].is_string()).cloned().unwrap();
+    assert_eq!(first["c"], "``", "{first}");
+    rig.bridge.view_cache = None;
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2, "b": 1, "k": first["k"] }] }));
+    rig.bridge.tick();
+    assert_ne!(outcome(&rig, 3)["ok"], true, "{}", outcome(&rig, 3));
+    assert!(copied.lock().unwrap().is_empty(), "copied {:?}", copied.lock().unwrap());
+}
+
+#[test]
+fn a_code_block_after_a_quote_in_your_message_copies_as_the_game_numbers_it() {
+    let cite = "[Assistant quote](t3-citation://v1/local/t1/m-answer?text=a%0A%60%60%60&start=0&end=5&prefix=&suffix=)";
+    let mine = format!("{cite}\n\n```\nmy code\n```");
+    let (mut rig, copied) = copy_rig(23_300_000, conversation(&["question", "a\n```", &mine]));
+    let g = view_items(&rig)[2]["g"].clone();
+    assert_eq!(g.as_array().unwrap().iter().filter(|s| s["c"].is_string()).count(), 1, "{g}");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 4, "b": 1 }, { "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 4 }] }));
+    rig.bridge.tick();
+    // The block, and the whole message as T3 has it, its quote's link and all.
+    assert_eq!(*copied.lock().unwrap(), ["my code".to_string(), mine]);
+}
+
+#[test]
+fn a_copy_that_waited_doesnt_replace_what_you_copied_since() {
+    let (mut rig, copied) = copy_rig(23_350_000, conversation(&["plain", "reply"]));
+    // Clicked 16 seconds before the companion got to it (busy, or closed meanwhile): refused
+    // before anything is read for it, even a message it would have to read again.
+    let reads = rig.t3.calls_to("t3_thread_read").len();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s() - 16, "id": "t1", "p": 0 }, { "s": 5, "t": "copy", "at": rig.now_s() - 16, "id": "t1", "p": 99 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3)["x"], "it waited too long to be copied: click it again");
+    assert_eq!(outcome(&rig, 5)["x"], "it waited too long to be copied: click it again");
+    assert!(rig.t3.calls_to("t3_thread_read")[reads..].iter().all(|a| a["maxCharsPerItem"] != json!(COPY_CHARS)), "read for a copy it refused");
+    // One with no time at all is refused the same way.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 6, "t": "copy", "id": "t1", "p": 0 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 6)["x"], "it waited too long to be copied: click it again");
+    assert!(copied.lock().unwrap().is_empty());
+}
+
+#[test]
+fn copying_works_at_every_trust_level_but_only_when_signed() {
+    let (mut rig, copied) = copy_rig(23_300_000, conversation(&["plain", "reply"]));
+    rig.bridge.set_trust(Trust::ReadOnly);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 0 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+    // Another addon's strip can read, but it can't replace what your clipboard holds.
+    rig.signer = None;
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [{ "s": 4, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 2 }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 4), json!({ "s": 4, "ok": false, "x": UNSIGNED_REASON }));
+    assert_eq!(*copied.lock().unwrap(), ["plain"]);
 }
 
 #[test]
@@ -5112,6 +5345,17 @@ fn a_turn_that_changed_files_lists_them_after_its_last_message_outside_the_fold(
         ] })
     );
     assert_eq!(card["x"], "3 changed files  +28 -4\ncompanion/src/bridge.rs  +9 -2\ncompanion/src/bridge/tests.rs  +18 -2\nREADME.md  +1 -0");
+    // Its copy icon copies that list, named by the checkpoint's place in the thread.
+    assert_eq!(card["p"], 5);
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&copied);
+    rig.bridge.copy_text = Box::new(move |text| {
+        sink.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "wk": 1, "q": [{ "s": 3, "t": "copy", "at": rig.now_s(), "id": "t1", "p": 5 }] }));
+    rig.bridge.tick();
+    assert_eq!(*copied.lock().unwrap(), [str_of(&card["x"])]);
     // The scan read the start of it; the rest is read once, by its item.
     let reads = change_reads(&rig);
     assert_eq!(reads.len(), 1);

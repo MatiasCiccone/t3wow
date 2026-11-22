@@ -143,4 +143,9 @@ const lid = (side) => Array.from({ length: 25 }, (_, i) => [3.5 + i * (25 / 24),
 strokes("eye.tga", 2.3, [lid(-1), lid(1), arc(16, 16, 3.8, 0, 360)]);
 const meridian = Array.from({ length: 49 }, (_, i) => [16 + 5.5 * Math.cos((i * Math.PI) / 24), 16 + 11.5 * Math.sin((i * Math.PI) / 24)]);
 strokes("globe.tga", 2.2, [arc(16, 16, 11.5, 0, 360), meridian, [[4.5, 16], [27.5, 16]]]);
+// Copying from the conversation, as T3 draws it: a sheet over the corner of another.
+strokes("copy.tga", 2.3, [
+  [[13.5, 12], [25.5, 12], [27, 13.5], [27, 25.5], [25.5, 27], [13.5, 27], [12, 25.5], [12, 13.5], [13.5, 12]],
+  [[8.5, 20], [6.5, 20], [5, 18.5], [5, 6.5], [6.5, 5], [18.5, 5], [20, 6.5], [20, 8.5]],
+]);
 console.log("skin textures written to addon/T3WoW/Media");
