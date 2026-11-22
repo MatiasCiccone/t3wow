@@ -100,7 +100,7 @@ return JSON(DRAW())`;
 function tgas() {
   const out = {};
   for (const n of ["round", "ring", "classic", "classic-ring", "alarm", "brain", "check", "chevron", "clock", "close", "compose", "done", "eye", "gear",
-    "globe", "grip", "hammer", "image-off", "lock", "logo", "message", "pencil", "question", "refresh", "search", "shield-off", "shield", "sparkle", "spinner", "terminal"]) {
+    "globe", "grip", "hammer", "image-off", "lock", "logo", "message", "pencil", "play", "question", "refresh", "search", "shield-off", "shield", "sparkle", "spinner", "terminal"]) {
     const b = readFileSync(join(media, n + ".tga"));
     const w = b.readUInt16LE(12), h = b.readUInt16LE(14), top = (b[17] & 0x20) !== 0;
     const px = Buffer.alloc(w * h * 4);

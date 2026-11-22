@@ -710,6 +710,62 @@ fn live_a_quote_reaches_the_game_tied_to_its_words() {
     live.finish();
 }
 
+/// A video and an audio file an agent embeds in its reply, as T3 0.1.11 shows them with its
+/// players, reach the game: the video as its frame (drawn with this PC's Edge, when it has
+/// one), the audio as a card, and Play from the game opens the video and plays the audio.
+#[test]
+#[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
+fn live_video_and_audio_an_agent_embeds_reach_the_game() {
+    let mut live = Live::start("media");
+    let media = live.dir.join("media");
+    std::fs::create_dir_all(&media).unwrap();
+    let (video, audio) = (media.join("kiwi demo.webm"), media.join("kiwi.mp3"));
+    std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/video.webm"), &video).unwrap();
+    std::fs::write(&audio, b"not played: the player is a stand-in").unwrap();
+    let edge = crate::render::Edge::find(live.dir.join("render"));
+    let real = edge.is_some();
+    match edge {
+        Some(edge) => live.bridge.set_painter(Some(Box::new(edge))),
+        None => live.bridge.set_painter(Some(Box::new(FakePainter::default()))),
+    }
+    let player = FakePlayer::default();
+    live.bridge.player = Box::new(player.clone());
+    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&opened);
+    live.bridge.opener = Box::new(move |link| sink.lock().unwrap().push(link.to_string()));
+    live.images = true;
+    let ask = format!("Reply with exactly these two lines and nothing else:\n![kiwi demo](<{}>)\n![](<{}>)", video.display(), audio.display());
+    let id = live.new_thread(&ask);
+    let item = |live: &Live, label: &str| live.snapshot()["view"]["items"].as_array().into_iter().flatten().find(|i| str_of(&i["x"]).contains(label)).cloned();
+    let (mut attempt, mut replies) = (1, 0);
+    loop {
+        live.wait("the agent's reply", REPLY_TIMEOUT, |live| live.said(&id, "a").len() > replies && !working(str_of(&live.thread(&id)["status"])));
+        if live.try_wait(STATE_TIMEOUT, |live| item(live, "[Audio: kiwi.mp3]").is_some() && item(live, "Video: kiwi demo").is_some_and(|v| v["im"].is_object())).is_ok() {
+            break;
+        }
+        assert!(attempt < TRIES, "the reply didn't embed both files: {:?}; the view: {}", live.said(&id, "a"), live.snapshot()["view"]["items"]);
+        eprintln!("  try {attempt}: the agent didn't embed both, asking it again");
+        (attempt, replies) = (attempt + 1, live.said(&id, "a").len());
+        let s = live.command(json!({ "t": "send", "id": id, "m": ask }));
+        live.expect_no_failure(s);
+    }
+    let shown = item(&live, "Video: kiwi demo").unwrap();
+    if real {
+        assert_eq!((shown["im"]["w"].clone(), shown["im"]["h"].clone()), (json!(320), json!(180)), "the video's frame at its own size");
+    }
+    live.checkpoint("the video's frame and the audio's card", &id, &["kiwi.mp3"], &[]);
+    let audio_card = item(&live, "[Audio: kiwi.mp3]").unwrap();
+    let s = live.command(json!({ "t": "play", "id": id, "k": shown["pl"]["k"] }));
+    live.expect_no_failure(s);
+    let opened = opened.lock().unwrap().clone();
+    assert!(opened.len() == 1 && opened[0].ends_with("kiwi demo.webm"), "the video opens in this PC's player: {opened:?}");
+    let s = live.command(json!({ "t": "play", "id": id, "k": audio_card["pl"]["k"] }));
+    live.expect_no_failure(s);
+    let calls = player.calls();
+    assert!(calls.len() == 1 && calls[0].starts_with("play ") && calls[0].ends_with("kiwi.mp3"), "the audio plays on this PC: {calls:?}");
+    live.finish();
+}
+
 /// The T3 tools the companion calls. T3 lists html_render, whose calls it reads from a
 /// thread's timeline, only to agents in a thread: `live_a_page_an_agent_shows_reaches_the_game`
 /// checks its inputs.

@@ -122,6 +122,8 @@ strokes("image-off.tga", 2.2, [
   [[7, 23], [13, 16], [18, 21], [21, 18], [25, 22]],
   [[5, 5], [27, 27]],
 ]);
+// A triangle in a circle: a video or audio to play.
+strokes("play.tga", 2.4, [face, [[13, 10.5], [22, 16], [13, 21.5], [13, 10.5]]]);
 // A speech bubble, its tail at the bottom left: a question you were asked.
 const bubble = Array.from({ length: 45 }, (_, i) => [16 + 11 * Math.cos(((150 + (330 * i) / 44) * Math.PI) / 180), 15 + 11 * Math.sin(((150 + (330 * i) / 44) * Math.PI) / 180)]);
 strokes("message.tga", 2.4, [[...bubble, [6.5, 27], bubble[0]]]);

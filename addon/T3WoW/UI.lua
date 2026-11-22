@@ -1461,6 +1461,7 @@ local function messageString(index)
         fs.hover:Hide()
         hit:SetScript("OnClick", function(self)
             if self.work then return UI.Work.Toggle(self.work) end
+            if self.play then return Pictures.Play(self.play) end
             if self.picture then return Pictures.Zoom(self.picture) end
             openCopy(self.copyText)
         end)
@@ -1468,6 +1469,8 @@ local function messageString(index)
             Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
             if self.work then
                 Skin.Tooltip:AddLine(UI.Work.open[self.work.l] and "Click to collapse" or "Click to expand")
+            elseif self.play then
+                Skin.Tooltip:AddLine(self.play.v and "Click to play it on your computer" or "Click to play it on your computer; click again to stop")
             else
                 Skin.Tooltip:AddLine(self.picture and "Click to enlarge" or "Click to copy")
             end
@@ -1479,6 +1482,7 @@ local function messageString(index)
         hit:HookScript("OnHide", function() fs.hover:Hide() end)
         hit:Hide()
         hit.picture = false
+        hit.play = false
         hit.work = false
         fs.hit = hit
         messageStrings[index] = fs
@@ -2345,6 +2349,53 @@ do
         fs.lostBox:SetPoint("TOPLEFT", icon, "TOPLEFT", -PAD, PAD)
         fs.lostBox:SetPoint("BOTTOMRIGHT", icon, "BOTTOMLEFT", width - PAD, -PAD)
         fs.lostBox:Show()
+        -- A video's still plays from it.
+        anchorMessage(fs, icon, PAD, icon, PAD, width)
+    end
+
+    -- Audio a message embeds (`pl` = { k, n }): a small card with a play mark and its file's
+    -- name, yours against the right edge. The game can't play it; a click asks the companion to.
+    function Pictures.Audio(fs, play, mine)
+        local PAD, ICON, GAP = 8, 16, 6
+        if not rawget(fs, "audioBox") then
+            fs.audioBox = Skin.Box(messageChild, { shape = "panel", fill = "card", ring = "border", free = true, sub = -8 })
+            fs.audioIcon = Skin.Glyph(messageChild, "play", ICON, "accent", "OVERLAY")
+        end
+        local icon = fs.audioIcon
+        local full = messageWidth() - 8
+        fs.bubble:Hide()
+        fs:SetFontObject(Skin.fonts.text)
+        -- One line, cut short in a narrow window: the card is as tall as its mark.
+        local room = math.max(20, full - PAD - ICON - GAP - PAD)
+        fs:SetWordWrap(false)
+        fs:SetWidth(room)
+        fs:SetText(tostring(play.n or "Audio"))
+        local textWidth = math.min(room, math.ceil(fs:GetStringWidth() or 0) + 1)
+        fs:SetWidth(textWidth)
+        local width = PAD + ICON + GAP + textWidth + PAD
+        flow.gap = flow.gap + PAD
+        place(icon, (mine and (full + 4 - width) or 4) + PAD, PAD + 18)
+        -- The game finds a new file only when it starts: one started before this version
+        -- draws no mark rather than a square. Faded, not hidden: the text hangs from it.
+        local file = not icon.GetTextureFilePath or icon:GetTextureFilePath()
+        icon:SetAlpha((file ~= nil and file ~= "") and 1 or 0)
+        fs:ClearAllPoints()
+        fs:SetPoint("LEFT", icon, "RIGHT", GAP, 0)
+        fs:Show()
+        fs.audioBox:ClearAllPoints()
+        fs.audioBox:SetPoint("TOPLEFT", icon, "TOPLEFT", -PAD, PAD)
+        fs.audioBox:SetPoint("BOTTOMRIGHT", icon, "BOTTOMLEFT", width - PAD, -PAD)
+        fs.audioBox:Show()
+        anchorMessage(fs, icon, PAD, icon, PAD, width)
+    end
+
+    -- Asks the companion to play a video or audio of the open thread (`pl.k` names it): a
+    -- video opens in the computer's player, audio plays there, and the same audio again stops.
+    function Pictures.Play(play)
+        if not selected or selected.new then return end
+        local s = ns.Link.Send({ t = "play", e = selected.env, id = selected.id, k = play.k })
+        if s then awaiting[s] = { kind = "play", at = GetTime() } end
+        UI.Notice(play.v and "Opening the video on your computer…" or "Asking your computer…")
     end
 
     -- A picture enlarged over the screen, up to twice its own size; a click or Escape
@@ -3308,6 +3359,11 @@ function renderView()
             fs.lostBox:Hide()
             fs.lostIcon:Hide()
         end
+        if rawget(fs, "audioBox") then
+            fs.audioBox:Hide()
+            fs.audioIcon:Hide()
+            fs:SetWordWrap(true)
+        end
         if rawget(fs, "chevron") then
             fs.chevron:Hide()
             fs.workText:Hide()
@@ -3395,6 +3451,9 @@ function renderView()
             local changes = not card and type(item.cf) == "table" and item.cf
             local lost = not card and item.lost == 1
             local picture = not card and item.im ~= nil and Pictures.Place(fs, item.im, item.r == "u")
+            -- A video (its picture, or the line in its place) or audio the companion plays.
+            local play = not card and type(item.pl) == "table" and type(item.pl.k) == "string" and item.pl
+            local audio = play and not play.v and item.im == nil
             if work then
                 UI.Work.Place(fs, work, item.x)
             elseif rule then
@@ -3405,6 +3464,8 @@ function renderView()
                 placeChanges(fs, changes)
             elseif lost then
                 Pictures.Lost(fs, item.r == "u")
+            elseif audio then
+                Pictures.Audio(fs, play, item.r == "u")
             elseif not picture then
                 local marks = UI.Quote.MarksFor(i, item)
                 placeMessage(fs, item.x, item.r == "u", item.g, marks)
@@ -3416,11 +3477,13 @@ function renderView()
             fs.hit.copyText = item.cx or item.x
             -- A picture enlarges instead.
             fs.hit.picture = picture and item.im or false
+            -- A video or audio plays instead.
+            fs.hit.play = play or false
             -- A row opens instead.
             fs.hit.work = work
             -- A picture that couldn't be loaded has nothing to enlarge or copy; a delegated
             -- task's card isn't a message to copy.
-            fs.hit:SetShown(not lost and not rule and not card and not (work and work.still))
+            fs.hit:SetShown((play or not lost) and not rule and not card and not (work and work.still))
             -- A quote's source, while it's shown, has the hover tint.
             if UI.Quote.On(i) then fs.hover:Show() end
         end
@@ -5672,6 +5735,7 @@ local function takeOutcomes(data)
                 if sent.kind == "answer" then askState.sent = nil end
                 if sent.kind == "model" then Selectors.Refused(o.s) end
                 local what = sent.kind == "new" and "Couldn't start the thread" or (sent.kind == "answer" and "Answer not sent")
+                    or (sent.kind == "play" and "Couldn't play it")
                     or (sent.kind == "paste" and "Not pasted") or (sent.kind == "model" and "Model not changed") or "Not sent"
                 said = format("|cffff4040%s: %s|r%s", what, tostring(o.x or "failed"), sent.text and " (your text is back in the box)" or "")
             end
