@@ -14,6 +14,7 @@
 mod app;
 mod bridge;
 mod capture;
+mod cites;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod clip;
 mod codec;

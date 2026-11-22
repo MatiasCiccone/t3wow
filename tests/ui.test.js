@@ -4437,3 +4437,202 @@ assert(showing("Second reply"), "the new reply isn't shown")
 return "ok"
 `);
 });
+
+const QUOTES = `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+function quoteButton(text)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "quote") and f.quote.q == text and f.shown then return f end
+  end
+end
+function hitFor(x)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and rawget(f, "copyText") == x and f.shown then return f end
+  end
+end
+function lastSent() local q = queue() return q[#q] end
+function viewWith(items, more) return { e = 1, id = "t1", t = "Thread", s = "completed", items = items, more = more } end
+`;
+
+test("a quote of the agent's response draws as a quote, and clicking it goes to the words it quotes for a moment", () => {
+  run(SHOWN + QUOTES + `
+local source = { r = "a", x = "Alpha |cffffd100beta|r gamma.", hl = { { "q1", 0, 17, 28 } } }
+local quote = { q = "beta gamma", cm = "Why | this?", id = "q1", i = 1 }
+local mine = { r = "u", x = "See\\n> beta gamma\\nWhy || this?", g = { "See", quote } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ source, mine }) })
+UI.Select(thread)
+-- The quote in the muted font beside its bar, your comment under it in your words.
+local words = shownString("^beta gamma$")
+assert(words and words.fontObject == ns.Skin.fonts.muted, "the quote isn't drawn in the muted font")
+assert(below(words, shownString("^See$")), "the quote isn't under the words before it")
+local comment
+for _, fs in ipairs(fontStrings) do
+  if not fs.hidden and fs.text == "Why || this?" and fs.point and fs.point[3] == "BOTTOMLEFT" then comment = fs end
+end
+assert(below(comment, words), "the comment isn't under the quote")
+local b = quoteButton("beta gamma")
+assert(b, "the quote can't be clicked")
+assert(not shownString("cff" .. ns.Skin.Hex("cited")), "marked before the click")
+-- Clicking it: the quoted words in the cited color (the heading's color giving way), the
+-- message tinted, and the conversation scrolled to it.
+for _, f in ipairs(frames) do rawset(f, "GetTop", function() return 1000 end) end
+local scrolled
+for _, f in ipairs(frames) do
+  if f.kind == "ScrollFrame" then rawset(f, "SetVerticalScroll", function(self, v) scrolled = v end) end
+end
+b.scripts.OnClick(b, "LeftButton")
+local cited = ns.Skin.Hex("cited")
+local marked = shownString("^Alpha |cff" .. cited .. "beta gamma|r%.$")
+assert(marked, "the quoted words aren't marked")
+-- The message's top at 600, 100 tall: the words a little over halfway down it.
+rawset(marked, "GetTop", function() return 600 end)
+rawset(marked, "GetHeight", function() return 100 end)
+tick(0.25)
+assert(scrolled and scrolled > 400 and scrolled < 500, "not scrolled to the quoted words: " .. tostring(scrolled))
+-- A redraw while it's shown keeps it marked; a moment later it's back as it was.
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ source, mine }) })
+assert(shownString("cff" .. cited), "a redraw lost the mark")
+tick(3)
+assert(shownString("^Alpha |cffffd100beta|r gamma%.$") and not shownString("cff" .. cited), "still marked")
+return "ok"
+`);
+});
+
+test("a quote's words are marked in a message with code, and its code too", () => {
+  run(SHOWN + QUOTES + `
+local cited = "|cff" .. ns.Skin.Hex("cited")
+-- Prose with inline code, then a code block: the marked run closes at the code and opens again.
+local g = { "Run \\1npm test\\2 now", { c = "ok | fail" } }
+local source = { r = "a", x = "text", g = g, hl = { { "q1", 1, 6, 18 }, { "q1", 2, 1, 2 } } }
+local quote = { q = "npm test now ok", id = "q1", i = 1 }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ source, { r = "u", x = "q", g = { quote } } }) })
+UI.Select(thread)
+local b = quoteButton("npm test now ok")
+b.scripts.OnClick(b, "LeftButton")
+assert(showing("^" .. cited .. "npm test|r$"), "the inline code isn't marked")
+assert(showing("^" .. cited .. "now|r$") or showing(cited .. " now"), "the words after the code aren't marked")
+assert(showing("^" .. cited .. "ok|r || fail$"), "the code block isn't marked")
+return "ok"
+`);
+});
+
+test("a quote whose source isn't loaded loads earlier messages until it is, and one from another thread opens it", () => {
+  run(SHOWN + QUOTES + `
+local mine = { r = "u", x = "q", g = { { q = "old words", id = "q1", ea = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ { r = "a", x = "recent" }, mine }, true) })
+UI.Select(thread)
+local b = quoteButton("old words")
+b.scripts.OnClick(b, "LeftButton")
+assert(lastSent() and lastSent().t == "more", "earlier messages weren't asked for")
+-- More came, still without it: more again.
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ { r = "a", x = "older" }, { r = "a", x = "recent" }, mine }, true) })
+assert(lastSent() and lastSent().t == "more", "didn't ask for more again")
+-- There it is: shown on the next frame.
+local source = { r = "a", x = "the old words", hl = { { "q1", 0, 5, 13 } } }
+local found = { r = "u", x = "q", g = { { q = "old words", id = "q1", i = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ source, { r = "a", x = "older" }, { r = "a", x = "recent" }, found }) })
+tick(0.25)
+assert(showing("^the |cff" .. ns.Skin.Hex("cited") .. "old words|r$"), "the source wasn't shown once loaded")
+-- From another thread: that thread opens.
+local other = { r = "u", x = "q", g = { { q = "elsewhere", id = "q2", e = "mac", th = "t9" } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ other }) })
+b = quoteButton("elsewhere")
+b.scripts.OnClick(b, "LeftButton")
+assert(lastSent() and lastSent().t == "open" and lastSent().id == "t9" and lastSent().e == "mac", "the other thread didn't open")
+return "ok"
+`);
+});
+
+test("a quote whose source is gone stays readable and says so when clicked", () => {
+  run(SHOWN + QUOTES + `
+local mine = { r = "u", x = "q", g = { { q = "gone words", cm = "still mine", id = "q1" } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ mine }) })
+UI.Select(thread)
+assert(shownString("^gone words$") and shownString("^still mine$"), "the quote isn't readable")
+-- The companion has taken the thread's opening.
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ mine }) })
+local b = quoteButton("gone words")
+b.scripts.OnClick(b, "LeftButton")
+tick(0.25)
+assert(shownString("no longer in this thread"), "the click doesn't say the source is gone")
+return "ok"
+`);
+});
+
+test("a quote marks its words once however often it's quoted, in a message naming a PR too, and follows its message as the view changes", () => {
+  run(SHOWN + QUOTES + `
+local cited = "|cff" .. ns.Skin.Hex("cited")
+-- The same quote twice: its range twice. Only its words are marked, once.
+local source = { r = "a", x = "abcdefghij", hl = { { "q1", 0, 3, 5 }, { "q1", 0, 3, 5 } } }
+local mine = { r = "u", x = "q", g = { { q = "cde", id = "q1", i = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ source, mine }) })
+UI.Select(thread)
+quoteButton("cde").scripts.OnClick(quoteButton("cde"), "LeftButton")
+assert(shownString("^ab" .. cited .. "cde|rfghij$"), "marked more than the quoted words")
+-- An earlier message comes in while it's marked: the mark goes with its message.
+local earlier = { r = "a", x = "cde elsewhere" }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ earlier, source, { r = "u", x = "q", g = { { q = "cde", id = "q1", i = 2 } } } }) })
+assert(shownString("^ab" .. cited .. "cde|rfghij$"), "the mark didn't follow its message")
+assert(not shownString("^" .. cited .. "cde"), "the message now in its old place was marked")
+-- A response naming one of the thread's pull requests is drawn run by run: still marked.
+tick(3)
+local named = { r = "a", x = "Opened #12 with the fix", hl = { { "q2", 0, 12, 23 } } }
+local view = viewWith({ named, { r = "u", x = "q", g = { { q = "with the fix", id = "q2", i = 1 } } } })
+view.prs = { { n = "#12", s = "open", u = "x" } }
+inboxWith(ENVS, { threads = { thread }, view = view })
+quoteButton("with the fix").scripts.OnClick(quoteButton("with the fix"), "LeftButton")
+assert(showing(cited .. "with"), "a response naming a PR wasn't marked")
+return "ok"
+`);
+});
+
+test("loading earlier messages for a quote gives up when nothing more comes, and says when its source is too far back", () => {
+  run(SHOWN + QUOTES + `
+local mine = { r = "u", x = "q", g = { { q = "old words", id = "q1", ea = 1 }, { q = "older words", id = "q2", far = 1 } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ { r = "a", x = "recent" }, mine }, true) })
+UI.Select(thread)
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ { r = "a", x = "recent" }, mine }, true) })
+quoteButton("old words").scripts.OnClick(quoteButton("old words"), "LeftButton")
+assert(lastSent() and lastSent().t == "more", "earlier messages weren't asked for")
+-- The same view comes back (nothing earlier fits): a while later, it says so.
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ { r = "a", x = "recent" }, mine }, true) })
+tick(31)
+assert(shownString("further back than the game can show"), "a load that brought nothing never ended")
+-- One the companion knows is too far back says so at once.
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ { r = "a", x = "recent" }, mine }, true) })
+quoteButton("older words").scripts.OnClick(quoteButton("older words"), "LeftButton")
+assert(lastSent() == nil or lastSent().t ~= "more", "asked for more for a source too far back")
+tick(0.25)
+assert(shownString("further back than the game can show"), "a source too far back isn't said to be")
+return "ok"
+`);
+});
+
+test("the jump goes to the line the quoted words start on, measured unseen, and the measure is emptied after", () => {
+  run(SHOWN + QUOTES + `
+local source = { r = "a", x = "Alpha beta gamma.", hl = { { "q1", 0, 7, 10 } } }
+inboxWith(ENVS, { threads = { thread }, view = viewWith({ source, { r = "u", x = "q", g = { { q = "beta", id = "q1", i = 1 } } } }) })
+UI.Select(thread)
+local drawn = shownString("^Alpha beta gamma%.$")
+rawset(drawn, "GetObjectType", function() return "FontString" end)
+rawset(drawn, "GetTop", function() return 600 end)
+for _, f in ipairs(frames) do rawset(f, "GetTop", function() return 1000 end) end
+local scrolled
+for _, f in ipairs(frames) do
+  if f.kind == "ScrollFrame" then rawset(f, "SetVerticalScroll", function(self, v) scrolled = v end) end
+end
+quoteButton("beta").scripts.OnClick(quoteButton("beta"), "LeftButton")
+-- The text before the words, with no colors, in a string nobody sees.
+local probe
+for _, fs in ipairs(fontStrings) do if fs.text == "Alpha x" then probe = fs end end
+assert(probe, "the text before the quoted words wasn't measured")
+rawset(probe, "GetStringHeight", function() return 40 end)
+rawset(probe, "GetFont", function() return "font", 14 end)
+tick(0.25)
+-- Two lines of 14 before the words' line: they sit 24 down from the message's top at 600.
+assert(scrolled == 424, "not scrolled to the words' line: " .. tostring(scrolled))
+tick(1)
+assert(probe.text == "", "the measure still holds the text")
+return "ok"
+`);
+});

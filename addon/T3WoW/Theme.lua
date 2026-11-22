@@ -45,7 +45,7 @@ Skin.THEMES = {
             accent = hex("fafafa"), primary = hex("fafafa"), primaryRing = hex("fafafa"), primaryText = hex("09090b"),
             selected = hex("1c1c1f"), selectedRing = hex("3f3f46"), input = hex("151517"), focus = hex("52525b"),
             off = hex("3f3f46"), knob = hex("a1a1aa"), knobOn = hex("09090b"), scroll = hex("2e2e33"), warn = hex("fb923c"),
-            code = hex("e4e4e7"), codeBg = hex("18181b"),
+            code = hex("e4e4e7"), codeBg = hex("18181b"), cited = hex("fcd34d"),
         },
     },
     flat = {
@@ -63,7 +63,7 @@ Skin.THEMES = {
             accent = hex("8f8fff"), primary = hex("23233a"), primaryRing = hex("8f8fff"), primaryText = hex("ffffff"),
             selected = hex("8f8fff", 0.16), selectedRing = hex("8f8fff"), input = hex("0c0c0c"), focus = hex("8f8fff"),
             off = hex("0c0c0c"), knob = hex("3a3a3a"), knobOn = hex("8f8fff"), scroll = hex("3a3a3a"), warn = hex("ff8000"),
-            code = hex("dcdcdc"), codeBg = hex("0c0c0c"),
+            code = hex("dcdcdc"), codeBg = hex("0c0c0c"), cited = hex("b4b4ff"),
         },
     },
     classic = {
@@ -81,7 +81,7 @@ Skin.THEMES = {
             accent = hex("ffd100"), primary = hex("2a2a2f"), primaryRing = hex("ffd100"), primaryText = hex("ffd100"),
             selected = hex("ffd100", 0.18), selectedRing = hex("ffd100"), input = { 0, 0, 0, 0.8 }, focus = hex("ffd100"),
             off = hex("0b0b0b"), knob = hex("7a7a7a"), knobOn = hex("ffd100"), scroll = hex("5a5a5a"), warn = hex("ff8000"),
-            code = hex("e6e2c8"), codeBg = { 0, 0, 0, 0.55 },
+            code = hex("e6e2c8"), codeBg = { 0, 0, 0, 0.55 }, cited = hex("40ff40"),
         },
     },
 }
