@@ -3025,7 +3025,8 @@ function renderView()
                 placeMessage(fs, item.x, item.r == "u", item.g)
             end
             -- Copying takes the message's text, not its segments: the code with its markdown.
-            -- cx is that text with each model T3 names written as T3 has it (model:...).
+            -- cx is that text as T3 has it, where the view's differs: each model T3 names
+            -- written as model:..., and the marks and emoji the game's fonts can't draw.
             fs.hit.copyText = item.cx or item.x
             -- A picture enlarges instead.
             fs.hit.picture = picture and item.im or false
