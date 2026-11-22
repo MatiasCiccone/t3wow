@@ -211,6 +211,8 @@ UI.Companion = (IsMacClient and IsMacClient()) and {
     blocked = '%s: T3 WoW in the menu bar has "Commands from the game" set to %s.',
     trust = "%s: see Commands from the game under T3 WoW's menu bar icon",
     stalled = "Companion not answering: is T3 WoW running in the menu bar?",
+    unseen = "Companion can't see the game",
+    unseenFull = "The T3 WoW companion runs, but it doesn't see the game, so commands from the game don't reach it: open its menu in the menu bar, and if it offers Open Screen Recording settings…, turn T3 WoW on there",
     update = "update it from its menu bar icon",
     howToUpdate = "Click T3 WoW's T3 icon in the menu bar: Check for updates, then Update.",
     updateHint = " (click T3 WoW's icon in the menu bar: Check for updates)",
@@ -218,6 +220,8 @@ UI.Companion = (IsMacClient and IsMacClient()) and {
     blocked = '%s: the T3 WoW tray menu has "Commands from the game" set to %s.',
     trust = "%s: see Commands from the game in the T3 WoW tray menu",
     stalled = "Companion not answering: is T3 WoW running in the system tray?",
+    unseen = "Companion can't see the game's strip",
+    unseenFull = "The T3 WoW companion runs, but it doesn't see the strip of squares in the game's top-left corner, so commands from the game don't reach it: keep that corner uncovered (an overlay such as Steam's performance overlay, or another window)",
     update = "update it from its tray menu",
     howToUpdate = "Right-click T3 WoW in the system tray, by the clock: Check for updates, then Update.",
     updateHint = " (right-click T3 WoW in the system tray: Check for updates)",
@@ -4463,6 +4467,10 @@ local function renderStatus()
         -- The companion runs and sees the strip, but it doesn't read (inbox.unr says why).
         connected = "|cffff4040Companion can't read the game's strip (" .. inbox.unr .. ")|r"
         full = "|cffff4040The T3 WoW companion runs and sees the game's strip, but can't read it (" .. inbox.unr .. "): commands from the game don't reach it|r"
+    elseif ns.Link.Unseen() then
+        -- Its updates still come, so it runs: what it can't do is see the strip.
+        connected = "|cffff4040" .. UI.Companion.unseen .. "|r"
+        full = "|cffff4040" .. UI.Companion.unseenFull .. "|r"
     elseif ns.Link.Stalled() then
         connected = "|cffff4040" .. UI.Companion.stalled .. "|r"
     elseif not inbox then

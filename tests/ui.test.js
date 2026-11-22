@@ -3570,6 +3570,51 @@ return "ok"
 `, { before: `function IsMacClient() return false end` });
 });
 
+test("updates still coming while the strip goes unread: the window says the companion doesn't see it, not that it isn't running", () => {
+  run(`
+inboxWith(ENVS, { threads = { THREAD } })
+local s = Link.Send({ t = "open", e = "mac", id = "t1" })
+tick(25)
+-- Stalled with no update since the command went up: the companion may not be running.
+UI.Refresh()
+assert(showing("Companion not answering: is T3 WoW running in the system tray%?"), "stalled wording")
+-- An update written since then, without the command: it runs, but doesn't see the strip.
+local function update(now, ack)
+  Link.state.pollAt = 0
+  inboxes[string.format("T3WoW_S%03d", Link.state.nextSlot)] = { k = "c1", ack = ack or 0, u = Link.Session(), envs = ENVS, threads = { THREAD }, projects = {}, notes = {}, events = {}, now = now }
+  tick(0.5)
+end
+update(time() - 30)
+UI.Refresh()
+assert(showing("Companion not answering"), "an update written before the command says nothing about the strip")
+update(time())
+UI.Refresh()
+assert(showing("Companion can't see the game's strip"), "not said: " .. tostring(UI.StatusLines()[1]))
+assert(UI.StatusLines()[1]:find("keep that corner uncovered"), "the tooltip says what to do")
+assert(not showing("Companion not answering"), "says it isn't running")
+-- The companion reads it again: the command goes, and so does the notice.
+update(time(), s)
+UI.Refresh()
+assert(not showing("can't see"), "notice stays once read")
+return "ok"
+`, { before: `function IsMacClient() return false end` });
+});
+
+test("on a Mac, a companion that doesn't see the game points at Screen Recording", () => {
+  run(`
+inboxWith(ENVS, { threads = { THREAD } })
+Link.Send({ t = "open", e = "mac", id = "t1" })
+tick(25)
+Link.state.pollAt = 0
+inboxes[string.format("T3WoW_S%03d", Link.state.nextSlot)] = { k = "c1", ack = 0, u = Link.Session(), envs = ENVS, threads = { THREAD }, projects = {}, notes = {}, events = {}, now = time() }
+tick(0.5)
+UI.Refresh()
+assert(showing("Companion can't see the game"), "not said")
+assert(UI.StatusLines()[1]:find("Screen Recording"), "no pointer to Screen Recording: " .. UI.StatusLines()[1])
+return "ok"
+`, { before: `function IsMacClient() return true end` });
+});
+
 // The welcome T3WoW.lua prints on a first install, after the game has logged in.
 const WELCOME = `
 SlashCmdList = {}

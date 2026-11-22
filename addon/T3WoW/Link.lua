@@ -76,6 +76,7 @@ local state = {
     pollAt = 0,
     unanswered = 0, -- slot loads in a row that brought no update from the companion
     queueSince = nil,
+    writtenAt = nil, -- when the newest update of this UI session was written (the PC clock's time())
     syncUntil = 0,
     signalCheck = nil,
     longOk = nil, -- whether the companion takes commands in parts; nil until it answers
@@ -329,6 +330,16 @@ function Link.Stalled()
     return state.queueSince ~= nil and GetTime() - state.queueSince > ACK_PATIENCE
 end
 
+-- Stalled, though the companion runs: it wrote an update (for this UI session) a few seconds
+-- after the strip went up, without taking what the strip carries. Something covers the
+-- game's top-left corner, or the companion can't capture the game. Times are the PC clock's,
+-- which the companion shares; an update written ahead, before the strip, says nothing.
+function Link.Unseen()
+    if not Link.Stalled() or not state.writtenAt then return false end
+    local since = time() - (GetTime() - state.queueSince)
+    return state.writtenAt >= since + 2
+end
+
 -- ---------------------------------------------------------------- sign-in
 -- Each update carries a stamp (lid) for the T3 sign-in it comes from. The companion gives
 -- it a new one when it moves to another T3 (its menu's T3 server, or `login --origin`) or
@@ -463,6 +474,8 @@ local function receive(inbox)
     end
     state.inbox = inbox
     state.inboxAt = GetTime()
+    -- When the newest update of this UI session was written (Unseen).
+    if inbox.k == own.client and inbox.u == state.uiSession and type(inbox.now) == "number" then state.writtenAt = math.max(state.writtenAt or 0, inbox.now) end
     -- An answer from the companion: loads on the timer can go back to their quick pace.
     if inbox.u == nil or inbox.u == state.uiSession then state.unanswered = 0 end
     -- Nothing seen yet (a fresh install): only the last minute's events are news, not
