@@ -1,5 +1,5 @@
-//! Pictures for the game: pages an agent showed with T3's html_render, and images a
-//! message embeds from a file on this PC, drawn to bitmaps the game can show.
+//! Pictures for the game: pages an agent showed with T3's html_render, and images and videos
+//! a message embeds from a file on this PC, drawn to bitmaps the game can show.
 //!
 //! The game can't run a browser, so pages are drawn here, with the headless Microsoft Edge
 //! every Windows PC has, on T3's own dark theme (its base sheet and colors), at the width
@@ -56,6 +56,9 @@ pub trait Painter: Send {
     fn page(&self, html: &str, height: u32) -> Result<Bitmap, String>;
     /// An image file on this PC, at most PAGE_WIDTH wide.
     fn picture(&self, path: &Path) -> Result<Bitmap, String>;
+    /// A video file on this PC as T3 shows it before it plays: the frame at 0.1 seconds,
+    /// at most PAGE_WIDTH wide, with a play mark and its length over it.
+    fn poster(&self, path: &Path) -> Result<Bitmap, String>;
 }
 
 /// The page's height as html_render took it.
@@ -126,6 +129,65 @@ pub fn sniff(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
         None
     };
     found.filter(|(_, w, h)| *w > 0 && *h > 0)
+}
+
+/// The color of the line the poster page draws under a video once its frame is in: the
+/// picture is cut there, to the video's size. Only the page's background is below it, so
+/// it's looked for from the bottom up, and a frame with this color in it can't be taken for it.
+const POSTER_MARK: [u8; 3] = [0xff, 0x00, 0xfe];
+
+/// A page that shows a video file's frame at 0.1 seconds (where T3 shows it), at most
+/// PAGE_WIDTH wide and a row short of MAX_HEIGHT, with a play mark in the middle and its
+/// length in the corner. Once the frame is in, a line of POSTER_MARK as wide as the video
+/// goes under it; a video the browser can't read never gets one.
+pub fn poster_page(video_url: &str) -> String {
+    let src = video_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+    format!(
+        r#"<!doctype html><html><head><style>
+html,body{{margin:0;padding:0;background:#0a0a0a;overflow:hidden}}
+#box{{position:relative;width:{w}px;height:150px;overflow:hidden}}
+video{{display:block;width:100%;height:100%;background:#000}}
+#play{{position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;background:rgba(0,0,0,.6);box-shadow:inset 0 0 0 2px rgba(255,255,255,.85)}}
+#play:after{{content:"";position:absolute;left:22px;top:16px;border-style:solid;border-width:12px 0 12px 19px;border-color:transparent transparent transparent #fff}}
+#time{{position:absolute;right:8px;bottom:8px;padding:0 6px;border-radius:4px;background:rgba(0,0,0,.7);color:#f5f5f5;font:12px/18px "Liberation Sans",Arimo,Arial,sans-serif}}
+#time:empty{{display:none}}
+#mark{{display:none;height:1px;background:rgb({r},{g},{b})}}
+</style></head><body><div id="box"><video id="v" muted preload="auto" src="{src}"></video><div id="play"></div><span id="time"></span></div><div id="mark"></div><script>
+const v=document.getElementById("v"),box=document.getElementById("box"),mark=document.getElementById("mark");
+const clock=s=>{{s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s/60)%60,r=String(s%60).padStart(2,"0");return h?h+":"+String(m).padStart(2,"0")+":"+r:m+":"+r}};
+v.addEventListener("loadedmetadata",()=>{{
+  if(!v.videoWidth||!v.videoHeight)return;
+  const scale=Math.min({w}/v.videoWidth,{h}/v.videoHeight,1);
+  const w=Math.max(1,Math.round(v.videoWidth*scale)),h=Math.max(1,Math.round(v.videoHeight*scale));
+  box.style.width=w+"px";box.style.height=h+"px";mark.style.width=w+"px";
+  if(Number.isFinite(v.duration)&&v.duration>0){{document.getElementById("time").textContent=clock(v.duration);v.currentTime=Math.min(0.1,v.duration/2)}}
+  else v.addEventListener("loadeddata",()=>{{mark.style.display="block"}});
+}});
+v.addEventListener("seeked",()=>{{mark.style.display="block"}});
+</script></body></html>"#,
+        w = PAGE_WIDTH,
+        h = MAX_HEIGHT - 1,
+        r = POSTER_MARK[0],
+        g = POSTER_MARK[1],
+        b = POSTER_MARK[2],
+    )
+}
+
+/// The video in a drawn poster page: everything above the mark line, as wide as the line.
+/// None when there's no line (the browser couldn't read the video).
+pub fn cut_at_mark(shot: &Bitmap) -> Option<Bitmap> {
+    if shot.width == 0 {
+        return None;
+    }
+    let near = |x: u32, y: u32| {
+        let i = ((y * shot.width + x) * 4) as usize;
+        shot.rgba[i..i + 3].iter().zip(POSTER_MARK).all(|(a, b)| a.abs_diff(b) <= 3)
+    };
+    let y = (1..shot.height).rev().find(|&y| near(0, y) && near(1.min(shot.width - 1), y))?;
+    let width = (0..shot.width).take_while(|&x| near(x, y)).count() as u32;
+    let row = (shot.width * 4) as usize;
+    let rgba = (0..y as usize).flat_map(|r| shot.rgba[r * row..r * row + (width * 4) as usize].iter().copied()).collect();
+    Some(Bitmap { width, height: y, rgba })
 }
 
 /// The size an image is drawn at for the game: as it is, but at most PAGE_WIDTH wide and
@@ -287,6 +349,14 @@ impl Painter for Edge {
             STANDARD.encode(&bytes)
         );
         self.draw(&html, w, h)
+    }
+
+    fn poster(&self, path: &Path) -> Result<Bitmap, String> {
+        if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+            return Err(NOT_HERE.into());
+        }
+        let shot = self.draw(&poster_page(&file_url(path)), PAGE_WIDTH, MAX_HEIGHT)?;
+        cut_at_mark(&shot).ok_or_else(|| "the browser couldn't read the video".to_string())
     }
 }
 
@@ -477,6 +547,43 @@ mod tests {
         assert_eq!((picture.width, picture.height), (PAGE_WIDTH, 364), "scaled to the page width");
         let red = at(&picture, 300, 150);
         assert!(red[0] > 190 && red[1] < 45 && red[2] < 45, "{red:?}");
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_poster_is_cut_to_the_video_above_its_mark_line() {
+        // 4x3: two rows of video 3 wide, then the mark under them, then background.
+        let (v, m, bg) = ([9, 9, 9, 255], [0xff, 0x01, 0xfd, 255], [10, 10, 10, 255]);
+        let rows = [[v, v, v, bg], [v, v, v, bg], [m, m, m, bg]];
+        let shot = Bitmap { width: 4, height: 3, rgba: rows.iter().flatten().flatten().copied().collect() };
+        assert_eq!(cut_at_mark(&shot), Some(Bitmap { width: 3, height: 2, rgba: [v; 6].concat() }));
+        // A frame with the mark's color in it, at its left edge: the real mark is the lowest.
+        let rows = [[v, v, v, bg], [m, m, v, bg], [v, v, v, bg], [m, m, m, bg], [bg, bg, bg, bg]];
+        let shot = Bitmap { width: 4, height: 5, rgba: rows.iter().flatten().flatten().copied().collect() };
+        let cut = cut_at_mark(&shot).unwrap();
+        assert_eq!((cut.width, cut.height), (3, 3));
+        let unread = Bitmap { width: 4, height: 2, rgba: [bg; 8].concat() };
+        assert_eq!(cut_at_mark(&unread), None, "no frame came in");
+        assert!(poster_page("file:///C:/a%20b/x.mp4?\"<").contains(r#"src="file:///C:/a%20b/x.mp4?&quot;&lt;""#));
+    }
+
+    /// Draws a video's frame with the real browser: `cargo test -- --ignored` on a PC with Edge.
+    #[test]
+    #[ignore = "needs Microsoft Edge or Chrome"]
+    fn edge_draws_a_videos_frame_at_its_own_size_with_a_play_mark() {
+        let work = std::env::temp_dir().join(format!("t3wow-edge-video-{}", std::process::id()));
+        let edge = Edge::find(work.clone()).expect("no Edge or Chrome on this PC");
+        let video = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video.webm");
+        let poster = edge.poster(&video).unwrap();
+        assert_eq!((poster.width, poster.height), (320, 180), "the video's own size");
+        let at = |x: u32, y: u32| poster.rgba[((y * poster.width + x) * 4) as usize..][..3].to_vec();
+        let blue = at(4, 4);
+        assert!(blue[2] > 180 && blue[0] < 70, "the frame: {blue:?}");
+        assert!(at(160 + 2, 90).iter().all(|&c| c > 200), "the play mark's white triangle");
+        assert_eq!(edge.poster(&work.join("none.mp4")), Err(NOT_HERE.to_string()));
+        let fake = work.join("fake.mp4");
+        std::fs::write(&fake, b"not a video").unwrap();
+        assert_eq!(edge.poster(&fake), Err("the browser couldn't read the video".to_string()));
         let _ = std::fs::remove_dir_all(&work);
     }
 

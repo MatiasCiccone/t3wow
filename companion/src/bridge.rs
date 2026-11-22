@@ -417,6 +417,41 @@ fn quotes_in_text(text: &str, cites: &[cites::Cite], drawn: bool) -> String {
     out
 }
 
+/// What T3 plays a file a message embeds as an image as, from its extension (T3's
+/// `mediaKindFromPath`): None for an image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MediaKind {
+    Video,
+    Audio,
+}
+
+fn media_kind(path: &std::path::Path) -> Option<MediaKind> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "avi" | "m4v" | "mkv" | "mov" | "mp4" | "ogv" | "webm" => Some(MediaKind::Video),
+        "mp3" | "wav" | "ogg" | "oga" | "flac" | "aac" | "m4a" | "opus" | "aiff" | "weba" => Some(MediaKind::Audio),
+        _ => None,
+    }
+}
+
+/// The file Play from the game names, checked again now: still there, and still a video or
+/// audio file once links are followed (a link named .mp4 can't open a program). What plays
+/// is the file that was checked, not the link.
+fn playable(path: &std::path::Path, kind: MediaKind) -> Result<PathBuf, String> {
+    let real = std::fs::canonicalize(path).map_err(|_| "its file is gone".to_string())?;
+    if !real.is_file() || media_kind(&real) != Some(kind) {
+        return Err("its file isn't a video or audio file".into());
+    }
+    // Windows writes the full path as \\?\C:\..., which the players don't all take; one on
+    // the network (\\?\UNC\...) isn't a file on this PC.
+    let text = real.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.starts_with(r"UNC\") => Err("its file isn't on this PC".into()),
+        Some(rest) => Ok(PathBuf::from(rest)),
+        None => Ok(real),
+    }
+}
+
 /// What an embedded image file is as it is now (a changed file is drawn again); None when
 /// it isn't a file on this PC.
 fn file_key(path: &std::path::Path) -> Option<String> {
@@ -884,8 +919,15 @@ pub struct Bridge {
     state_file: Option<PathBuf>,
     log: Box<dyn Fn(&str) + Send>,
     now: Box<dyn Fn() -> i64 + Send>,
-    /// Opens a link with Windows (T3's t3code:// links); replaced in tests.
+    /// Opens a link with Windows (T3's t3code:// links, and a thread's videos); replaced in
+    /// tests.
     pub opener: Box<dyn Fn(&str) + Send>,
+    /// Plays a thread's audio on this PC; replaced in tests.
+    pub player: Box<dyn crate::audio::Player>,
+    /// The play key of the audio last played, while it may still be playing.
+    playing: Option<String>,
+    /// The videos and audio the open thread showed the game last, which its Play may name.
+    media: Vec<Media>,
     /// This PC's offset from UTC at an instant, for snooze times on its clock; replaced in
     /// tests.
     pub zone: Box<dyn Fn(i64) -> i64 + Send>,
@@ -1663,12 +1705,16 @@ impl FoundChanges {
     }
 }
 
-/// A picture the open thread shows: a page an agent showed, or an image a message embeds
-/// from a file on this PC.
+/// A picture the open thread shows: a page an agent showed, or an image or video a message
+/// embeds from a file on this PC; or audio it embeds, which shows as a card to play.
 #[derive(Clone)]
 enum Source {
     Page { item_id: String },
     File { path: PathBuf },
+    /// Shown as its frame at 0.1 seconds; Play opens it on this PC.
+    Video { path: PathBuf },
+    /// Not drawn: Play plays it on this PC.
+    Audio { path: PathBuf, name: String },
     /// Already in an image slot: an image sent from the game, which can't be drawn again.
     Sent,
 }
@@ -1685,6 +1731,30 @@ struct Picture {
     /// plus one for an image that follows its message.
     order: u64,
     role: &'static str,
+}
+
+impl Picture {
+    /// A video's or audio's key for Play from the game, and what it plays.
+    fn play(&self) -> Option<(String, &PathBuf, MediaKind)> {
+        let (path, kind) = match &self.source {
+            Source::Video { path } => (path, MediaKind::Video),
+            Source::Audio { path, .. } => (path, MediaKind::Audio),
+            _ => return None,
+        };
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        Some((format!("{:016x}", hasher.finish()), path, kind))
+    }
+}
+
+/// A video or audio file the open thread showed the game, which Play from the game names by
+/// its key.
+struct Media {
+    key: String,
+    path: PathBuf,
+    kind: MediaKind,
+    env: String,
+    id: String,
 }
 
 /// A picture being drawn: the page's item text read so far, a piece at a time.
@@ -2076,6 +2146,9 @@ impl Bridge {
             log,
             now,
             opener: Box::new(crate::t3::open_browser),
+            player: crate::audio::system(),
+            playing: None,
+            media: Vec::new(),
             zone: Box::new(crate::snooze::system_offset),
             link,
             wow_seen: false,
@@ -2276,6 +2349,7 @@ impl Bridge {
 
     /// Drops what was read from the T3 (its machines' threads, projects, the open thread).
     fn forget_server(&mut self) {
+        self.stop_audio();
         self.view = None;
         self.view_cache = None;
         self.whole_quotes.clear();
@@ -2400,6 +2474,8 @@ impl Bridge {
                 let key = key.unwrap_or_default();
                 if Some(&key) != self.link.wow_key.as_ref() {
                     self.log(&if key.is_empty() { "WoW not running".to_string() } else { format!("WoW running ({key})") });
+                    // Audio from the game that's gone (or another one) stops: its card went too.
+                    self.stop_audio();
                     // A new client process hasn't loaded any signal font: all start blank again.
                     self.slots.clear_signals();
                     self.slots.flip_probe(false);
@@ -2597,6 +2673,13 @@ impl Bridge {
 
     // ---- commands from the game ----
 
+    /// Stops the thread's audio playing on this PC, if any is.
+    fn stop_audio(&mut self) {
+        if self.playing.take().is_some() {
+            self.player.stop();
+        }
+    }
+
     fn env_arg(&self, env: &str) -> Map<String, Value> {
         let mut map = Map::new();
         if !env.is_empty() && Some(env) != self.local_env_id.as_deref() {
@@ -2631,7 +2714,7 @@ impl Bridge {
         }
         // Any addon can draw commands, but only T3 WoW can sign them: an unsigned one may
         // only read.
-        if !signed && !Trust::ReadOnly.allows(&kind) {
+        if !signed && (!Trust::ReadOnly.allows(&kind) || kind == "play") {
             self.log(&format!("{kind} from the game {UNSIGNED_REASON}"));
             return Some(json!({ "s": command["s"], "ok": false, "x": UNSIGNED_REASON }));
         }
@@ -2660,6 +2743,11 @@ impl Bridge {
                     (self.arm_keys)(self.window_open);
                 }
                 "open" => {
+                    // Audio from the thread left behind stops: its card, the only way to stop
+                    // it, goes with the thread.
+                    if self.view.as_ref().is_some_and(|v| v.env != env || v.id != id) {
+                        self.stop_audio();
+                    }
                     self.view = (!id.is_empty()).then(|| View { env: env.clone(), id: id.clone(), depth: 1 });
                     self.view_changed();
                 }
@@ -2870,6 +2958,37 @@ impl Bridge {
                         return Err(T3Error::Other("that pull request isn't linked to this thread".into()));
                     }
                     (self.opener)(url);
+                }
+                // A video or audio file the open thread embeds, named by the key the game had
+                // with it: only those play, whatever another addon asks for. A video opens in
+                // this PC's player; audio plays here, and the same one again stops it.
+                "play" => {
+                    let key = str_of(&command["k"]);
+                    let media = self.media.iter().find(|m| m.key == key && m.env == env && m.id == id && self.view.as_ref().is_some_and(|v| v.env == env && v.id == id));
+                    let Some(Media { path, kind, .. }) = media else {
+                        return Err(T3Error::Other("that isn't in the open thread any more".into()));
+                    };
+                    let (path, kind) = (path.clone(), *kind);
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let path = playable(&path, kind).map_err(T3Error::Other)?;
+                    let here = THIS_MACHINE.replacen("This", "this", 1);
+                    match kind {
+                        MediaKind::Video => {
+                            (self.opener)(&path.display().to_string());
+                            self.note(&format!("Opening {name} on {here}."));
+                        }
+                        MediaKind::Audio if self.playing.as_deref() == Some(key) && self.player.playing() => {
+                            self.stop_audio();
+                            self.note(&format!("Stopped {name}."));
+                        }
+                        MediaKind::Audio => {
+                            self.playing = None;
+                            self.player.play(&path).map_err(T3Error::Other)?;
+                            self.playing = Some(key.to_string());
+                            self.note(&format!("Playing {name} on {here}."));
+                        }
+                    }
+                    acked = true;
                 }
                 "probe" => {
                     let changed = self.slots.flip_probe(true);
@@ -3812,6 +3931,7 @@ impl Bridge {
         self.delegating.retain(|env, _| linked(env));
         self.list_errors.retain(|env, _| linked(env));
         if self.view.as_ref().is_some_and(|v| !linked(&v.env)) {
+            self.stop_audio();
             self.view = None;
             self.view_data = None;
             self.view_key = None;
@@ -4421,8 +4541,17 @@ impl Bridge {
             let role = if kind == "user_message" { "u" } else { "a" };
             for (alt, path) in embedded_files(str_of(&item["text"])).into_iter().rev() {
                 if let Some(key) = file_key(&path) {
-                    let label = if alt.is_empty() { "Image".to_string() } else { format!("Image: {alt}") };
-                    embedded.insert(0, Picture { key, source: Source::File { path }, label, order: position * 2 + 1, role });
+                    let named = |kind: &str| if alt.is_empty() { kind.to_string() } else { format!("{kind}: {alt}") };
+                    let (key, source, label) = match media_kind(&path) {
+                        Some(MediaKind::Video) => (format!("video:{key}"), Source::Video { path }, named("Video")),
+                        // T3 names audio by its file.
+                        Some(MediaKind::Audio) => {
+                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            (format!("audio:{key}"), Source::Audio { path, name: name.clone() }, format!("Audio: {name}"))
+                        }
+                        None => (key, Source::File { path }, named("Image")),
+                    };
+                    embedded.insert(0, Picture { key, source, label, order: position * 2 + 1, role });
                 }
             }
             if kind == "user_message" {
@@ -4621,9 +4750,8 @@ impl Bridge {
                 role: "a",
             })
             .collect();
-        if pictures_ok {
-            pictures.extend(read.embedded.iter().cloned());
-        }
+        // Audio is a card, and a video without pictures a line: they show without them.
+        pictures.extend(read.embedded.iter().filter(|p| pictures_ok || matches!(p.source, Source::Audio { .. } | Source::Video { .. })).cloned());
         // Delegated tasks to read again: still running, or ended with more result than
         // the scan read (once).
         let cards: Vec<String> = match (self.cards_ok, self.scan.as_ref()) {
@@ -4646,6 +4774,9 @@ impl Bridge {
         let mut drawing: Vec<Drawing> = Vec::new();
         let mut later = false;
         for picture in &pictures {
+            if matches!(picture.source, Source::Audio { .. }) || (!pictures_ok && matches!(picture.source, Source::Video { .. })) {
+                continue;
+            }
             // A page or a file emptied since it was drawn (a reinstall) is drawn again.
             let held = self.link.images.iter().find(|(_, slot)| slot.key == picture.key).map(|(n, _)| *n);
             if let Some(n) = held.filter(|n| !matches!(picture.source, Source::Sent) && !self.slots.has_image(*n)) {
@@ -4768,7 +4899,11 @@ impl Bridge {
                 Some(painter) => painter.picture(path),
                 None => Err("no browser to draw with".into()),
             },
-            Source::Sent => Err("its picture is gone".into()),
+            Source::Video { path } => match self.painter.as_ref() {
+                Some(painter) => painter.poster(path),
+                None => Err("no browser to draw with".into()),
+            },
+            Source::Sent | Source::Audio { .. } => Err("its picture is gone".into()),
         };
         let stored = drawn.and_then(|bitmap| self.store_picture(&picture.key, &bitmap));
         if let Err(error) = stored {
@@ -4812,12 +4947,30 @@ impl Bridge {
         let Some(read) = self.view_read() else { return };
         let pictures = std::mem::take(&mut read.pictures);
         read.drawing.clear();
+        let View { env, id, .. } = read.view.clone();
+        let pictures_ok = self.images_ok && self.painter.is_some();
         let mut again = false;
         let mut placed: Vec<(u64, Value)> = Vec::new();
+        self.media.clear();
         for picture in pictures {
             let slot = self.link.images.iter().find(|(_, slot)| slot.key == picture.key).map(|(n, slot)| (*n, slot.w, slot.h));
             let label = plain(&picture.label, 120);
-            let item = match slot {
+            // A video or audio the game can ask to play: by its key, from this view alone.
+            let play = picture.play().map(|(key, path, kind)| {
+                self.media.push(Media { key: key.clone(), path: path.clone(), kind, env: env.clone(), id: id.clone() });
+                key
+            });
+            if let (Some(key), Source::Audio { name, .. }) = (&play, &picture.source) {
+                let card = json!({ "r": picture.role, "x": format!("[{label}]"), "pl": { "k": key, "n": plain(name, 120) } });
+                placed.push((picture.order, card));
+                continue;
+            }
+            // Without pictures in the game, a video is a line that plays it.
+            if let (Some(key), Source::Video { .. }, false) = (&play, &picture.source, pictures_ok) {
+                placed.push((picture.order, json!({ "r": picture.role, "x": format!("[{label}]"), "pl": { "k": key, "v": 1 } })));
+                continue;
+            }
+            let mut item = match slot {
                 // Its file was emptied (a reinstall): naming it would show the game's
                 // placeholder for a blank file until WoW quits.
                 Some((n, _, _)) if !self.slots.has_image(n) => {
@@ -4848,6 +5001,10 @@ impl Bridge {
                     json!({ "r": picture.role, "x": format!("|cff808080[{label}] ({why})|r") })
                 }
             };
+            // A video plays from its picture, or from the line in its place.
+            if let Some(key) = play {
+                item["pl"] = json!({ "k": key, "v": 1 });
+            }
             placed.push((picture.order, item));
         }
         if !placed.is_empty() {
@@ -5586,6 +5743,10 @@ impl Bridge {
     /// A poll runs a step (one request) at a time for up to TICK_BUDGET_MS, then gives the
     /// caller (and the game's next commands, the tray's controls) a turn.
     pub fn tick(&mut self) {
+        // Audio that ended is closed, so its file isn't held open.
+        if self.playing.is_some() && !self.player.playing() {
+            self.stop_audio();
+        }
         self.check_unreadable();
         self.run_commands();
         let now = self.now_ms();

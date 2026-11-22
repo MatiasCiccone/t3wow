@@ -3150,7 +3150,7 @@ fn a_command_drawn_under_the_previous_sign_ins_stamp_comes_back_refused() {
 }
 
 /// Draws nothing: records what it was asked, and answers a 7x3 picture for a page (a page
-/// whose HTML says BROKEN fails) and a 5x2 one for a file.
+/// whose HTML says BROKEN fails), a 5x2 one for a file and a 6x4 one for a video.
 #[derive(Clone, Default)]
 struct FakePainter(Arc<Mutex<Vec<String>>>);
 
@@ -3165,6 +3165,10 @@ impl crate::render::Painter for FakePainter {
     fn picture(&self, path: &std::path::Path) -> Result<crate::render::Bitmap, String> {
         self.0.lock().unwrap().push(format!("picture {}", path.display()));
         Ok(crate::render::Bitmap { width: 5, height: 2, rgba: vec![9; 5 * 2 * 4] })
+    }
+    fn poster(&self, path: &std::path::Path) -> Result<crate::render::Bitmap, String> {
+        self.0.lock().unwrap().push(format!("poster {}", path.display()));
+        Ok(crate::render::Bitmap { width: 6, height: 4, rgba: vec![9; 6 * 4 * 4] })
     }
 }
 
@@ -3327,6 +3331,173 @@ fn an_image_a_message_embeds_from_a_file_follows_that_message() {
     assert!(texts[1].starts_with("Saved it:"));
     assert_eq!(items[2], json!({ "r": "a", "x": "[Image: the chart]", "im": { "f": 1, "w": 5, "h": 2 } }));
     assert_eq!(texts[3], "thanks");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Plays nothing: records what it was asked, and plays until stopped (or `ended`).
+#[derive(Clone, Default)]
+struct FakePlayer {
+    calls: Arc<Mutex<Vec<String>>>,
+    on: Arc<Mutex<bool>>,
+}
+
+impl crate::audio::Player for FakePlayer {
+    fn play(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("play {}", path.display()));
+        *self.on.lock().unwrap() = true;
+        Ok(())
+    }
+    fn stop(&mut self) {
+        self.calls.lock().unwrap().push("stop".into());
+        *self.on.lock().unwrap() = false;
+    }
+    fn playing(&mut self) -> bool {
+        *self.on.lock().unwrap()
+    }
+}
+
+impl FakePlayer {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+    fn ended(&self) {
+        *self.on.lock().unwrap() = false;
+    }
+}
+
+/// A rig with thread t1 open, whose agent's reply embeds a video and an audio file (made in
+/// `dir`), and whose game can show pictures when `pictures` says so.
+fn media_rig(start_ms: i64, dir: &std::path::Path, pictures: bool) -> (Rig, FakePainter, FakePlayer, PathBuf, PathBuf) {
+    std::fs::create_dir_all(dir).unwrap();
+    let (video, audio) = (dir.join("demo run.mp4"), dir.join("tone.mp3"));
+    std::fs::write(&video, b"mp4 bytes").unwrap();
+    std::fs::write(&audio, b"mp3 bytes").unwrap();
+    let mut rig = Rig::new(start_ms);
+    let painter = FakePainter::default();
+    rig.bridge.set_painter(Some(Box::new(painter.clone())));
+    let player = FakePlayer::default();
+    rig.bridge.player = Box::new(player.clone());
+    let text = format!("Recorded it:\n\n![the demo]({})\n\n![]({})", video.display(), audio.display());
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["record it", &text]));
+    // This addon draws rows and cards, so it gets audio cards with or without pictures.
+    let im = if pictures { json!(1) } else { Value::Null };
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "im": im, "wk": 1, "dc": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    (rig, painter, player, video, audio)
+}
+
+/// The play key the view gives a video or audio file.
+fn play_key(items: &[Value], label: &str) -> String {
+    items.iter().find(|i| i["x"].as_str().is_some_and(|x| x.contains(label))).and_then(|i| i["pl"]["k"].as_str()).unwrap_or_else(|| panic!("no {label} in {items:?}")).to_string()
+}
+
+#[test]
+fn a_video_shows_as_its_frame_and_audio_as_a_card_where_t3_plays_them() {
+    let dir = std::env::temp_dir().join(format!("t3wow-media-{}", std::process::id()));
+    let (rig, painter, _, video, _) = media_rig(35_500_000, &dir, true);
+    assert_eq!(painter.calls(), vec![format!("poster {}", video.display())], "the video's frame, not the audio");
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 4, "{items:?}");
+    let (video_key, audio_key) = (play_key(&items, "Video"), play_key(&items, "Audio"));
+    assert_eq!(items[2], json!({ "r": "a", "x": "[Video: the demo]", "im": { "f": 1, "w": 6, "h": 4 }, "pl": { "k": video_key, "v": 1 } }));
+    assert_eq!(items[3], json!({ "r": "a", "x": "[Audio: tone.mp3]", "pl": { "k": audio_key, "n": "tone.mp3" } }), "named by its file, as T3 does");
+    assert_ne!(video_key, audio_key);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A game that can't show pictures (no image slots when it started) still gets the
+    // audio, and the video as a line that plays it.
+    let dir = std::env::temp_dir().join(format!("t3wow-media-no-pictures-{}", std::process::id()));
+    let (rig, painter, _, _, _) = media_rig(35_600_000, &dir, false);
+    assert!(painter.calls().is_empty());
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 4, "{items:?}");
+    assert_eq!(items[2], json!({ "r": "a", "x": "[Video: the demo]", "pl": { "k": play_key(&items, "Video"), "v": 1 } }));
+    assert_eq!(items[3]["x"], "[Audio: tone.mp3]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn play_opens_a_video_on_this_pc_and_plays_or_stops_audio_named_by_the_open_thread() {
+    let dir = std::env::temp_dir().join(format!("t3wow-play-{}", std::process::id()));
+    let (mut rig, _, player, video, _) = media_rig(35_700_000, &dir, true);
+    let items = view_items(&rig);
+    let (video_key, audio_key) = (play_key(&items, "Video"), play_key(&items, "Audio"));
+    let play = |rig: &mut Rig, s: u64, key: &str| {
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": s, "t": "play", "id": "t1", "k": key }] }));
+        rig.advance(1_000);
+        rig.bridge.tick();
+    };
+
+    play(&mut rig, 3, &video_key);
+    let opened = rig.opened();
+    assert_eq!(opened.len(), 1);
+    assert!(opened[0].ends_with("demo run.mp4") && !opened[0].starts_with(r"\\"), "the checked file, in this PC's player: {opened:?}");
+    assert_eq!(outcome(&rig, 3), json!({ "s": 3, "ok": true }));
+
+    play(&mut rig, 4, &audio_key);
+    let calls = player.calls();
+    assert!(calls.len() == 1 && calls[0].starts_with("play ") && calls[0].ends_with("tone.mp3"), "{calls:?}");
+    play(&mut rig, 5, &audio_key);
+    assert_eq!(player.calls().last().unwrap(), "stop", "the same one again stops it");
+    play(&mut rig, 6, &audio_key);
+    player.ended();
+    rig.bridge.tick();
+    assert_eq!(player.calls().last().unwrap(), "stop", "audio that ended is closed");
+    play(&mut rig, 7, &audio_key);
+    assert_eq!(player.calls().iter().filter(|c| c.starts_with("play")).count(), 3, "once it ended, it plays again");
+
+    // Read-only still plays: it changes nothing in T3.
+    rig.bridge.set_trust(Trust::ReadOnly);
+    play(&mut rig, 13, &audio_key);
+    assert_eq!(outcome(&rig, 13), json!({ "s": 13, "ok": true }), "the same one again stops it, under Read-only");
+    play(&mut rig, 14, &audio_key);
+    assert_eq!(outcome(&rig, 14), json!({ "s": 14, "ok": true }));
+    assert!(player.calls().last().unwrap().starts_with("play "), "and plays it, under Read-only");
+    rig.bridge.set_trust(Trust::Full);
+
+    // Only what the open thread shows plays, from a file that's still a video or audio.
+    play(&mut rig, 18, "deadbeef");
+    assert_eq!(outcome(&rig, 18), json!({ "s": 18, "ok": false, "x": "that isn't in the open thread any more" }));
+    std::fs::remove_file(&video).unwrap();
+    play(&mut rig, 19, &video_key);
+    assert_eq!(outcome(&rig, 19), json!({ "s": 19, "ok": false, "x": "its file is gone" }));
+    assert_eq!(rig.opened().len(), 1);
+
+    // Another addon's strip can't play anything.
+    rig.signer = None;
+    play(&mut rig, 20, &audio_key);
+    assert_eq!(outcome(&rig, 20), json!({ "s": 20, "ok": false, "x": UNSIGNED_REASON }));
+    rig.signer = Some(TEST_KEY);
+
+    // Opening another thread stops what this one plays: its card goes with it.
+    let before = player.calls().len();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 21, "t": "open", "id": "t2" }] }));
+    rig.bridge.tick();
+    assert_eq!(player.calls()[before..], ["stop".to_string()]);
+    play(&mut rig, 22, &audio_key);
+    assert_eq!(outcome(&rig, 22)["x"], "that isn't in the open thread any more");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn files_t3_plays_are_told_from_images_by_their_extension() {
+    let kind = |p: &str| media_kind(std::path::Path::new(p));
+    for video in ["a.mp4", "a.MOV", "a.webm", "a.mkv", "a.m4v", "a.avi", "a.ogv"] {
+        assert_eq!(kind(video), Some(MediaKind::Video), "{video}");
+    }
+    for audio in ["a.mp3", "a.wav", "a.ogg", "a.oga", "a.flac", "a.aac", "a.M4A", "a.opus", "a.aiff", "a.weba"] {
+        assert_eq!(kind(audio), Some(MediaKind::Audio), "{audio}");
+    }
+    for other in ["a.png", "a.gif", "a.exe", "mp4", "a"] {
+        assert_eq!(kind(other), None, "{other}");
+    }
+    // A file named like a video that is really a program doesn't play.
+    let dir = std::env::temp_dir().join(format!("t3wow-playable-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.mp4"), b"x").unwrap();
+    let checked = playable(&dir.join("x.mp4"), MediaKind::Video).unwrap();
+    assert!(checked.ends_with("x.mp4") && !checked.to_string_lossy().starts_with(r"\\"), "the file itself, as players take it: {checked:?}");
+    assert_eq!(playable(&dir.join("x.mp4"), MediaKind::Audio), Err("its file isn't a video or audio file".to_string()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

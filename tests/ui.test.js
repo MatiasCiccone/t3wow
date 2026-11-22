@@ -1519,6 +1519,49 @@ return "ok"
 `);
 });
 
+test("audio is a card with its file's name, and a click on it or on a video's picture asks the companion to play it", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = { { r = "u", x = "record it" },
+  { r = "a", x = "[Video: demo]", im = { f = 7, w = 640, h = 360 }, pl = { k = "aa11", v = 1 } },
+  { r = "a", x = "[Audio: tone.mp3]", pl = { k = "bb22", n = "tone.mp3" } },
+  { r = "a", x = "Done." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local ICON = ROOT .. "Media\\\\play"
+local function icon()
+  for _, f in ipairs(frames) do
+    if f.kind == "Texture" and f.shown and f.texturePath == ICON then return f end
+  end
+end
+assert(shownString("^tone%.mp3$"), "the card doesn't name the file")
+assert(not shownString("Audio: tone"), "its fallback text shows too")
+assert(icon(), "no play mark")
+assert(below(shownString("Done%."), icon()), "the next message isn't below it")
+local function hitFor(key)
+  for _, f in ipairs(frames) do
+    if f.kind == "Button" and f.shown and type(rawget(f, "play")) == "table" and f.play.k == key then return f end
+  end
+end
+local video, audio = hitFor("aa11"), hitFor("bb22")
+assert(video and audio, "not both can be clicked")
+video.scripts.OnClick(video, "LeftButton")
+assert(sent().t == "play" and sent().id == "t1" and sent().k == "aa11", "the video wasn't asked for")
+assert(not (T3WoWPictureZoom and T3WoWPictureZoom.shown), "the video's picture enlarged instead")
+audio.scripts.OnClick(audio, "LeftButton")
+assert(sent().t == "play" and sent().k == "bb22", "the audio wasn't asked for")
+audio.scripts.OnEnter(audio)
+assert(showing("click again to stop"), "the tooltip doesn't say how to stop it")
+audio.scripts.OnLeave(audio)
+-- The next thing drawn in that place doesn't keep the card.
+items = { { r = "a", x = "Done." } }
+inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+assert(not shownString("^tone%.mp3$"), "the name stayed")
+assert(not icon(), "the play mark stayed")
+return "ok"
+`);
+});
+
 test("a picture draws from its image slot among the messages, and a click enlarges it instead of copying", () => {
   run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }

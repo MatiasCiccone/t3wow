@@ -74,6 +74,7 @@ pub fn run(app: Arc<App>) -> ! {
         }
         if let Some(tray) = tray.as_mut() {
             if tray.tick() == Tick::Quit {
+                crate::audio::quit();
                 std::process::exit(0);
             }
         }
@@ -82,6 +83,7 @@ pub fn run(app: Arc<App>) -> ! {
     // thread that scheduled it: this one, the main thread, and nowhere else.
     let _timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.5, true, &block) };
     ns_app.run();
+    crate::audio::quit();
     std::process::exit(0)
 }
 

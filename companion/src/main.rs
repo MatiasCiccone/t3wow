@@ -12,6 +12,7 @@
 // the tray), which leaves what only they use unused.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod app;
+mod audio;
 mod bridge;
 mod capture;
 mod cites;
