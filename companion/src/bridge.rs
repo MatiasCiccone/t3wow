@@ -2997,8 +2997,10 @@ impl Bridge {
                                     self.playing = Some(key.to_string());
                                     self.note(&format!("Playing {name} on {here}."));
                                 }
-                                // A format the built-in player can't take (Ogg on a Windows
-                                // without a codec pack, say) goes to the default player.
+                                // On Windows a format MCI can't take (Ogg without a codec pack,
+                                // say) goes to the default player, which plays it. A stock Mac
+                                // has no app for what afplay refuses: that says why instead.
+                                Err(error) if cfg!(target_os = "macos") => return Err(T3Error::Other(error)),
                                 Err(error) => {
                                     self.log(&format!("{name}: {error}; opening it in the default player"));
                                     (self.opener)(&path.display().to_string());
