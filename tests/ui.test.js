@@ -4009,6 +4009,41 @@ return "ok"
 `);
 });
 
+test("a message the view rewrites (a code fence's language, a link) stops showing '(sending)' once the view has it", () => {
+  run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local ENVS = { { id = "local", name = "PC", ok = true } }
+local earlier = { { r = "u", x = "earlier" }, { r = "a", x = "Hi" } }
+local function view(items, sent) return { e = 1, id = "t1", t = "Thread", s = "running", items = items, sent = sent } end
+inboxWith(ENVS, { threads = { thread }, view = view(earlier) })
+UI.Select(thread)
+typeText("run this:\\n\`\`\`js\\nfix()\\n\`\`\`\\nsee [the docs](https://example.com/docs)")
+click("Send")
+local first = sent().s
+assert(shownString("%(sending%)"), "no echo")
+-- Taken, not in the view yet: the echo stays.
+inboxWith(ENVS, { ack = first, threads = { thread }, view = view(earlier) })
+assert(shownString("%(sending%)"), "echo gone before the message is in")
+-- A second message before the first shows: the first one landing doesn't take its echo.
+typeText("and then [this](https://example.com/x)")
+click("Send")
+local second = sent().s
+local items = { earlier[1], earlier[2], { r = "u", x = "run this:\\nfix()\\nsee the docs" } }
+inboxWith(ENVS, { ack = second, threads = { thread }, view = view(items, { first }) })
+assert(shownString("^run this:"), "the first message isn't in")
+assert(shownString("%(sending%)|r\\nand then"),"the second message's echo went with the first")
+-- An earlier UI session's update naming the same number (a crash rolls numbers back) means another send.
+inboxWith(ENVS, { u = "an earlier session", threads = { thread }, view = view(items, { first, second }) })
+assert(shownString("%(sending%)|r\\nand then"), "an earlier session's numbers took the echo")
+-- In, as the companion shows it (the link's address gone), and named among the sends shown.
+items[4] = { r = "u", x = "and then this" }
+inboxWith(ENVS, { threads = { thread }, view = view(items, { first, second }) })
+assert(shownString("^and then this$"), "the second message isn't in")
+assert(not shownString("%(sending%)"), "echo still there")
+return "ok"
+`);
+});
+
 test("a model tag that says its provider stops showing '(sending)' once T3 has the message", () => {
   run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }

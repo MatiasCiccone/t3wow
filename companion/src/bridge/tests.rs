@@ -214,6 +214,7 @@ impl T3 for FakeT3 {
             }
             // T3 answers a send with the message it made, among other things.
             "t3_thread_send" => json!({ "threadId": args["threadId"], "messageId": format!("message:{}", str_of(&args["message"])), "delivery": "started" }),
+            "t3_thread_send_attachments" => json!({ "threadId": args["threadId"], "messageId": format!("attachment:{}", str_of(&args["message"])), "status": "started" }),
             "orchestrator_capabilities" => self.capabilities.lock().unwrap().clone(),
             // As T3 answers: a thread's settings, or a sequence number for a change, which
             // replaces the whole selection, options and all.
@@ -2064,6 +2065,34 @@ fn the_open_thread_reads_only_whats_new_and_still_sees_its_last_message_grow() {
 }
 
 #[test]
+fn the_view_names_the_games_sends_it_shows_by_the_message_t3_made() {
+    let mut rig = Rig::new(23_000_000);
+    let said = |position: u64, text: &str| json!({ "position": position, "type": "user_message", "text": text, "messageId": format!("message:{text}") });
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![said(0, "earlier")]);
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(1);
+    let sent = "see [the docs](https://example.com/docs)";
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }, { "s": 3, "t": "send", "id": "t1", "m": sent }] }));
+    rig.bridge.tick();
+    assert!(rig.bridge.snapshot()["view"]["sent"].is_null(), "named before T3 shows it");
+
+    // T3 shows it, worded as the view words it; a message someone else sent isn't the game's.
+    rig.t3.messages.lock().unwrap().insert("t1".into(), vec![said(0, "earlier"), said(2, sent), said(4, "from T3 itself")]);
+    rig.t3.threads.lock().unwrap()[0]["itemCount"] = json!(5);
+    rig.t3.set("running", "2026-11-06T10:00:05Z");
+    rig.advance(5_000);
+    rig.bridge.tick();
+    let view = rig.bridge.snapshot()["view"].clone();
+    assert_eq!(view["items"][1]["x"], "see the docs");
+    assert_eq!(view["sent"], json!([3]));
+    assert!(view["sentU"].is_null(), "the session tag stays in the companion");
+
+    // A new UI session (a reload, or a crash that rolls command numbers back): the numbers
+    // named before mean other sends now, even in a view built before it.
+    rig.frame(json!({ "k": "c1", "u": "ui2", "n": 0, "l": 1, "q": [] }));
+    assert!(rig.bridge.snapshot()["view"]["sent"].is_null(), "an earlier session's sends still named");
+}
+
+#[test]
 fn an_open_thread_past_the_lists_limits_is_still_read_again_now_and_then() {
     let mut rig = Rig::new(24_000_000);
     let old = json!({ "threadId": "old", "projectId": "p1", "title": "Old", "status": "completed", "settled": true, "updatedAt": "2026-01-01T00:00:00Z", "itemCount": 3 });
@@ -3472,6 +3501,7 @@ fn a_paste_right_after_ctrl_v_in_wow_shows_above_the_box_and_goes_with_the_messa
     })]);
     assert!(rig.t3.calls_to("t3_thread_send").is_empty());
     assert!(rig.bridge.snapshot()["att"].is_null(), "sent: no longer above the box");
+    assert!(rig.bridge.sent_messages.contains(&(3, "attachment:what's this?".to_string())), "its message is remembered for the view to name");
 
     // The next message has none: an ordinary send.
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 4, "q": [{ "s": 4, "t": "send", "e": "local", "id": "t1", "m": "thanks" }] }));

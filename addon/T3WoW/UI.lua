@@ -3045,10 +3045,20 @@ function renderView()
         local function key(text)
             return (text or ""):gsub("||", ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("[^%w]", ""):lower():sub(1, 40)
         end
+        -- The view also drops what it can't show (a code fence's language, a link's address),
+        -- so the companion says outright which of the game's sends it shows (view.sent, by
+        -- command number, from the message id T3's send answered with).
         local wanted, sent, arrived = key(echo.text), key(echo.sent), false
-        for i = count, math.max(1, count - 7), -1 do
-            local item = items[i]
-            if item.r == "u" and (key(item.x) == wanted or (item.cx and (key(item.cx) == wanted or key(item.cx) == sent))) then arrived = true break end
+        -- Only this UI session's: a crash rolls command numbers back, so an earlier one's mean
+        -- other sends.
+        for _, s in ipairs((type(view.sent) == "table" and ns.Link.IsCurrent(inbox)) and view.sent or {}) do
+            if s == echo.s then arrived = true break end
+        end
+        if not arrived then
+            for i = count, math.max(1, count - 7), -1 do
+                local item = items[i]
+                if item.r == "u" and (key(item.x) == wanted or (item.cx and (key(item.cx) == wanted or key(item.cx) == sent))) then arrived = true break end
+            end
         end
         if arrived then
             echo = nil
