@@ -45,6 +45,8 @@ struct FakeT3 {
     capabilities: Mutex<Value>,
     /// A thread's latest runs, as a read of it lists them.
     runs: Mutex<Value>,
+    /// A read of an item from this offset on fails, once.
+    fail_offset_once: Mutex<Option<u64>>,
 }
 
 /// A read of the open thread's activity for its pictures and cards, not a working thread's
@@ -104,6 +106,7 @@ impl FakeT3 {
             configs: Mutex::new(HashMap::new()),
             capabilities: Mutex::new(json!({})),
             runs: Mutex::new(json!([])),
+            fail_offset_once: Mutex::new(None),
         })
     }
 
@@ -283,6 +286,10 @@ impl T3 for FakeT3 {
                 let next = (cursor + page.len() < total).then_some(cursor + page.len());
                 json!({ "threads": page, "nextCursor": next, "total": total })
             }
+            "t3_thread_read" if args["itemId"].is_string() && args["textOffset"].is_u64() && *self.fail_offset_once.lock().unwrap() == args["textOffset"].as_u64() => {
+                *self.fail_offset_once.lock().unwrap() = None;
+                return Err(T3Error::Other("timed out".into()));
+            }
             "t3_thread_read" if args["itemId"].is_string() => {
                 let id = str_of(&args["itemId"]).to_string();
                 let text = self.item_texts.lock().unwrap().get(&id).cloned().unwrap_or_default();
@@ -304,7 +311,7 @@ impl T3 for FakeT3 {
                         })
                         .collect()
                 };
-                let all = activity.map(cut).or_else(|| self.messages.lock().unwrap().get(&id).cloned()).unwrap_or_else(|| {
+                let all = activity.or_else(|| self.messages.lock().unwrap().get(&id).cloned()).map(cut).unwrap_or_else(|| {
                     vec![
                         json!({ "position": 0, "type": "user_message", "text": self.thread(&args["threadId"])["opening"].as_str().unwrap_or("hi"), "senderThreadId": self.thread(&args["threadId"])["sender"] }),
                         json!({ "position": 1, "type": "assistant_message", "text": "**done**" }),
@@ -2027,6 +2034,95 @@ fn a_message_shows_what_the_fonts_draw_and_copies_as_t3_has_it() {
     assert!(items[0]["cx"].is_null(), "no copy text when nothing changed");
     assert_eq!(items[1]["x"], "✓ done: |cffc8c8a0cat logs/.txt|r");
     assert_eq!(items[1]["cx"], "✅ done: |cffc8c8a0cat logs/🚀.txt|r");
+}
+
+#[test]
+fn a_quote_of_the_agents_response_reaches_the_game_tied_to_the_words_it_quotes() {
+    let mut rig = Rig::new(23_000_000);
+    let cite = "[Assistant quote](t3-citation://v1/local/t1/m-answer?text=bar+%7C+baz&start=4&end=13&prefix=Foo+&suffix=+qux.&comment=Why+this%3F)";
+    let unknown = "[Assistant quote](t3-citation://v1/local/t1/m-answer?text=bar&start=4&end=7&prefix=&suffix=&color=red)";
+    let mut messages = conversation(&["question", "Foo **bar | baz** qux.", &format!("See {cite} please. {unknown}")]);
+    messages[1]["messageId"] = json!("m-answer");
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    let g = items[2]["g"].as_array().unwrap();
+    assert_eq!(g[0], "See");
+    let quote = &g[1];
+    assert_eq!((quote["q"].as_str(), quote["cm"].as_str(), quote["i"].as_u64()), (Some("bar | baz"), Some("Why this?"), Some(2)), "{quote}");
+    // A link T3 wouldn't take (an unknown key) stays as written: its words.
+    assert_eq!(g[2], "please. Assistant quote");
+    // The source item marks the quoted words in the text the game draws.
+    let x = str_of(&items[1]["x"]);
+    let hl = items[1]["hl"].as_array().unwrap();
+    assert_eq!(hl.len(), 1);
+    assert_eq!(hl[0][0], quote["id"]);
+    let (from, to) = (hl[0][2].as_u64().unwrap() as usize, hl[0][3].as_u64().unwrap() as usize);
+    assert_eq!(&x[from - 1..to], "bar || baz");
+    // Copying (and an older addon) gets the quote as text.
+    assert_eq!(str_of(&items[2]["x"]), "See\n|cff808080> bar || baz|r\nWhy this?\nplease. Assistant quote");
+    assert!(!rig.bridge.snapshot().to_string().contains("m-answer"), "an id the game doesn't need went out");
+}
+
+#[test]
+fn a_message_of_yours_cut_short_in_a_quote_is_read_whole() {
+    let mut rig = Rig::new(23_000_000);
+    let long = "引".repeat(700);
+    let cite = crate::cites::Cite {
+        env: "local".into(), thread: "t1".into(), message: "m-answer".into(), text: long.clone(), start: 0, end: 700,
+        prefix: String::new(), suffix: String::new(), comment: Some("注".repeat(2300)),
+    };
+    // Past one read whole too (a long comment): read on from where it stopped.
+    let text = format!("[Assistant quote]({}) Why?", crate::cites::href(&cite));
+    assert!(text.chars().count() > 20_000, "the link fits a whole read: {}", text.chars().count());
+    assert!(text.chars().count() > 6000, "the link fits a read: {}", text.chars().count());
+    let mut messages = conversation(&["question", &format!("Answer: {long}"), &text]);
+    messages[1]["messageId"] = json!("m-answer");
+    messages[2]["itemId"] = json!("m-you");
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.item_texts.lock().unwrap().insert("m-you".into(), text);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    let quote = &items[2]["g"][0];
+    assert_eq!((quote["q"].as_str().map(|q| q.chars().count()), quote["i"].as_u64()), (Some(700), Some(2)), "{}", items[2]);
+    assert_eq!(items[2]["g"][1], "Why?");
+    assert_eq!(quote["cm"].as_str().map(|c| c.chars().count()), Some(1001), "the comment, as much as the game shows");
+    let whole_reads = |rig: &Rig| rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| a["itemId"] == "m-you").count();
+    assert_eq!(whole_reads(&rig), 2, "one read, and one on from where it stopped");
+    // The thread moves on with your message still its last: read again (it may grow), it's
+    // taken as read whole before.
+    let reads = rig.t3.calls_to("t3_thread_read").len();
+    rig.t3.set("running", "2026-11-06T10:05:00Z");
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert!(rig.t3.calls_to("t3_thread_read").len() > reads, "the thread wasn't read again");
+    assert_eq!(whole_reads(&rig), 2, "read whole again");
+    assert_eq!(view_items(&rig)[2]["g"][0]["i"], 2, "the quote is gone after the read");
+}
+
+#[test]
+fn a_whole_read_that_fails_on_the_way_is_tried_again_next_poll() {
+    let mut rig = Rig::new(23_000_000);
+    let cite = crate::cites::Cite {
+        env: "local".into(), thread: "t1".into(), message: "m-answer".into(), text: "引".repeat(700), start: 0, end: 700,
+        prefix: String::new(), suffix: String::new(), comment: Some("注".repeat(2300)),
+    };
+    let text = format!("[Assistant quote]({}) Why?", crate::cites::href(&cite));
+    let mut messages = conversation(&["question", &format!("Answer: {}", "引".repeat(700)), &text, "An answer after it."]);
+    messages[1]["messageId"] = json!("m-answer");
+    messages[2]["itemId"] = json!("m-you");
+    rig.t3.messages.lock().unwrap().insert("t1".into(), messages);
+    rig.t3.item_texts.lock().unwrap().insert("m-you".into(), text);
+    *rig.t3.fail_offset_once.lock().unwrap() = Some(QUOTE_TEXT_CHARS);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    assert!(view_items(&rig)[2]["g"][0]["q"].is_null(), "a quote from half a link: {}", view_items(&rig)[2]);
+    // Nothing changed in the thread: the next poll reads it all again, and the quote comes.
+    rig.advance(61_000);
+    rig.bridge.tick();
+    assert_eq!(view_items(&rig)[2]["g"][0]["i"], 2, "{}", view_items(&rig)[2]);
 }
 
 #[test]

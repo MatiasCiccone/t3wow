@@ -2,6 +2,7 @@
 //! threads, and publishes what the game shows into slot files, raising the signal files
 //! that tell the game to read them.
 
+use crate::cites::{self, take_cites, QUOTE_MARK};
 use crate::clip::{self, Clipped};
 use crate::codec::{decode_cells, Unreadable};
 use crate::config::Trust;
@@ -41,6 +42,10 @@ const WHOLE_SLOTS: u32 = 3;
 pub const SIGNAL_PERIOD: i64 = 25;
 const VIEW_MESSAGES: usize = 24;
 const VIEW_CHARS: usize = 40_000;
+/// The most of a message of yours with quotes that's read (T3 gives at most this a read).
+const QUOTE_TEXT_CHARS: u64 = 20_000;
+/// Reads of it at most: enough for the longest link T3 makes (about 260,000 chars).
+const QUOTE_TEXT_READS: usize = 13;
 /// The open thread is read in full at least this often; in between, only what's new.
 const VIEW_FULL_READ_MS: i64 = 300_000;
 /// An open thread that isn't in the lists (no updatedAt to compare) is read again this often.
@@ -393,6 +398,23 @@ fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
             absolute.then(|| (c[1].trim().to_string(), PathBuf::from(path)))
         })
         .collect()
+}
+
+/// A message's text with each quote's mark (see cites::take_cites) put as the quote, its
+/// lines after "> " in a dim color, then its comment. An addon older than quotes draws it
+/// (`drawn`: in what the game's fonts have); copying takes it as T3 has it.
+fn quotes_in_text(text: &str, cites: &[cites::Cite], drawn: bool) -> String {
+    if cites.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for (n, part) in text.split(QUOTE_MARK).enumerate() {
+        match part.parse::<usize>().ok().filter(|_| n % 2 == 1).and_then(|i| cites.get(i)) {
+            Some(cite) => out.push_str(&cites::markup(cite, "|cff808080", drawn)),
+            None => out.push_str(part),
+        }
+    }
+    out
 }
 
 /// What an embedded image file is as it is now (a changed file is drawn again); None when
@@ -907,6 +929,11 @@ pub struct Bridge {
     view_data: Option<Value>,
     view_key: Option<String>,
     view_cache: Option<ViewCache>,
+    /// Messages of yours with quotes, read whole ("env:thread:item" to the item's text and
+    /// whether it's still cut), the open thread's only.
+    whole_quotes: HashMap<String, Value>,
+    /// The one being read on (its item, as much as was read, and how many reads).
+    quote_reading: Option<(String, Value, usize)>,
     /// Counts commands that changed what the open thread shows (see `view_changed`).
     view_gen: u64,
     notes: Vec<Value>,
@@ -1896,6 +1923,9 @@ enum Step {
     View,
     ViewConfig,
     ViewPage,
+    /// A message of yours that T3 cut short with a quote in it, read whole; the view is built
+    /// after the last (true).
+    ViewQuoteText(String, bool),
     ViewAsk,
     ViewAskRead(String),
     /// Its pictures: a page of its activity (looking for pages an agent showed), each
@@ -1957,6 +1987,9 @@ struct ViewRead {
     /// Something wasn't ready (pages left to look through, pictures left to draw): the
     /// next poll reads the view again.
     again: bool,
+    /// A message of yours with a quote couldn't be read whole: the next poll reads every
+    /// message again (none kept), so it's tried again.
+    quote_failed: bool,
 }
 
 /// T3's sidebar is made of three lists per machine (open, snoozed, settled), read in turn.
@@ -2066,6 +2099,8 @@ impl Bridge {
             view_data: None,
             view_key: None,
             view_cache: None,
+            whole_quotes: HashMap::new(),
+            quote_reading: None,
             view_gen: 0,
             notes: Vec::new(),
             events: Vec::new(),
@@ -2207,6 +2242,7 @@ impl Bridge {
     /// A poll under way reads the previous T3 (or sign-in): drop it and start afresh.
     fn drop_poll(&mut self) {
         self.poll_run = None;
+        self.quote_reading = None;
         self.poll_failures = 0;
         self.poll_at = 0;
         self.slow_at = 0;
@@ -2242,6 +2278,8 @@ impl Bridge {
     fn forget_server(&mut self) {
         self.view = None;
         self.view_cache = None;
+        self.whole_quotes.clear();
+        self.quote_reading = None;
         self.view_data = None;
         self.view_key = None;
         self.pending_ask = None;
@@ -3150,6 +3188,7 @@ impl Bridge {
             Step::View => self.refresh_view(),
             Step::ViewConfig => self.read_view_config(),
             Step::ViewPage => self.read_view_page(),
+            Step::ViewQuoteText(item_id, last) => self.read_quote_text(item_id, last),
             Step::ViewAsk => self.read_view_ask(),
             Step::ViewAskRead(request_id) => self.read_view_request(request_id),
             Step::ViewScan => self.read_view_scan(),
@@ -4104,6 +4143,7 @@ impl Bridge {
                 pictures: Vec::new(),
                 drawing: Vec::new(),
                 scan_pages: 0,
+                quote_failed: false,
                 again: false,
             });
         }
@@ -4173,10 +4213,104 @@ impl Bridge {
             read.messages.clear();
             read.pages = 0;
         } else {
-            self.build_view();
+            // A quote's link holds the quoted text, encoded: a message of yours with one can
+            // run past what a read gives, and a cut link can't be read. Those are read whole.
+            // Only those the view can show; one read whole before (the last message, read
+            // again as it may grow) is taken as it was read.
+            let thread = format!("{}:{}", read.view.env, read.view.id);
+            let shown = read.messages.len().saturating_sub(VIEW_MESSAGES * read.view.depth);
+            let mut whole = std::mem::take(&mut self.whole_quotes);
+            // Only the open thread's are kept.
+            whole.retain(|k, _| k.starts_with(&format!("{thread}:")));
+            let Some(read) = self.view_read() else { return Ok(()) };
+            let mut cut: Vec<String> = Vec::new();
+            for m in read.messages[shown..].iter_mut().filter(|m| m["type"] == "user_message" && m["textTruncated"] == true && cites::may_hold_link(str_of(&m["text"]))) {
+                let Some(item_id) = m["itemId"].as_str().map(str::to_string) else { continue };
+                match whole.get(&format!("{thread}:{item_id}")).filter(|w| str_of(&w["text"]).starts_with(str_of(&m["text"]))) {
+                    Some(w) => {
+                        m["text"] = w["text"].clone();
+                        m["textTruncated"] = w["textTruncated"].clone();
+                    }
+                    None => cut.push(item_id),
+                }
+            }
+            self.whole_quotes = whole;
+            if cut.is_empty() {
+                self.build_view();
+            } else {
+                let last = cut.len() - 1;
+                self.push_steps(cut.into_iter().enumerate().map(|(n, id)| Step::ViewQuoteText(id, n == last)).collect());
+            }
             return Ok(());
         }
         self.push_steps(vec![Step::ViewPage]);
+        Ok(())
+    }
+
+    /// A message of yours with a quote that T3 cut short, read whole (up to QUOTE_TEXT_CHARS),
+    /// in place of the cut text, and kept (`whole_quotes`), so it's read once. A read that
+    /// fails leaves the cut text: the rest of the view still goes out.
+    fn read_quote_text(&mut self, item_id: String, last: bool) -> Result<(), T3Error> {
+        let Some(read) = self.view_read() else { return Ok(()) };
+        let View { env, id, .. } = read.view.clone();
+        // A read gives QUOTE_TEXT_CHARS at most: a longer one (a long comment, say) is read on
+        // from where it stopped, a step a read (so a command from the game goes between), up
+        // to what T3 lets a quote's link hold.
+        let so_far = self.quote_reading.take().filter(|(read_id, _, _)| *read_id == item_id);
+        let reads = so_far.as_ref().map_or(0, |(_, _, n)| *n) + 1;
+        let mut args = json!({ "threadId": id, "itemId": item_id, "maxCharsPerItem": QUOTE_TEXT_CHARS });
+        if let Some(offset) = so_far.as_ref().and_then(|(_, w, _)| w["nextTextOffset"].as_u64()) {
+            args["textOffset"] = json!(offset);
+        }
+        let (piece, failed) = match self.client.call("t3_thread_read", with_args(args, &self.env_arg(&env))) {
+            Ok(result) => {
+                let piece = result["items"].as_array().and_then(|items| items.iter().find(|it| it["itemId"] == item_id.as_str() && it["text"].is_string())).cloned();
+                // Gone on the way (a read on from where it stopped that brings nothing): as failed.
+                let missing = piece.is_none() && so_far.is_some();
+                (piece, missing)
+            }
+            Err(T3Error::Auth(message)) => return Err(T3Error::Auth(message)),
+            Err(error) => {
+                self.log(&format!("a message with a quote: {error}"));
+                (None, true)
+            }
+        };
+        let whole = match (so_far.map(|(_, w, _)| w), piece) {
+            (Some(mut w), Some(piece)) => {
+                w["text"] = json!(format!("{}{}", str_of(&w["text"]), str_of(&piece["text"])));
+                w["textTruncated"] = piece["textTruncated"].clone();
+                w["nextTextOffset"] = piece["nextTextOffset"].clone();
+                Some(w)
+            }
+            (w, piece) => piece.or(w),
+        };
+        let more = whole.as_ref().is_some_and(|w| w["textTruncated"] == true && w["nextTextOffset"].is_u64());
+        if more && !failed && reads < QUOTE_TEXT_READS {
+            self.quote_reading = whole.map(|w| (item_id.clone(), w, reads));
+            self.push_steps(vec![Step::ViewQuoteText(item_id, last)]);
+            return Ok(());
+        }
+        // Kept once read to its end (or as far as it goes): a read that failed on the way is
+        // tried again next poll.
+        if failed {
+            if let Some(read) = self.view_read() {
+                read.quote_failed = true;
+                read.again = true;
+            }
+        }
+        if let Some(whole) = whole.as_ref().filter(|_| !failed) {
+            let thread = format!("{env}:{id}:");
+            self.whole_quotes.retain(|k, _| k.starts_with(&thread));
+            self.whole_quotes.insert(format!("{thread}{item_id}"), json!({ "text": whole["text"], "textTruncated": whole["textTruncated"] }));
+        }
+        let Some(read) = self.view_read() else { return Ok(()) };
+        if let (Some(whole), Some(message)) = (whole, read.messages.iter_mut().find(|m| m["itemId"] == item_id.as_str())) {
+            message["text"] = whole["text"].clone();
+            message["textTruncated"] = whole["textTruncated"].clone();
+        }
+        if last {
+            self.build_view();
+        }
         Ok(())
     }
 
@@ -4198,9 +4332,14 @@ impl Bridge {
         let keep = VIEW_MESSAGES * depth * 4;
         let trimmed = messages.len() > keep;
         let messages: Vec<Value> = messages[messages.len().saturating_sub(keep)..].to_vec();
+        // A message read whole is kept while the view keeps it.
+        let kept: HashSet<String> = messages.iter().filter_map(|m| m["itemId"].as_str()).map(|item| format!("{env}:{id}:{item}")).collect();
+        self.whole_quotes.retain(|k, _| kept.contains(k));
         let earlier = earlier || trimmed;
         let thread = &read.thread;
-        self.view_cache = Some(ViewCache {
+        // With a quote that couldn't be read whole, nothing is kept: the next read is a full one.
+        let keep_cache = !read.quote_failed;
+        self.view_cache = keep_cache.then(|| ViewCache {
             env: env.clone(),
             id: id.clone(),
             depth,
@@ -4216,31 +4355,43 @@ impl Bridge {
         let mut positions: Vec<u64> = Vec::new();
         let mut embedded: Vec<Picture> = Vec::new();
         let mut chars = 0;
+        let mut capped = false;
         for item in messages.iter().rev().take(want) {
             let kind = str_of(&item["type"]);
             if kind != "user_message" && kind != "assistant_message" {
                 continue;
             }
             let truncated = item["textTruncated"] == true;
-            let more_mark = if truncated { "\n…" } else { "" };
-            let text = wow_text(str_of(&item["text"]), 6000) + more_mark;
+            // Your quotes of the agent's responses (T3's Cite in composer) each stand on a
+            // line of their own, drawn as a quote. The agent's own text is as it wrote it.
+            let (raw, cites) = if kind == "user_message" { take_cites(str_of(&item["text"]), truncated) } else { (str_of(&item["text"]).to_string(), Vec::new()) };
+            // With quotes, cut to size here ("…" and all), never inside a quote's mark.
+            let cut_here = !cites.is_empty() && raw.chars().count() > 6000;
+            let raw = if cites.is_empty() { raw } else { cites::capped(&raw, 6000) };
+            let more_mark = if truncated && !cut_here { "\n…" } else { "" };
+            let text = quotes_in_text(&wow_text(&raw, 6000), &cites, true) + more_mark;
             let mut length = text.encode_utf16().count();
             let mut shown = json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text });
             // Copying gives every character as T3 has it, those the game draws as others or
             // leaves out included.
-            let written = wow_markup(str_of(&item["text"]), 6000) + more_mark;
+            let written = quotes_in_text(&wow_markup(&raw, 6000), &cites, false) + more_mark;
             if written != text {
                 length += written.encode_utf16().count();
                 shown["cx"] = json!(written);
             }
-            // A message with code or a table also comes cut into segments, which this addon
-            // draws in its monospace font. Older addons read only the text, as does copying.
-            let mut segments = wow_segments(str_of(&item["text"]), 6000);
+            // A message with code, a table or a quote also comes cut into segments, which this
+            // addon draws in its own fonts. Copying reads the text; an addon older than quotes
+            // leaves a quote out of the segments (it shows after a /reload with this one).
+            let mut segments = wow_segments(&raw, 6000);
+            for seg in segments.iter_mut().filter(|s| s["q"].is_u64()) {
+                *seg = cites.get(seg["q"].as_u64().unwrap_or(0) as usize).map_or(Value::Null, cites::segment);
+            }
+            segments.retain(|s| !s.is_null());
             if !segments.is_empty() {
-                if truncated {
+                if truncated && !cut_here {
                     segments.push(json!("…"));
                 }
-                length += segments.iter().map(|s| s.to_string().encode_utf16().count()).sum::<usize>();
+                length += segments.iter().map(|s| cites::sent(s).to_string().encode_utf16().count()).sum::<usize>();
                 shown["g"] = json!(segments);
             }
             if let Some(line) = item["position"].as_u64().and_then(|p| handoffs.get(&p)) {
@@ -4252,7 +4403,15 @@ impl Bridge {
             if item["freshContext"] == true || (!message_id.is_empty() && self.link.fresh_messages.iter().any(|m| m == message_id)) {
                 shown["ns"] = json!(1);
             }
+            // Which message it is, for the quotes of it (cites::link_quotes takes it out).
+            if !message_id.is_empty() && kind == "assistant_message" {
+                shown["_m"] = json!(message_id);
+                if truncated {
+                    shown["_t"] = json!(true);
+                }
+            }
             if chars + length > VIEW_CHARS && !items.is_empty() {
+                capped = true;
                 break;
             }
             chars += length;
@@ -4294,6 +4453,10 @@ impl Bridge {
             built["sent"] = json!(sent);
             // Its numbers are this UI session's: a view built before a new one starts drops them.
             built["sentU"] = json!(self.link.ui_session);
+        }
+        // As much as the game is shown: an earlier message can't come in (cites::link_quotes).
+        if capped {
+            built["_cap"] = json!(true);
         }
         // The branch its checkout is on, for the header. Only a thread read has it, not T3's
         // list, so the game shows it for the open thread alone.
@@ -4856,6 +5019,7 @@ impl Bridge {
         let View { env, id, .. } = read.view;
         let thread = read.thread;
         let Some(mut view) = read.built else { return };
+        cites::link_quotes(&mut view, &env, &id, self.local_env_id.as_deref());
         let pending = thread["pendingRequestCount"].as_u64().unwrap_or(0) > 0;
         let shown_ask = self.view_data.as_ref().filter(|v| v["e"] == env.as_str() && v["id"] == id.as_str()).map(|v| v["ask"].clone()).filter(|a| !a.is_null());
         let previous = self.pending_ask.take().filter(|a| a.env == env && a.thread == id);

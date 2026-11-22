@@ -628,6 +628,15 @@ pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
             i = end;
             continue;
         }
+        // A quote of an assistant response (see cites::take_cites): { q = its place among
+        // the message's quotes }, which the bridge fills in.
+        if let Some(n) = crate::cites::mark_at(line) {
+            flush(&mut prose, &mut segments);
+            special = true;
+            segments.push(json!({ "q": n }));
+            i += 1;
+            continue;
+        }
         let l = prose_line(&line.replace('|', "||"), &format!("{CODE_OPEN}$1{CODE_CLOSE}"));
         special |= l.contains(CODE_OPEN);
         prose.push(l);

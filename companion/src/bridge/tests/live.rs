@@ -657,6 +657,59 @@ fn live_a_page_an_agent_shows_reaches_the_game() {
     live.finish();
 }
 
+/// A quote made with T3's Cite in composer reaches the game as a quote, tied to the words it
+/// quotes in the agent's reply. The game can't make one, so the test writes the link as T3's
+/// composer does and sends it as a message: T3 keeps it in the message's text as it is.
+#[test]
+#[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
+fn live_a_quote_reaches_the_game_tied_to_its_words() {
+    let mut live = Live::start("quote");
+    let id = live.new_thread("Reply with only this sentence, nothing else: Kiwis ripen faster in a paper bag beside a banana.");
+    live.wait("the agent's reply", REPLY_TIMEOUT, |live| !live.said(&id, "a").is_empty() && !working(str_of(&live.thread(&id)["status"])));
+    let read = live.t3.client.call("t3_thread_read", json!({ "threadId": id, "limit": 20 })).expect("thread read");
+    let reply = read["items"].as_array().into_iter().flatten().rfind(|i| i["type"] == "assistant_message").cloned().expect("no reply in T3");
+    let text = str_of(&reply["text"]).to_string();
+    // A word of the reply that's in it once, so T3's rules find it without its context.
+    let word = text
+        .split(|c: char| !c.is_alphanumeric())
+        .find(|w| w.len() >= 5 && text.matches(w).count() == 1)
+        .unwrap_or_else(|| panic!("no word to quote in the reply: {text}"))
+        .to_string();
+    let env = live.bridge.local_env_id.clone().expect("the bridge knows T3's own machine");
+    let cite = crate::cites::Cite {
+        env,
+        thread: id.clone(),
+        message: str_of(&reply["messageId"]).to_string(),
+        text: word.clone(),
+        start: 0,
+        end: word.encode_utf16().count() as u64,
+        prefix: String::new(),
+        suffix: String::new(),
+        comment: Some("Why this one?".into()),
+    };
+    let s = live.command(json!({ "t": "send", "id": id, "m": format!("[Assistant quote]({}) Say only OK.", crate::cites::href(&cite)) }));
+    live.expect_no_failure(s);
+    let quoted = |live: &Live| {
+        let view = live.snapshot()["view"].clone();
+        let items = view["items"].as_array().cloned().unwrap_or_default();
+        let quote = items.iter().filter(|i| i["r"] == "u").flat_map(|i| i["g"].as_array().cloned().unwrap_or_default()).find(|g| g["q"].is_string());
+        quote.filter(|q| q["q"] == word.as_str() && q["cm"] == "Why this one?").and_then(|q| {
+            let source = items.get(q["i"].as_u64()? as usize - 1)?;
+            let hl = source["hl"].as_array()?.first()?.clone();
+            // The range is in the text the game draws: the message's, or a segment's.
+            let piece = match hl[1].as_u64()? {
+                0 => str_of(&source["x"]).to_string(),
+                n => source["g"][n as usize - 1].as_str().map(str::to_string).or_else(|| source["g"][n as usize - 1]["c"].as_str().map(str::to_string))?,
+            };
+            let (from, to) = (hl[2].as_u64()? as usize, hl[3].as_u64()? as usize);
+            (hl[0] == q["id"] && piece.get(from - 1..to) == Some(word.as_str())).then_some(())
+        })
+        .is_some()
+    };
+    live.wait("the quote in the game, tied to the quoted word", STATE_TIMEOUT, quoted);
+    live.finish();
+}
+
 /// The T3 tools the companion calls. T3 lists html_render, whose calls it reads from a
 /// thread's timeline, only to agents in a thread: `live_a_page_an_agent_shows_reaches_the_game`
 /// checks its inputs.

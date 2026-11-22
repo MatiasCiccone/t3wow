@@ -1500,6 +1500,102 @@ local function place(region, x, after)
     flow.last, flow.x, flow.gap = region, x, after
 end
 
+-- ---------------------------------------------------------------- quotes
+-- Your quotes of the agent's responses (T3's Cite in composer) come as segments of your
+-- message: { q = the quote, cm = your comment, id, and where its source is: i = the item
+-- it quotes (from 1), ea = earlier in this thread (not loaded), or e and th = a thread of
+-- its own; none of these when it's gone }. The item quoted carries hl = { { id, piece,
+-- first byte, last byte }, ... }: where the quoted words are in what it's drawn from (its
+-- segment, or 0 for its text). Clicking a quote goes to its source and marks those words in
+-- the cited color for a moment, as T3 does.
+UI.Quote = { HOLD = 2.7 }
+do
+    local Quote = UI.Quote
+
+    -- The ranges marked for quote `id` in an item: { [piece] = { { first, last }, ... } }.
+    function Quote.Ranges(item, id)
+        local by
+        for _, h in ipairs(type(item.hl) == "table" and item.hl or {}) do
+            if type(h) == "table" and h[1] == id and type(h[3]) == "number" and type(h[4]) == "number" then
+                by = by or {}
+                local list = by[h[2]] or {}
+                by[h[2]] = list
+                list[#list + 1] = { h[3], h[4] }
+            end
+        end
+        for _, list in pairs(by or {}) do table.sort(list, function(a, b) return a[1] < b[1] end) end
+        return by
+    end
+
+    -- Game markup `s` with bytes first..last of each range in `color` (hex). Color codes
+    -- inside give way to it, and the color in effect at a range's end comes back after it.
+    -- Lines and inline code marks close the color and open it again, since a message with
+    -- code is drawn run by run.
+    function Quote.Mark(s, ranges, color)
+        local open, out, active, inside, r = "|cff" .. color, {}, nil, false, 1
+        local i, n = 1, #s
+        while i <= n do
+            -- A range that starts before here (overlapping the last) is passed over.
+            while not inside and ranges[r] and ranges[r][1] < i do r = r + 1 end
+            local range = ranges[r]
+            if not inside and range and i == range[1] then
+                -- A color that would hold nothing is dropped instead of closed.
+                if active and out[#out] == active then out[#out] = nil elseif active then out[#out + 1] = "|r" end
+                out[#out + 1] = open
+                inside = true
+            end
+            local two, token = s:sub(i, i + 1), nil
+            if two == "||" or two == "|r" then
+                token = two
+            elseif two == "|c" and s:sub(i + 2, i + 9):match("^%x%x%x%x%x%x%x%x$") then
+                token = s:sub(i, i + 9)
+            else
+                token = s:sub(i, i)
+            end
+            if token == "|r" or #token == 10 then
+                active = token ~= "|r" and token or nil
+                if not inside then out[#out + 1] = token end
+            elseif inside and (token == "\1" or token == "\2" or token == "\n") then
+                out[#out + 1] = "|r" .. token .. open
+            else
+                out[#out + 1] = token
+            end
+            i = i + #token
+            if inside and i > range[2] then
+                out[#out + 1] = "|r" .. (active or "")
+                inside, r = false, r + 1
+            end
+        end
+        if inside then out[#out + 1] = "|r" end
+        return table.concat(out)
+    end
+
+    -- Plain text `s` (a code block's) as game text, with the ranges in `color`.
+    function Quote.MarkPlain(s, ranges, color)
+        local function escape(t) return (t:gsub("|", "||")) end
+        local out, pos = {}, 1
+        for _, range in ipairs(ranges or {}) do
+            -- A range overlapping the last is passed over.
+            if range[1] >= pos then
+                out[#out + 1] = escape(s:sub(pos, range[1] - 1))
+                out[#out + 1] = "|cff" .. color .. escape(s:sub(range[1], range[2])):gsub("\n", "|r\n|cff" .. color) .. "|r"
+                pos = range[2] + 1
+            end
+        end
+        out[#out + 1] = escape(s:sub(pos))
+        return table.concat(out)
+    end
+
+    -- What a quote's tooltip says.
+    function Quote.Tip(seg)
+        if seg.i then return "Click to go to the quoted message" end
+        if seg.ea then return "Click to load earlier messages and go to the quoted one" end
+        if seg.th then return "Quoted from another thread: click to open it" end
+        if seg.far then return "The quoted message is further back than the game can show" end
+        return "The quoted message is no longer in this thread"
+    end
+end
+
 -- ---------------------------------------------------------------- code and tables
 -- A message with code or a table also comes cut into segments (the companion's
 -- wow_segments): prose (game text, inline code between \1 and \2), code blocks ({ c }) and
@@ -1700,6 +1796,35 @@ do
     end
     local textRun, monoRun = run(Skin.fonts.text), run(Skin.fonts.mono)
 
+    -- A quote: its words in the muted font beside a bar, with a button over it that goes to
+    -- its source. The bar and the button go with the string (as box and chip).
+    local QUOTE_INDENT = 12
+    local function quoteText()
+        local fs = messageChild:CreateFontString(nil, "OVERLAY")
+        fs:SetFontObject(Skin.fonts.muted)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(true)
+        fs:SetSpacing(2)
+        fs.box = messageChild:CreateTexture(nil, "ARTWORK")
+        fs.box:SetTexture(WHITE)
+        fs.box:SetPoint("TOPLEFT", fs, "TOPLEFT", -QUOTE_INDENT, 1)
+        fs.box:SetPoint("BOTTOMRIGHT", fs, "BOTTOMLEFT", -QUOTE_INDENT + 3, -1)
+        local b = CreateFrame("Button", nil, messageChild)
+        -- Over the message's own button, which copies it.
+        b:SetFrameLevel(messageChild:GetFrameLevel() + 3)
+        b:SetPoint("TOPLEFT", fs, "TOPLEFT", -QUOTE_INDENT - 2, 3)
+        b:SetPoint("BOTTOMRIGHT", fs, "BOTTOMRIGHT", 2, -3)
+        b:SetScript("OnClick", function(self) UI.Quote.Go(self.quote) end)
+        b:SetScript("OnEnter", function(self)
+            Skin.Tooltip:SetOwner(self, "ANCHOR_RIGHT")
+            Skin.Tooltip:AddLine(UI.Quote.Tip(self.quote))
+            Skin.Tooltip:Show()
+        end)
+        b:SetScript("OnLeave", function() Skin.Tooltip:Hide() end)
+        fs.chip = b
+        return fs
+    end
+
     -- Prose with inline code, `width` wide: each run of text or code is a string of its own,
     -- set after the one before and wrapped at spaces (anywhere, when a word is wider than
     -- the line), in a frame as tall as its lines.
@@ -1710,6 +1835,9 @@ do
             return f
         end)
         holder:SetWidth(width)
+        -- How far down the words a quote marks start (see UI.Quote.Target), if they're here.
+        holder.cited = nil
+        local citedOpen = "|cff" .. Skin.Hex("cited")
         local textSize, monoSize = fontSize(Skin.fonts.text, 13), fontSize(Skin.fonts.mono, 12)
         local lineHeight = math.max(textSize, monoSize) + 5
         local space = { [false] = math.max(1, measure(Skin.fonts.text, "a a") - measure(Skin.fonts.text, "aa")), [true] = charWidth() }
@@ -1732,7 +1860,10 @@ do
             if best or not anywhere then return best end
             local e = 0
             repeat
-                local unit = s:sub(e + 1, e + 2) == "||" and "||" or s:match("^[^\128-\191][\128-\191]*", e + 1) or s:sub(e + 1, e + 1)
+                -- A doubled pipe, a color code and a character are each cut whole.
+                local two = s:sub(e + 1, e + 2)
+                local unit = ((two == "||" or two == "|r") and two) or s:match("^|c%x%x%x%x%x%x%x%x", e + 1)
+                    or s:match("^[^\128-\191][\128-\191]*", e + 1) or s:sub(e + 1, e + 1)
                 if e > 0 and span(s:sub(1, e + #unit), mono) > room then break end
                 e = e + #unit
             until e >= #s
@@ -1759,9 +1890,10 @@ do
             local lead, body = s:match("^( *)(.-) *$")
             if body ~= "" then
                 local fs = take(mono and "mono" or "text", mono and monoRun or textRun)
-                local start = not mono and active or ""
+                local start = active or ""
                 fs:SetText(color and (color .. start .. body .. "|r") or (start .. body))
-                if not mono then colorAfter(body) end
+                if not rawget(holder, "cited") and (color == citedOpen or (start .. body):find(citedOpen, 1, true)) then holder.cited = row * lineHeight end
+                colorAfter(body)
                 local size = mono and monoSize or textSize
                 fs:SetPoint("TOPLEFT", holder, "TOPLEFT", x + #lead * space[mono] + (mono and CHIP or 0),
                     -row * lineHeight - floor((lineHeight - size) / 2))
@@ -1773,11 +1905,11 @@ do
             x = x + span(s, mono)
         end
         local function flowRun(s, mono)
+            -- A run in one color (code too, while a quote's words are marked) keeps it on
+            -- every line it wraps to.
             local color
-            if not mono then
-                local c, inner = s:match("^(|c%x%x%x%x%x%x%x%x)(.*)|r$")
-                if c then color, s = c, inner end
-            end
+            local c, inner = s:match("^(|c%x%x%x%x%x%x%x%x)(.*)|r$")
+            if c and not inner:gsub("||", ""):find("|[cr]") then color, s = c, inner end
             while s ~= "" do
                 local e = cut(s, mono, width - x, x == 0)
                 if e then
@@ -1816,7 +1948,7 @@ do
         local function flowProse(s)
             local color
             local c, inner = s:match("^(|c%x%x%x%x%x%x%x%x)(.*)|r$")
-            if c then color, s = c, inner end
+            if c and not inner:gsub("||", ""):find("|[cr]") then color, s = c, inner end
             local pos = 1
             while true do
                 local a, b, pr = PullRequests.FindMention(s, pos)
@@ -1835,6 +1967,7 @@ do
             for plain, code in (line .. "\1\2"):gmatch("(.-)\1(.-)\2") do
                 flowProse(plain)
                 flowRun((code:gsub("\1", "")), true)
+                active = nil
             end
         end
         holder:SetHeight((row + 1) * lineHeight)
@@ -1843,8 +1976,10 @@ do
 
     -- Lays the segments out as one message, yours in a bubble (as wide as its widest piece
     -- needs) or the agent's at the full width. Returns where it starts and ends ({ region,
-    -- inset }) and its width, or nothing when no segment could be drawn.
-    function Mono.Place(segments, mine)
+    -- inset, left inset }) and its width, or nothing when no segment could be drawn.
+    -- `marks` = { [segment] = ranges } in the cited color (see UI.Quote); Mono.placed then
+    -- holds the region each segment was drawn in.
+    function Mono.Place(segments, mine, marks)
         local full = messageWidth() - 8
         local most = mine and floor(full * 0.75) or full
         local cw = charWidth()
@@ -1859,6 +1994,9 @@ do
                     w = widestLine(Skin.fonts.mono, (tostring(seg.c):gsub("|", "||"))) + 2 * PAD
                 elseif type(seg) == "table" and seg.t then
                     w = widestLine(Skin.fonts.mono, tableText(seg, floor((most - 2 * PAD - 2) / cw))) + 2 * PAD
+                elseif type(seg) == "table" and type(seg.q) == "string" then
+                    w = widestLine(Skin.fonts.muted, (seg.q:gsub("|", "||"))) + QUOTE_INDENT
+                    if type(seg.cm) == "string" then w = math.max(w, widestLine(Skin.fonts.text, (seg.cm:gsub("|", "||")))) end
                 end
                 width = math.max(width, math.ceil(w + 1))
             end
@@ -1868,8 +2006,12 @@ do
         local room = width > 20 and width or 120
         local x = mine and (full + 4 - width - SIZE.bubbleX) or 4
         local first, last
-        for _, seg in ipairs(segments) do
-            local region, inset
+        local cited = Skin.Hex("cited")
+        Mono.placed = {}
+        for n, seg in ipairs(segments) do
+            local region, inset, dx
+            local ranges = marks and marks[n]
+            if type(seg) == "string" and ranges then seg = UI.Quote.Mark(seg, ranges, cited) end
             if type(seg) == "string" and (seg:find("\1", 1, true) or PullRequests.FindMention(seg)) then
                 region, inset = inlineBlock(seg, room), 0
             elseif type(seg) == "string" then
@@ -1879,30 +2021,50 @@ do
             elseif type(seg) == "table" and (seg.c or seg.t) then
                 region, inset = take("code", codeBlock), PAD
                 region:SetWidth(width - 2 * PAD)
-                region:SetText(seg.c and (tostring(seg.c):gsub("|", "||")) or tableText(seg, floor((room - 2 * PAD - 2) / cw)))
+                region:SetText((seg.c and ranges and UI.Quote.MarkPlain(tostring(seg.c), ranges, cited))
+                    or (seg.c and (tostring(seg.c):gsub("|", "||"))) or tableText(seg, floor((room - 2 * PAD - 2) / cw)))
                 region.box:Show()
+            elseif type(seg) == "table" and type(seg.q) == "string" then
+                region, inset, dx = take("quote", quoteText), 0, QUOTE_INDENT
+                region:SetWidth(math.max(20, width - QUOTE_INDENT))
+                region:SetText((seg.q:gsub("|", "||")))
+                region.box:SetVertexColor(Skin.Color((seg.i or seg.ea or seg.th) and "accent" or "dim"))
+                region.box:Show()
+                region.chip.quote = seg
+                region.chip:Show()
             end
             if region then
                 if not first and mine then flow.gap = flow.gap + SIZE.bubbleY end
                 flow.gap = flow.gap + inset
-                place(region, x + inset, inset + 10)
-                first = first or { region, inset }
-                last = { region, inset }
+                place(region, x + inset + (dx or 0), inset + (dx and 6 or 10))
+                first = first or { region, inset, (dx or 0) + inset }
+                last = { region, inset, (dx or 0) + inset }
+                Mono.placed[n] = region
+                -- Your comment on it, under it.
+                if dx and type(seg.cm) == "string" and seg.cm ~= "" then
+                    local comment = take("prose", prose)
+                    comment:SetWidth(width)
+                    comment:SetText((seg.cm:gsub("|", "||")))
+                    place(comment, x, 10)
+                    last = { comment, 0 }
+                end
             end
         end
         if not first then return end
-        flow.gap = last[2] + 18 + (mine and SIZE.bubbleY or 0)
+        flow.gap = (last[2] or 0) + 18 + (mine and SIZE.bubbleY or 0)
         return first, last, width
     end
 end
 
 -- The bubble, the button and the hover tint go around a message from the top left of its
--- first piece to the bottom of its last, `width` wide (a piece inset by its padding).
-local function anchorMessage(fs, first, firstInset, last, lastInset, width)
+-- first piece to the bottom of its last, `width` wide (a piece inset by its padding; a quote
+-- further from the left, beside its bar: firstDx and lastDx).
+local function anchorMessage(fs, first, firstInset, last, lastInset, width, firstDx, lastDx)
+    firstDx, lastDx = firstDx or firstInset, lastDx or lastInset
     local function around(region, left, top, right, bottom)
         region:ClearAllPoints()
-        region:SetPoint("TOPLEFT", first, "TOPLEFT", -firstInset - left, firstInset + top)
-        region:SetPoint("BOTTOMRIGHT", last, "BOTTOMLEFT", width - lastInset + right, -lastInset - bottom)
+        region:SetPoint("TOPLEFT", first, "TOPLEFT", -firstDx - left, firstInset + top)
+        region:SetPoint("BOTTOMRIGHT", last, "BOTTOMLEFT", width - lastDx + right, -lastInset - bottom)
     end
     around(fs.bubble, SIZE.bubbleX, SIZE.bubbleY, SIZE.bubbleX, SIZE.bubbleY)
     around(fs.hit, 4, 4, 4, 4)
@@ -1912,20 +2074,25 @@ end
 -- A message: yours in a bubble against the right edge, as wide as its text needs up to
 -- three quarters of the conversation; the agent's the full width. With segments (a message
 -- with code or a table), it is drawn from those, piece by piece.
-local function placeMessage(fs, text, mine, segments)
+-- `marks`: what to put in the cited color, as Mono.Place takes it (0 for the text).
+local function placeMessage(fs, text, mine, segments, marks)
     local full = messageWidth() - 8
     fs:SetFontObject(Skin.fonts.text)
     fs.bubble:SetShown(mine)
     -- Naming one of the thread's pull requests, it is laid out run by run, the link a run.
-    if type(segments) ~= "table" and PullRequests.FindMention(text) then segments = { text } end
+    if type(segments) ~= "table" and PullRequests.FindMention(text) then
+        segments = { text }
+        if marks and marks[0] then marks = { marks[0] } end
+    end
     if type(segments) == "table" and #segments > 0 then
-        local first, last, width = Mono.Place(segments, mine)
+        local first, last, width = Mono.Place(segments, mine, marks)
         if first then
             fs:Hide()
-            anchorMessage(fs, first[1], first[2], last[1], last[2], width)
+            anchorMessage(fs, first[1], first[2], last[1], last[2], width, first[3], last[3])
             return
         end
     end
+    if marks and marks[0] then text = UI.Quote.Mark(text, marks[0], Skin.Hex("cited")) end
     local width = full
     if mine then
         local most = floor(full * 0.75)
@@ -2904,6 +3071,222 @@ local function drawnAsIs()
         and drawn.selected == selected and drawn.echo == echo and drawn.sent == askState.sent and drawn.trust == inbox.trust and drawn.uns == inbox.uns
 end
 
+-- Going to a quote's source (see UI.Quote): quote Quote.id, in the thread Quote.where names,
+-- has its words marked until Quote.untilT, in the item its segment names in the view now
+-- (Quote.item, worked out on every draw: items move as messages come in); the view scrolls
+-- to them until Quote.scrollUntil. A source not loaded yet is waited for in Quote.pending.
+do
+    local Quote = UI.Quote
+    local WAIT = 30 -- for a page of earlier messages, at most
+
+    local function here() return selected and (tostring(selected.env) .. ":" .. tostring(selected.id)) end
+    local LOADING = "Loading earlier messages to find the quoted one…"
+    -- Lays out the text before the quoted words, unseen (see Quote.Target): on a frame drawn
+    -- at no alpha, since a font object brings its text color back, alpha and all.
+    local probeHost = CreateFrame("Frame", nil, messageChild)
+    probeHost:SetAlpha(0)
+    probeHost:SetSize(1, 1)
+    probeHost:SetPoint("TOPLEFT")
+    local probe = probeHost:CreateFontString(nil, "OVERLAY")
+    probe:SetWordWrap(true)
+    probe:SetSpacing(2)
+    probe:SetPoint("TOPLEFT")
+
+    -- What became of a click, over the box for a while: on the next frame, never in a draw.
+    local function say(text) Quote.said = text end
+
+    function Quote.Clear()
+        Quote.id, Quote.item, Quote.target, Quote.pending, Quote.next, Quote.said = nil, nil, nil, nil, nil, nil
+        probe:SetText("")
+        if notice == LOADING then notice, UI.noticeKept = nil, nil end
+    end
+
+    -- The quote `id` in the view, and the place of the message it's in.
+    local function find(view, id)
+        for n, item in ipairs(type(view) == "table" and type(view.items) == "table" and view.items or {}) do
+            for _, g in ipairs(type(item.g) == "table" and item.g or {}) do
+                if type(g) == "table" and g.id == id then return g, n end
+            end
+        end
+    end
+
+    -- Before a draw: where the source being shown is in this view, if it's still in it.
+    function Quote.Resolve(view)
+        -- Set again when the source is drawn: a region not drawn now may be another's.
+        Quote.item, Quote.target = nil, nil
+        if not Quote.id then return end
+        local seg = Quote.where == here() and find(view, Quote.id)
+        if seg and seg.i then Quote.item = seg.i else Quote.id, Quote.target = nil, nil end
+    end
+
+    -- Whether item i of the open thread is the source being shown.
+    function Quote.On(i) return Quote.id ~= nil and Quote.item == i end
+
+    function Quote.MarksFor(i, item)
+        if Quote.On(i) then return Quote.Ranges(item, Quote.id) end
+    end
+
+    -- What the view scrolls to: the piece with the first quoted words, and how far down it
+    -- they start (a share of its text: the game can't say where a word is drawn), else the
+    -- message's top.
+    function Quote.Target(fs, marks, item)
+        local first
+        for piece in pairs(marks or {}) do
+            if not first or piece < first then first = piece end
+        end
+        local region, text, key = nil, nil, first
+        if first == 0 and not fs:IsShown() then first = 1 end -- drawn as a segment (a PR it names)
+        if first == 0 then
+            region, text = fs, item.x
+        elseif first then
+            local seg = type(item.g) == "table" and item.g[first]
+            region, text = Mono.placed and Mono.placed[first], type(seg) == "table" and seg.c or (type(seg) == "string" and seg) or item.x
+        end
+        Quote.frac, Quote.measured, Quote.offset = 0, false, nil
+        -- Laid out run by run: the row the marked words start on is known.
+        if region and type(rawget(region, "cited")) == "number" then Quote.offset = rawget(region, "cited") end
+        if region and type(text) == "string" and #text > 0 then
+            local from = marks[key][1][1]
+            Quote.frac = (from - 1) / #text
+            -- A string of its own: the text before the words, laid out as it is, says how far
+            -- down they are (read in the driver, once it's laid out).
+            if region.GetObjectType and region:GetObjectType() == "FontString" then
+                local before = text:sub(1, from - 1)
+                local code = region ~= fs and type(item.g) == "table" and type(item.g[first]) == "table"
+                if code then before = before:gsub("|", "||") end
+                -- Colors take no room, and none may show.
+                before = before:gsub("||", "\0"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("%z", "||")
+                probe:SetFontObject(region:GetFontObject())
+                probe:SetTextColor(0, 0, 0, 0)
+                probe:SetShadowColor(0, 0, 0, 0)
+                probe:SetNonSpaceWrap(code)
+                probe:SetWidth(region:GetWidth())
+                probe:SetText(before .. "x")
+                Quote.measured = true
+            end
+        end
+        Quote.target = region or fs.hit
+    end
+
+    function Quote.Reveal(id)
+        local view = inbox and inbox.view
+        local seg = selected and isSelectedView(view) and find(view, id)
+        local item = seg and seg.i and view.items[seg.i]
+        if type(item) ~= "table" then return end
+        local now = GetTime()
+        Quote.id, Quote.where, Quote.item, Quote.target = id, here(), seg.i, nil
+        Quote.untilT, Quote.scrollUntil = now + Quote.HOLD, now + 0.5
+        scrollToEnd = false
+        -- Found: the line saying it was being looked for goes.
+        if notice == LOADING then notice, UI.noticeKept = nil, nil end
+        -- Inside a finished turn's row that's closed: the row opens.
+        if type(item.f) == "string" then UI.Work.open[item.f] = true end
+        renderView()
+    end
+
+    function Quote.Go(seg)
+        if type(seg) ~= "table" or not selected then return end
+        -- Clicked again while it's looked for: it still is.
+        if seg.ea and Quote.pending and Quote.pending.id == seg.id and Quote.pending.where == here() then return end
+        Quote.pending, Quote.next = nil, nil
+        if seg.i then return Quote.Reveal(seg.id) end
+        if seg.ea then
+            local _, index = find(inbox and inbox.view, seg.id)
+            Quote.pending = { id = seg.id, where = here(), index = index or 0, tries = 1, at = GetTime() }
+            ns.Link.Send({ t = "more" })
+            return say(LOADING)
+        end
+        if seg.far then return say("The quoted message is further back than the game can show.") end
+        if seg.th then
+            if envById(seg.e) then return UI.OpenThread(seg.th, seg.e) end
+            return say("The quote is from a thread on a machine T3 WoW doesn't see.")
+        end
+        say("The quoted message is no longer in this thread.")
+    end
+
+    -- A view has come while a quote's source was being loaded: there it is, or more is
+    -- loaded (when the last page brought earlier messages: the quote's own message moved
+    -- down), up to a point.
+    function Quote.Resume(view)
+        local p = Quote.pending
+        if not p then return end
+        if p.where ~= here() then
+            Quote.pending = nil
+            if notice == LOADING then notice, UI.noticeKept = nil, nil end
+            return
+        end
+        local seg, index = find(view, p.id)
+        if not seg then
+            Quote.pending = nil
+        elseif seg.i then
+            -- Shown on the next frame, not inside the drawing of this one.
+            Quote.pending, Quote.next = nil, { id = seg.id, where = p.where }
+        elseif seg.ea and index > p.index and p.tries < 8 then
+            p.index, p.tries, p.at = index, p.tries + 1, GetTime()
+            ns.Link.Send({ t = "more" })
+        elseif seg.far or (seg.ea and index > p.index) then
+            Quote.pending = nil
+            say("The quoted message is further back than the game can show.")
+        elseif not seg.ea then
+            Quote.pending = nil
+            say("The quoted message is no longer in this thread.")
+        end
+    end
+
+    local driver = CreateFrame("Frame", nil, messageScroll)
+    driver:SetScript("OnUpdate", function()
+        local now = GetTime()
+        if Quote.said then
+            -- Loading stays said for as long as it's waited for.
+            notice, UI.noticeKept = Quote.said, now + (Quote.said == LOADING and WAIT or 10)
+            Quote.said = nil
+            UI.Refresh(true)
+        end
+        if Quote.measured and now >= Quote.scrollUntil then
+            Quote.measured = false
+            probe:SetText("")
+        end
+        if Quote.pending and now - Quote.pending.at > WAIT then
+            Quote.pending = nil
+            notice, UI.noticeKept = "The quoted message is further back than the game can show.", now + 10
+            UI.Refresh(true)
+        end
+        if Quote.next then
+            local next = Quote.next
+            Quote.next = nil
+            if next.where == here() then Quote.Reveal(next.id) end
+        end
+        if not Quote.id then return end
+        if Quote.where ~= here() then
+            Quote.Clear()
+            return
+        end
+        -- Text is laid out a frame or two after it's set: the place is worked out again
+        -- until it settles. The words sit a little below the top, as in T3.
+        local top, at = messageChild:GetTop(), Quote.target and Quote.target:GetTop()
+        if now < Quote.scrollUntil and top and at then
+            local tall = Quote.measured and probe:GetStringHeight() or 0
+            if Quote.offset then
+                at = at - Quote.offset
+            elseif tall > 0 then
+                -- Down to the line the words start on (the probe holds that line too).
+                local _, size = probe:GetFont()
+                at = at - math.max(0, tall - (tonumber(size) or 14) - 2)
+            else
+                at = at - (Quote.frac or 0) * (Quote.target:GetHeight() or 0)
+            end
+            local room = messageScroll:GetHeight() or 0
+            messageScroll:SetVerticalScroll(math.max(0, math.min(scrollRange(), top - at - math.min(120, room / 3))))
+        end
+        if now >= Quote.untilT then
+            Quote.id, Quote.target = nil, nil
+            renderView()
+        end
+    end)
+    -- Scrolling yourself takes over from the jump.
+    messageScroll:HookScript("OnMouseWheel", function() Quote.scrollUntil = 0 end)
+end
+
 function renderView()
     drawn = {}
     -- The conversation is hidden while the window is resized, and drawn when you let go.
@@ -2987,6 +3370,7 @@ function renderView()
         return
     end
     UI.Work.Take(view)
+    UI.Quote.Resolve(view)
     PullRequests.SetInView(view.prs)
     flowStart(0)
     if view.more then
@@ -3022,7 +3406,9 @@ function renderView()
             elseif lost then
                 Pictures.Lost(fs, item.r == "u")
             elseif not picture then
-                placeMessage(fs, item.x, item.r == "u", item.g)
+                local marks = UI.Quote.MarksFor(i, item)
+                placeMessage(fs, item.x, item.r == "u", item.g, marks)
+                if UI.Quote.On(i) then UI.Quote.Target(fs, marks, item) end
             end
             -- Copying takes the message's text, not its segments: the code with its markdown.
             -- cx is that text as T3 has it, where the view's differs: each model T3 names
@@ -3035,6 +3421,8 @@ function renderView()
             -- A picture that couldn't be loaded has nothing to enlarge or copy; a delegated
             -- task's card isn't a message to copy.
             fs.hit:SetShown(not lost and not rule and not card and not (work and work.still))
+            -- A quote's source, while it's shown, has the hover tint.
+            if UI.Quote.On(i) then fs.hover:Show() end
         end
     end
     if echo and echo.id == selected.id then
@@ -3077,6 +3465,7 @@ function renderView()
     -- settle.
     if stickToBottom then scrollToEnd = false end
     fit(stickToBottom)
+    UI.Quote.Resume(view)
     drawn = { view = view, listed = listed, selected = selected, echo = echo, sent = askState.sent, trust = inbox.trust, uns = inbox.uns }
 end
 
@@ -4312,6 +4701,7 @@ refresh:SetPoint("BOTTOMLEFT", 44, 10)
 local newThread = UI.IconButton(frame, "compose", "New Thread", "New", function()
     local first = inbox and inbox.envs and inbox.envs[1]
     selected = { new = true, env = first and first.id or "" }
+    UI.Quote.Clear()
     UI.History.pending = nil
     ns.Link.Send({ t = "open" })
     UI.Refresh()
@@ -5347,6 +5737,7 @@ end
 function UI.ForgetLogin()
     inbox, selected, echo, notice, stopping, UI.noticeKept = nil, nil, nil, nil, nil, nil
     UI.History.list, UI.History.at, UI.History.pending = {}, 0, nil
+    UI.Quote.Clear()
     copyBox:Hide()
     UI.RowActions.snoozeBox:Hide()
     awaiting = {}
@@ -5370,6 +5761,7 @@ function UI.IsShown() return frame:IsShown() end
 
 function selectThread(envId, threadId)
     selected = { env = envId, id = threadId }
+    UI.Quote.Clear()
     UI.History.Visit(envId, threadId)
     scrollToEnd = true
     copyBox:Hide()
