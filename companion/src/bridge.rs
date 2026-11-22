@@ -2673,6 +2673,14 @@ impl Bridge {
 
     // ---- commands from the game ----
 
+    /// The open thread is about to become thread `id` on `env`: audio from another one stops,
+    /// as its card, the only way to stop it, goes with that thread.
+    fn leave_view(&mut self, env: &str, id: &str) {
+        if self.view.as_ref().is_some_and(|v| v.env != env || v.id != id) {
+            self.stop_audio();
+        }
+    }
+
     /// Stops the thread's audio playing on this PC, if any is.
     fn stop_audio(&mut self) {
         if self.playing.take().is_some() {
@@ -2743,11 +2751,7 @@ impl Bridge {
                     (self.arm_keys)(self.window_open);
                 }
                 "open" => {
-                    // Audio from the thread left behind stops: its card, the only way to stop
-                    // it, goes with the thread.
-                    if self.view.as_ref().is_some_and(|v| v.env != env || v.id != id) {
-                        self.stop_audio();
-                    }
+                    self.leave_view(&env, &id);
                     self.view = (!id.is_empty()).then(|| View { env: env.clone(), id: id.clone(), depth: 1 });
                     self.view_changed();
                 }
@@ -2807,6 +2811,7 @@ impl Bridge {
                     }
                     self.note(if fresh { "Sent in a fresh session." } else { "Sent." });
                     let depth = self.view.as_ref().filter(|v| v.id == id).map(|v| v.depth).unwrap_or(1);
+                    self.leave_view(&env, &id);
                     self.view = Some(View { env: env.clone(), id: id.clone(), depth });
                     self.view_changed();
                 }
@@ -2868,6 +2873,7 @@ impl Bridge {
                     self.note(&format!("Started \"{title}\"."));
                     if let Some(new_id) = new_id {
                         self.remember_started(&new_id);
+                        self.leave_view(&env, &new_id);
                         self.view = Some(View { env: env.clone(), id: new_id.clone(), depth: 1 });
                         started = Some(new_id);
                     }
