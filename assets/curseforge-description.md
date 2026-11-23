@@ -23,6 +23,8 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 - **Commands, skills and machines as you type.** Start a word with / or $ or @ and pick from the list.
 - **Never miss a finished run.** A notification slides in with T3 Code's own sound when a thread finishes, fails or needs you. Click it to open that thread.
 - **See what your agents did and made.** Their work between messages shows as collapsed rows, the files a turn changed are listed under it, and the charts and mockups they show appear as pictures right in the conversation.
+- **Play the video and audio they embed.** A video shows its first frame and opens in your player with a click. An audio clip plays on your PC with a click and stops with another.
+- **Copy in one click.** A copy icon on each message and code block puts it on your clipboard as T3 has it, emoji and all.
 - **Keep an eye on your pull requests.** Each thread shows its linked PR, colored by whether it's open, merged or closed. Click one to open it in your browser.
 
 ## What it does
@@ -33,7 +35,13 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Read and reply.** Pick a thread to read its conversation. Its header shows the branch its checkout is on and lists its pull requests, and a message that names one (#123) shows it in the same colors, to click. Type in the box and press Enter to message it (Shift+Enter for a new line). The box keeps the keyboard so you can type the next message; Escape gives it back to the game. If the thread is busy, your message steers it or queues, as in T3. If T3 refuses a message, it comes back to the box with the reason. During a run, the box's button is **Stop**, and it becomes **Send** as soon as you type or paste something.
 
-**See the work.** What an agent did between its messages (thinking, tool calls, questions you answered) shows as dimmed rows, collapsed as in T3; click one to open it. A finished turn folds under **Worked for**, leaving its last message in view. A turn that changed files ends with a card listing them, as T3 does: the lines added and removed, then each file; click it to copy the list. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it.
+**See the work.** What an agent did between its messages (thinking, tool calls, questions you answered) shows as dimmed rows, collapsed as in T3; click one to open it. A finished turn folds under **Worked for**, leaving its last message in view. A turn that changed files ends with a card listing them, as T3 does: the lines added and removed, then each file; click it to copy the list. Code and tables show in a monospace font (JetBrains Mono, which ships with the addon), with a table's columns lined up. Pages an agent shows (charts, mockups) and images a message embeds from a file appear as pictures, drawn by the companion as T3 draws them; click one to enlarge it. Emoji and marks the game's fonts can't draw show as the nearest ones they can (✅ as ✓, ❌ as ✗, ➜ as →) instead of empty boxes.
+
+**Video and audio.** Video and audio a message embeds from a file on this PC show where T3 shows its players. WoW can't play either, so the companion does it outside the game. A video shows as the frame T3 shows before it plays, with a play mark and its length; click it to open it in your default video player. Audio shows as a small card with its file's name: click it to play it on your PC, at the computer's volume rather than the game's, and click again to stop. Opening another thread or quitting WoW stops it too. Windows plays MP3 and WAV, and other formats as far as your codecs go; a file it can't play opens in your default player instead. On a Mac, audio plays with macOS's own player, which takes MP3, WAV, AIFF, AAC, M4A and FLAC.
+
+**Quotes.** A quote you made in T3 with **Cite in composer** shows in your message as a quote: the quoted words beside a bar, your comment under them. Click it to go to the response it quotes: the conversation scrolls there and the quoted words light up for a moment, as in T3. A quote from another thread opens that thread.
+
+**Copy.** Put the pointer on a message and a copy icon shows at its top right, as in T3, with one on each code block. Click it to put the message on your clipboard as T3 has it (its markdown, emoji included), or the block's code alone. Right-clicking a message offers **Copy** too. To copy part of a message, Shift-click it, or right-click and pick **Select text…**: it opens in a box where Ctrl+C copies what you select (Cmd+C on a Mac). A plain click on a message does nothing.
 
 **Paste images.** Copy an image (a screenshot, an image from a browser) and press Ctrl+V in the box: it shows small above the box, where a click enlarges it, and goes with your next message, in a thread or a new one. Once sent, it shows small under your message, and a click enlarges it there too. Images attached in T3 itself don't show in the game.
 
@@ -45,7 +53,7 @@ T3 WoW puts T3 Code inside your WoW: Forever client, so you can read and reply t
 
 **Answer questions.** When an agent asks you something, the question shows at the end of the conversation. Pick an option, or several if the question allows it, and press **Submit answer**. You can also type your own answer and press Enter; text you type with a picked option goes with it as a note. If an answer doesn't go through, you can send it again.
 
-**Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it. After a reload or a login, a thread still waiting on you gets a notification again, without the sound, unless its notification already ran its time or was clicked.
+**Notifications.** When a thread finishes, fails or needs you, a notification slides in near the top of the screen, along with a line in chat and the same sound T3 Code plays. Click it to open the thread, or right-click to dismiss it. After a reload or a login, a thread still waiting on you gets a notification again, without the sound, unless its notification already ran its time or was clicked. A thread that finished, failed or needed you while the game was closed notifies when you're back, unless you settled it in the meantime.
 
 **Approvals.** You can approve a command or an edit only in T3. By design, T3 doesn't take approvals from anywhere else. A thread waiting for one shows **Approve in T3**, and its **Open in T3** button opens T3 on that thread. **Stop** cancels the run from the game.
 
@@ -114,7 +122,7 @@ Signing stops another addon from drawing commands of its own, but not one writte
 
 - **Full**: everything the window offers, including starting threads with any task, with the access you granted T3 when you signed in. An install from an earlier release keeps this.
 - **No new threads** (where a new install starts): everything but starting threads. Choose Full to start threads from the game.
-- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Scripts, Stop, Settle, Snooze or Wake).
+- **Read-only**: you can read threads, but nothing from the game changes T3 (no messages, starts, answers, pasted images, model or effort changes, Scripts, Stop, Settle, Snooze or Wake). Copying and playing video or audio still work, since they change nothing in T3.
 
 It applies at once. The window greys out what the setting blocks and says why. Install addons you trust, or pick a stricter setting.
 
