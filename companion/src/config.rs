@@ -46,6 +46,17 @@ fn app_support_dir(home: &Path) -> PathBuf {
     home.join("Library").join("Application Support").join("t3wow")
 }
 
+/// The folder the app itself keeps its settings in, also in a test build, where
+/// `config_dir` is a temporary one on macOS. The live tests read the app's sign-in there
+/// (without writing to it) and keep their T3 project's folder in it.
+#[cfg(test)]
+pub fn app_config_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return app_support_dir(&home());
+    #[cfg(not(target_os = "macos"))]
+    config_dir()
+}
+
 pub fn t3_home() -> PathBuf {
     std::env::var_os("T3CODE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".t3"))
 }

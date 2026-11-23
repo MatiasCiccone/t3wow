@@ -189,7 +189,7 @@ impl Live {
     /// Signs in as the companion does, finds (or makes) the test project, and opens the
     /// game's window, so the bridge reads T3 as it would while you play.
     fn start(test: &str) -> Live {
-        let target = crate::t3::target().expect("no T3 to talk to: start T3 Code (or point the companion at one with t3wow.exe login --origin)");
+        let target = signed_in_target();
         let token = target.token.clone().expect("the companion isn't signed in to T3: run t3wow.exe login first");
         let t3 = Arc::new(Recorder { client: McpClient::new(&target.origin, &token), calls: Mutex::new(Vec::new()) });
         let inboxes = Arc::new(Mutex::new(Inboxes::default()));
@@ -435,21 +435,51 @@ fn outcome_of(live: &Live, s: u64) -> Option<Value> {
     live.snapshot()["out"].as_array().into_iter().flatten().find(|o| o["s"] == s).cloned()
 }
 
-/// The test project's id; made in an empty folder of the companion's the first time.
+/// The T3 the app is signed in to, from the app's own config folder, which this reads and
+/// never writes. A test build's sign-in key on a Mac is a temporary one of each test's, so
+/// the app's key file is put in use for this test, when it's there (a missing one isn't made).
+fn signed_in_target() -> crate::t3::Target {
+    let dir = crate::config::app_config_dir();
+    #[cfg(target_os = "macos")]
+    {
+        let key = dir.join(crate::token_key::FILE_NAME);
+        if key.is_file() {
+            crate::token_key::test_support::use_keyring(Arc::new(crate::token_key::Keyring::new(key)));
+        }
+    }
+    let file = dir.join("config.json");
+    let config = match std::fs::read_to_string(&file) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} can't be read: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => crate::config::Config::default(),
+        Err(e) => panic!("{} can't be read: {e}", file.display()),
+    };
+    crate::t3::target_in(&config).expect("no T3 to talk to: start T3 Code (or point the companion at one with t3wow.exe login --origin)")
+}
+
+/// The test project's id; made in an empty folder beside the app's settings the first time.
+/// One left in a temporary folder (a Mac test build's config folder, before) or a folder
+/// that's gone is moved to that folder.
 fn ensure_project(client: &McpClient) -> String {
+    let folder = crate::config::app_config_dir().join("live-tests");
     let mut cursor = 0;
     loop {
         let page = client.call("t3_project_list", json!({ "limit": 100, "cursor": cursor })).expect("project list");
         let found = page["projects"].as_array().into_iter().flatten().find(|p| p["title"] == PROJECT_TITLE && !p["archivedAt"].is_string() && !p["deletedAt"].is_string());
         if let Some(project) = found {
-            return str_of(&project["id"]).to_string();
+            let id = str_of(&project["id"]).to_string();
+            let root = std::path::Path::new(str_of(&project["workspaceRoot"]));
+            if !root.is_dir() || root.starts_with(std::env::temp_dir()) {
+                std::fs::create_dir_all(&folder).expect("the test project's folder");
+                client.call("t3_project_update", json!({ "projectId": id, "workspaceRoot": folder.to_string_lossy() })).expect("couldn't move the test project to its folder");
+                eprintln!("  moved the test project from {} to {}", root.display(), folder.display());
+            }
+            return id;
         }
         match page["nextCursor"].as_u64() {
             Some(next) if next > cursor => cursor = next,
             _ => break,
         }
     }
-    let folder = crate::config::config_dir().join("live-tests");
     let made = client
         .call("t3_project_create", json!({ "title": PROJECT_TITLE, "workspaceRoot": folder.to_string_lossy(), "createWorkspaceRootIfMissing": true }))
         .expect("couldn't create the test project");
@@ -830,7 +860,7 @@ fn tool_changes(name: &str, was: &Value, now: &Value) -> Vec<String> {
 #[test]
 #[ignore = "live: reads the tools of the T3 the companion is signed in to (npm run test:live)"]
 fn live_t3s_tools_take_what_the_companion_was_made_for() {
-    let target = crate::t3::target().expect("no T3 to talk to: start T3 Code");
+    let target = signed_in_target();
     let client = McpClient::new(&target.origin, &target.token.expect("the companion isn't signed in to T3: run t3wow.exe login first"));
     let tools = client.list_tools().expect("T3's tool list");
     let version = client.call("t3_environment_read", json!({})).ok().and_then(|e| e["serverVersion"].as_str().map(str::to_string)).unwrap_or_default();
