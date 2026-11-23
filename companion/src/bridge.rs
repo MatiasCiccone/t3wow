@@ -7,7 +7,7 @@ use crate::clip::{self, Clipped};
 use crate::codec::{decode_cells, Unreadable};
 use crate::config::Trust;
 use crate::made_for::{self, older_t3, OlderT3};
-use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, segment_source, to_lua, wow_segments, wow_text, Font, MODEL_MARK};
+use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, segment_source, to_lua, view_text, wow_segments, wow_text, Font, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::snooze::{civil_from_days, days_from_civil};
@@ -376,8 +376,8 @@ fn without_t3_bootstrap(html: &str) -> String {
 }
 
 /// The images a message embeds from files on this PC (`![alt](C:\path)` or a file:// URL),
-/// with their alt text.
-fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
+/// with their alt text and the embed as written.
+fn embedded_files(markdown: &str) -> Vec<(String, PathBuf, String)> {
     static IMAGE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let image = IMAGE.get_or_init(|| regex::Regex::new(r#"!\[([^\]]*)\]\(\s*<?([^)<>"]+?)>?(?:\s+"[^"]*")?\s*\)"#).unwrap());
     image
@@ -395,7 +395,7 @@ fn embedded_files(markdown: &str) -> Vec<(String, PathBuf)> {
             let path = if !absolute && target.starts_with("file:///") { format!("/{path}") } else { path };
             #[cfg(not(windows))]
             let absolute = absolute || path.starts_with('/');
-            absolute.then(|| (c[1].trim().to_string(), PathBuf::from(path)))
+            absolute.then(|| (c[1].trim().to_string(), PathBuf::from(path), c[0].to_string()))
         })
         .collect()
 }
@@ -1462,6 +1462,32 @@ fn fold_turns(all: &mut Vec<(u64, Value)>, positions: &[u64], run_at: &BTreeMap<
     }
 }
 
+/// A message that is only its images, video or audio is just their pictures, lines or cards
+/// (which alone take the odd places, after their message), with no empty bubble. A New
+/// session or handoff line over it goes over them.
+fn drop_empty_bubbles(all: &mut Vec<(u64, Value)>) {
+    let mut i = 0;
+    while i < all.len() {
+        let (order, item) = &all[i];
+        let empty = order % 2 == 0 && item["r"].is_string() && item["x"].as_str().is_some_and(|x| x.trim().is_empty());
+        let after = order.checked_add(1).filter(|_| empty);
+        let Some(next) = after.and_then(|after| all.iter().position(|(o, _)| *o == after)) else {
+            i += 1;
+            continue;
+        };
+        let (_, bubble) = all.remove(i);
+        let next = if next > i { next - 1 } else { next };
+        for key in ["ns", "ho"] {
+            if !bubble[key].is_null() {
+                all[next].1[key] = bubble[key].clone();
+            }
+        }
+    }
+    // A fold whose only member was such a bubble folds nothing now.
+    let folded: HashSet<String> = all.iter().filter_map(|(_, item)| item["f"].as_str().map(str::to_string)).collect();
+    all.retain(|(_, item)| item["w"]["fold"] != 1 || item["w"]["l"].as_str().is_some_and(|name| folded.contains(name)));
+}
+
 /// A row opened in the game: all it did, in the pieces a message with code is drawn from.
 struct Detail {
     env: String,
@@ -2097,6 +2123,9 @@ struct ViewRead {
     /// Each built item's position, and the images its messages embed from files.
     positions: Vec<u64>,
     embedded: Vec<Picture>,
+    /// Whether the game could show pictures when the view was built: its text leaves out
+    /// the images shown as pictures, so its pictures go by the same answer.
+    pictures_ok: bool,
     /// The pictures the view shows, and those drawn this poll.
     pictures: Vec<Picture>,
     drawing: Vec<Drawing>,
@@ -4457,6 +4486,7 @@ impl Bridge {
                 built: None,
                 positions: Vec::new(),
                 embedded: Vec::new(),
+                pictures_ok: false,
                 pictures: Vec::new(),
                 drawing: Vec::new(),
                 scan_pages: 0,
@@ -4673,10 +4703,39 @@ impl Bridge {
         let mut embedded: Vec<Picture> = Vec::new();
         let mut chars = 0;
         let mut capped = false;
+        let pictures_ok = self.images_ok && self.painter.is_some();
+        // Without a scan, nothing follows a message (`plan_pictures` doesn't run).
+        let scans = self.scans();
         for item in messages.iter().rev().take(want) {
             let kind = str_of(&item["type"]);
             if kind != "user_message" && kind != "assistant_message" {
                 continue;
+            }
+            let role = if kind == "user_message" { "u" } else { "a" };
+            let position = item["position"].as_u64().unwrap_or(0);
+            // The files it embeds from this PC, which follow it as pictures, a video's frame
+            // or line, or an audio card (`plan_pictures`). T3 shows their players where they
+            // are, with no alt text, so its text leaves those out; an image the game can't
+            // show (or a file that isn't here) stays the "[alt]" line it was.
+            let mut files: Vec<Picture> = Vec::new();
+            let mut shown_files: Vec<String> = Vec::new();
+            for (alt, path, embed) in embedded_files(str_of(&item["text"])) {
+                let Some(key) = file_key(&path) else { continue };
+                let named = |kind: &str| if alt.is_empty() { kind.to_string() } else { format!("{kind}: {alt}") };
+                let media = media_kind(&path);
+                if scans && (pictures_ok || media.is_some()) {
+                    shown_files.push(embed);
+                }
+                let (key, source, label) = match media {
+                    Some(MediaKind::Video) => (format!("video:{key}"), Source::Video { path }, named("Video")),
+                    // T3 names audio by its file.
+                    Some(MediaKind::Audio) => {
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        (format!("audio:{key}"), Source::Audio { path, name: name.clone() }, format!("Audio: {name}"))
+                    }
+                    None => (key, Source::File { path }, named("Image")),
+                };
+                files.push(Picture { key, source, label, order: position * 2 + 1, role });
             }
             let truncated = item["textTruncated"] == true;
             // Your quotes of the agent's responses (T3's Cite in composer) each stand on a
@@ -4686,9 +4745,9 @@ impl Bridge {
             let cut_here = !cites.is_empty() && raw.chars().count() > VIEW_TEXT_CHARS;
             let raw = if cites.is_empty() { raw } else { cites::capped(&raw, VIEW_TEXT_CHARS) };
             let more_mark = if truncated && !cut_here { "\n…" } else { "" };
-            let text = quotes_in_text(&wow_text(&raw, VIEW_TEXT_CHARS), &cites) + more_mark;
+            let text = quotes_in_text(&view_text(&raw, VIEW_TEXT_CHARS, &shown_files), &cites) + more_mark;
             let mut length = text.encode_utf16().count();
-            let mut shown = json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text });
+            let mut shown = json!({ "r": role, "x": text });
             // Where it is in the thread: what the game's copy icon names it by.
             if let Some(position) = item["position"].as_u64() {
                 shown["p"] = json!(position);
@@ -4698,7 +4757,7 @@ impl Bridge {
             // A message with code, a table or a quote also comes cut into segments, which this
             // addon draws in its own fonts. The copy box reads the text; an addon older than
             // quotes leaves a quote out of the segments (it shows after a /reload with this one).
-            let mut segments = wow_segments(&raw, VIEW_TEXT_CHARS);
+            let mut segments = wow_segments(&raw, VIEW_TEXT_CHARS, &shown_files);
             for seg in segments.iter_mut().filter(|s| s["q"].is_u64()) {
                 *seg = cites.get(seg["q"].as_u64().unwrap_or(0) as usize).map_or(Value::Null, cites::segment);
             }
@@ -4745,24 +4804,8 @@ impl Bridge {
             }
             chars += length;
             items.insert(0, shown);
-            let position = item["position"].as_u64().unwrap_or(0);
             positions.insert(0, position);
-            let role = if kind == "user_message" { "u" } else { "a" };
-            for (alt, path) in embedded_files(str_of(&item["text"])).into_iter().rev() {
-                if let Some(key) = file_key(&path) {
-                    let named = |kind: &str| if alt.is_empty() { kind.to_string() } else { format!("{kind}: {alt}") };
-                    let (key, source, label) = match media_kind(&path) {
-                        Some(MediaKind::Video) => (format!("video:{key}"), Source::Video { path }, named("Video")),
-                        // T3 names audio by its file.
-                        Some(MediaKind::Audio) => {
-                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            (format!("audio:{key}"), Source::Audio { path, name: name.clone() }, format!("Audio: {name}"))
-                        }
-                        None => (key, Source::File { path }, named("Image")),
-                    };
-                    embedded.insert(0, Picture { key, source, label, order: position * 2 + 1, role });
-                }
-            }
+            embedded.splice(0..0, files);
             if kind == "user_message" {
                 for key in self.sent_pictures(&env, &id, item).into_iter().rev() {
                     embedded.insert(0, Picture { key, source: Source::Sent, label: "Pasted image".to_string(), order: position * 2 + 1, role });
@@ -4813,6 +4856,7 @@ impl Bridge {
         read.built = Some(built);
         read.positions = positions;
         read.embedded = embedded;
+        read.pictures_ok = pictures_ok;
         if let Some(run) = self.poll_run.as_mut() {
             run.reading = Some(read);
         }
@@ -4941,7 +4985,7 @@ impl Bridge {
     /// images its messages embed. Those not in an image slot yet are drawn now, a few a
     /// poll; the rest wait for the next one.
     fn plan_pictures(&mut self) {
-        let pictures_ok = self.images_ok && self.painter.is_some();
+        let pictures_ok = self.view_read().is_some_and(|read| read.pictures_ok);
         let found = self.scan.as_ref().filter(|_| pictures_ok).map(|c| c.pages.clone()).unwrap_or_default();
         let late = self.out_of_time();
         let now = self.now_ms();
@@ -5157,7 +5201,7 @@ impl Bridge {
         let pictures = std::mem::take(&mut read.pictures);
         read.drawing.clear();
         let View { env, id, .. } = read.view.clone();
-        let pictures_ok = self.images_ok && self.painter.is_some();
+        let pictures_ok = read.pictures_ok;
         let mut again = false;
         let mut placed: Vec<(u64, Value)> = Vec::new();
         self.media.clear();
@@ -5255,12 +5299,11 @@ impl Bridge {
             let mut all: Vec<(u64, Value)> = read.positions.iter().map(|p| p * 2).zip(items).collect();
             all.extend(placed);
             all.sort_by_key(|(order, _)| *order);
-            // A message that is only its images is just the pictures, with no empty bubble.
-            let pictures: HashSet<u64> = all.iter().filter(|(_, item)| item["im"].is_object() || item["lost"] == 1).map(|(order, _)| *order).collect();
-            all.retain(|(order, item)| !(item["r"] == "u" && str_of(&item["x"]).trim().is_empty() && pictures.contains(&(order + 1))));
             if work_ok {
                 fold_turns(&mut all, &read.positions, &run_at, &read.runs);
             }
+            // Once turns are folded around it (it is still the turn's last message there).
+            drop_empty_bubbles(&mut all);
             built["items"] = json!(all.into_iter().map(|(_, item)| item).collect::<Vec<_>>());
         }
         self.name_links();
