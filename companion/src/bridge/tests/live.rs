@@ -190,7 +190,7 @@ impl Live {
     /// opens the game's window, so the bridge reads T3 as it would while you play.
     fn start(test: &str) -> Live {
         let target = signed_in_target();
-        let token = target.token.clone().expect("the companion isn't signed in to T3: run t3wow login first (t3wow.exe login on Windows)");
+        let token = target.token.clone().expect("the companion isn't signed in to T3: choose Sign in to T3 in its menu (or run t3wow.exe login) first");
         let t3 = Arc::new(Recorder { client: McpClient::new(&target.origin, &token), calls: Mutex::new(Vec::new()) });
         let inboxes = Arc::new(Mutex::new(Inboxes::default()));
         let mut bridge = Bridge::new(t3.clone(), Box::new(RecordingSlots(Arc::clone(&inboxes))), None, Box::new(|line| eprintln!("  bridge: {line}")), Box::new(now_ms));
@@ -450,12 +450,13 @@ fn signed_in_target() -> crate::t3::Target {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => crate::config::Config::default(),
         Err(e) => panic!("{} can't be read: {e}", file.display()),
     };
-    crate::t3::target_in(&config).expect("no T3 to talk to: start T3 Code (or point the companion at one with t3wow.exe login --origin)")
+    crate::t3::target_in(&config).expect("no T3 to talk to: start T3 Code (or point the companion at one from its T3 server menu)")
 }
 
 /// The test project's id; made in an empty folder beside the app's settings the first time.
-/// One left in a Mac test build's temporary config folder (where earlier runs made it) is
-/// moved to that folder.
+/// One that earlier runs on a Mac made in a test build's temporary config folder
+/// (`$TMPDIR/t3wow-test-config-<pid>/live-tests`) is moved to that folder; when T3 refuses
+/// (it runs on another machine, say), it's used as it is.
 fn ensure_project(client: &McpClient) -> String {
     let folder = crate::config::app_config_dir().join("live-tests");
     let mut cursor = 0;
@@ -465,11 +466,13 @@ fn ensure_project(client: &McpClient) -> String {
         if let Some(project) = found {
             let id = str_of(&project["id"]).to_string();
             let root = std::path::Path::new(str_of(&project["workspaceRoot"]));
-            let in_test_config = root.strip_prefix(std::env::temp_dir()).ok().and_then(|rest| rest.iter().next()).is_some_and(|first| first.to_string_lossy().starts_with("t3wow-test-config-"));
-            if in_test_config {
-                std::fs::create_dir_all(&folder).expect("the test project's folder");
-                client.call("t3_project_update", json!({ "projectId": id, "workspaceRoot": folder.to_string_lossy() })).expect("couldn't move the test project to its folder");
-                eprintln!("  moved the test project from {} to {}", root.display(), folder.display());
+            let parts: Vec<String> = root.strip_prefix(std::env::temp_dir()).map(|rest| rest.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default();
+            let made_in_temp = matches!(parts.as_slice(), [config, leaf] if leaf == "live-tests" && config.strip_prefix("t3wow-test-config-").is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())));
+            if made_in_temp && std::fs::create_dir_all(&folder).is_ok() {
+                match client.call("t3_project_update", json!({ "projectId": id, "workspaceRoot": folder.to_string_lossy() })) {
+                    Ok(_) => eprintln!("  moved the test project from {} to {}", root.display(), folder.display()),
+                    Err(e) => eprintln!("  couldn't move the test project from {}: {e:?}", root.display()),
+                }
             }
             return id;
         }
@@ -859,7 +862,7 @@ fn tool_changes(name: &str, was: &Value, now: &Value) -> Vec<String> {
 #[ignore = "live: reads the tools of the T3 the companion is signed in to (npm run test:live)"]
 fn live_t3s_tools_take_what_the_companion_was_made_for() {
     let target = signed_in_target();
-    let client = McpClient::new(&target.origin, &target.token.expect("the companion isn't signed in to T3: run t3wow login first (t3wow.exe login on Windows)"));
+    let client = McpClient::new(&target.origin, &target.token.expect("the companion isn't signed in to T3: choose Sign in to T3 in its menu (or run t3wow.exe login) first"));
     let tools = client.list_tools().expect("T3's tool list");
     let version = client.call("t3_environment_read", json!({})).ok().and_then(|e| e["serverVersion"].as_str().map(str::to_string)).unwrap_or_default();
     let mut now = serde_json::Map::new();
