@@ -134,7 +134,8 @@ mod mac {
         }
     }
 
-    /// macOS's `afplay`, one at a time: MP3, WAV, AIFF, AAC, M4A, FLAC and Ogg Opus (not WebM).
+    /// macOS's `afplay`, one at a time: it plays what `afplay` takes, and one it refuses as it
+    /// starts is an error.
     pub struct Afplay {
         pub child: Option<Child>,
     }
