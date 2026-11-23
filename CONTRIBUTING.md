@@ -24,7 +24,7 @@ Some checks need more than a checkout:
 
 - One concern per pull request.
 - Pull requests merge by rebase only, so each commit lands on `main` as it is.
-- Commit subjects follow the repository's style: `feat: …`, `fix: …`, `docs: …`, `ci: …`, `build: …`, `chore: …` (`git log --oneline` shows plenty). The `feat` and `fix` subjects, without their prefix, become the release notes, so write them for the people who use T3 WoW: what changed for them. The other types stay out of the notes.
+- Commit subjects follow the repository's style: `feat: …`, `fix: …`, `docs: …`, `ci: …`, `build: …`, `chore: …` (`git log --oneline` shows plenty). The `feat` and `fix` subjects, without their prefix, become the release notes, so write them for the people who use T3 WoW: what changed for them. The other types stay out of the notes. A `feat` may also update `assets/curseforge-description.md`, the CurseForge project page's text; if it doesn't, the release does, and its checks fail until it does or the release commit says the page stays as it is (see **Releasing** in the README).
 - CI must pass, and the code owner reviews ([.github/CODEOWNERS](.github/CODEOWNERS)).
 
 ## Never commit secrets
