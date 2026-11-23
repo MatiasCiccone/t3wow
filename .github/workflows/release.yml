@@ -11,7 +11,10 @@
 # scripts/gen-signing-key.mjs), whose public half is in companion/src/updater/release_key.rs. Until both
 # are set up, releases go out unsigned with a warning (companions with the placeholder key
 # accept that); with only one of the two, the release fails. The addon zip is also uploaded to the
-# CurseForge project with the CURSEFORGE_TOKEN secret (a CurseForge API token).
+# CurseForge project with the CURSEFORGE_TOKEN secret (a CurseForge API token). The project page's
+# text isn't: it's pasted by hand from assets/curseforge-description.md, so npm test fails a
+# release with feat commits that doesn't change that file (scripts/curseforge-description.mjs),
+# and publish ends with a notice when it changed.
 # t3wow.exe gets an Authenticode signature (SSL.com eSigner) once the ESIGNER_* secrets are set;
 # without them it goes out unsigned with a warning. See docs/release-signing.md.
 # Then winget: a job sends the new version to microsoft/winget-pkgs (package MatiasCiccone.T3WoW)
@@ -171,7 +174,10 @@ jobs:
       # 'true' or 'false': secrets can't appear in a step's if.
       MAC_CERT: ${{ secrets.T3WOW_MACOS_CERT_P12 != '' }}
     steps:
+      # The whole history and the tags, for the CurseForge description check in npm test.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -313,7 +319,7 @@ jobs:
       - name: Release notes (feat and fix subjects since the previous tag)
         shell: bash
         run: |
-          previous=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          previous=$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           range=${previous:+$previous..}$GITHUB_REF_NAME
           changes=$(git log --no-merges --format='%s' "$range" | sed -nE 's/^(feat|fix)(\([^)]*\))?!?: *(.+)$/- \3/p')
           {
@@ -371,6 +377,13 @@ jobs:
             file = Get-Item "release/T3WoW-${{ github.ref_name }}.zip"
           }
           "Uploaded to CurseForge as file $($result.id), for WoW Forever $($version.name)."
+
+      # The project page's text (assets/curseforge-description.md) and avatar aren't part of
+      # the upload: when this release changed one, a notice on the run says to copy it by hand.
+      - name: What to copy into CurseForge by hand
+        # Advice only: it never keeps the winget job, which needs publish, from running.
+        continue-on-error: true
+        run: node scripts/curseforge-description.mjs notice "$GITHUB_REF_NAME"
 
   # The new version on winget: a pull request to microsoft/winget-pkgs that copies the
   # previous version's manifests (portable, the t3wow command, RequireExplicitUpgrade) with

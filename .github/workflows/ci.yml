@@ -2,7 +2,7 @@
 # tests it on macOS (test-macos), both on GitHub-hosted runners. The built t3wow.exe is attached
 # to the run as an artifact. Each job installs the stable Rust toolchain, and rust-cache keeps
 # companion/target between runs. The tests that need the screen, a live T3 or GitHub are
-# #[ignore]d.
+# #[ignore]d. Both check out the whole history, for the CurseForge description check in npm test.
 # Actions are pinned to commit SHAs (Dependabot keeps them current).
 name: CI
 
@@ -22,7 +22,11 @@ jobs:
   test-windows:
     runs-on: windows-latest
     steps:
+      # The whole history and the tags: npm test checks that a release with features updates
+      # the CurseForge description (scripts/curseforge-description.mjs).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -58,7 +62,11 @@ jobs:
   test-macos:
     runs-on: macos-latest
     steps:
+      # The whole history and the tags: npm test checks that a release with features updates
+      # the CurseForge description (scripts/curseforge-description.mjs).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
