@@ -3562,9 +3562,27 @@ fn an_image_a_message_embeds_from_a_file_follows_that_message() {
     let items = view_items(&rig);
     let texts: Vec<String> = items.iter().map(|i| i["x"].as_str().unwrap_or("").to_string()).collect();
     assert_eq!(texts.len(), 4, "{texts:?}");
-    assert!(texts[1].starts_with("Saved it:"));
+    // The picture stands where T3 shows the image, with no line of its alt text as well; the
+    // one whose file is gone keeps that line, as nothing else shows it.
+    assert_eq!(texts[1], "Saved it:
+
+[gone]");
     assert_eq!(items[2], json!({ "r": "a", "x": "[Image: the chart]", "im": { "f": 1, "w": 5, "h": 2 } }));
     assert_eq!(texts[3], "thanks");
+
+    // A game that can't show pictures shows the image as the line it always did.
+    let mut rig = Rig::new(35_100_000);
+    rig.bridge.set_painter(Some(Box::new(FakePainter::default())));
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["chart it", &text, "thanks"]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert_eq!(items[1]["x"], "Saved it:
+
+[the chart]
+
+[gone]");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3632,6 +3650,8 @@ fn a_video_shows_as_its_frame_and_audio_as_a_card_where_t3_plays_them() {
     assert_eq!(painter.calls(), vec![format!("poster {}", video.display())], "the video's frame, not the audio");
     let items = view_items(&rig);
     assert_eq!(items.len(), 4, "{items:?}");
+    // Their players stand where T3 shows them, with no line of alt text ("[the demo]", "[]").
+    assert_eq!(items[1]["x"], "Recorded it:");
     let (video_key, audio_key) = (play_key(&items, "Video"), play_key(&items, "Audio"));
     assert_eq!(items[2], json!({ "r": "a", "x": "[Video: the demo]", "im": { "f": 1, "w": 6, "h": 4 }, "pl": { "k": video_key, "v": 1 } }));
     assert_eq!(items[3], json!({ "r": "a", "x": "[Audio: tone.mp3]", "pl": { "k": audio_key, "n": "tone.mp3" } }), "named by its file, as T3 does");
@@ -3645,8 +3665,46 @@ fn a_video_shows_as_its_frame_and_audio_as_a_card_where_t3_plays_them() {
     assert!(painter.calls().is_empty());
     let items = view_items(&rig);
     assert_eq!(items.len(), 4, "{items:?}");
+    assert_eq!(items[1]["x"], "Recorded it:");
     assert_eq!(items[2], json!({ "r": "a", "x": "[Video: the demo]", "pl": { "k": play_key(&items, "Video"), "v": 1 } }));
     assert_eq!(items[3]["x"], "[Audio: tone.mp3]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reply_that_is_only_an_embedded_file_is_just_its_player() {
+    let dir = std::env::temp_dir().join(format!("t3wow-media-only-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let chime = dir.join("chime.wav");
+    std::fs::write(&chime, b"wav bytes").unwrap();
+    let mut rig = Rig::new(35_650_000);
+    let text = format!("![chime]({})", chime.display());
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["play it", &text]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "dc": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 2, "no empty message over the card: {items:?}");
+    assert_eq!(items[1]["x"], "[Audio: chime.wav]");
+
+    // A message of yours that started a fresh session: its New session line goes over the card.
+    let mut rig = Rig::new(35_660_000);
+    let mut thread = conversation(&["go", "ok", &text]);
+    thread[2]["freshContext"] = json!(true);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), thread);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "wk": 1, "dc": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert_eq!((&items[2]["x"], &items[2]["ns"], &items[2]["r"]), (&json!("[Audio: chime.wav]"), &json!(1), &json!("u")));
+
+    // An addon that scans nothing gets no card, so the message keeps its line.
+    let mut rig = Rig::new(35_670_000);
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["play it", &text]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[1]["x"], "[chime]");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3881,9 +3939,9 @@ fn pages_and_embedded_files_are_found_in_t3s_text() {
     assert_eq!(
         found,
         vec![
-            ("one".to_string(), PathBuf::from(r"C:\a b\one.png")),
-            (String::new(), PathBuf::from("D:/two x.jpg")),
-            ("code".to_string(), PathBuf::from("C:/c.png")),
+            ("one".to_string(), PathBuf::from(r"C:\a b\one.png"), r"![one](C:\a b\one.png)".to_string()),
+            (String::new(), PathBuf::from("D:/two x.jpg"), r#"![](file:///D:/two%20x.jpg "t")"#.to_string()),
+            ("code".to_string(), PathBuf::from("C:/c.png"), "![code](C:/c.png)".to_string()),
         ]
     );
 }
@@ -3892,6 +3950,7 @@ fn pages_and_embedded_files_are_found_in_t3s_text() {
 #[test]
 fn off_windows_embedded_files_are_found_by_their_absolute_paths() {
     let found = embedded_files(r#"![one](/Users/you/one.png) ![](file:///Users/you/two%20x.jpg) ![rel](pics/z.png) ![host](file://box/three.png)"#);
+    let found: Vec<(String, PathBuf)> = found.into_iter().map(|(alt, path, _)| (alt, path)).collect();
     assert_eq!(found, vec![("one".to_string(), PathBuf::from("/Users/you/one.png")), (String::new(), PathBuf::from("/Users/you/two x.jpg"))]);
 }
 
@@ -5317,6 +5376,28 @@ fn a_finished_turn_folds_under_worked_for_with_its_last_message_outside() {
     assert_eq!(items[1]["w"]["fold"], 1);
     assert_eq!([items[2]["f"].clone(), items[3]["f"].clone(), items[4]["f"].clone()], [name.clone(), name.clone(), name]);
     assert!(items[0]["f"].is_null() && items[5]["f"].is_null(), "{items:?}");
+}
+
+#[test]
+fn a_turn_whose_last_message_is_only_an_embedded_file_folds_what_came_before_it() {
+    let dir = std::env::temp_dir().join(format!("t3wow-fold-media-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let chime = dir.join("chime.wav");
+    std::fs::write(&chime, b"wav bytes").unwrap();
+    let mut turn = a_turn();
+    turn[4] = in_run(said(4, "assistant_message", &format!("![chime]({})", chime.display())), "r1");
+    let rig = fold_rig(60_100_000, "completed", turn, json!([run_of("r1", "completed")]));
+    let items = view_items(&rig);
+    assert_eq!(texts(&rig), ["go", "Worked for 2m 47s", "thinking it over", "working on it", "Read 1 file", "[Audio: chime.wav]"]);
+    assert_eq!(items[3]["f"], items[1]["w"]["l"], "\"working on it\" is folded: {items:?}");
+    assert!(items[5]["f"].is_null() && items[5]["pl"].is_object(), "{items:?}");
+
+    // Only such a message before the last: nothing is left to fold, so no row.
+    let embed = format!("![chime]({})", chime.display());
+    let turn = vec![said(0, "user_message", "go"), in_run(said(1, "assistant_message", &embed), "r1"), in_run(said(2, "assistant_message", "all done"), "r1")];
+    let rig = fold_rig(60_200_000, "completed", turn, json!([run_of("r1", "completed")]));
+    assert_eq!(texts(&rig), ["go", "[Audio: chime.wav]", "all done"]);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A checkpoint item as T3's read gives it: the turn's files as pretty-printed JSON.

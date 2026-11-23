@@ -274,6 +274,7 @@ struct Patterns {
     span: Regex,
     thread: Regex,
     markup: Regex,
+    bare: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -293,6 +294,8 @@ fn patterns() -> &'static Patterns {
         span: Regex::new(r"\x03(\d+)\x03").unwrap(),
         // What draws nothing in game text: color codes and the companion's marks.
         markup: Regex::new(r"\|c[0-9a-fA-F]{8}|\|r|[\x01-\x05]").unwrap(),
+        // A line of nothing but list, quote or emphasis marks.
+        bare: Regex::new(r"^[\s>]*(?:[-*+]|\d+[.)])?[\s*_]*$").unwrap(),
         // A T3 thread link: <t3-thread://v2/{env}/{thread}> as T3's tools write it, or bare
         // (its last character not punctuation that ends a sentence).
         thread: Regex::new(r#"<t3-thread://v2/([^/\s<>]+)/([^\s<>]+)>|t3-thread://v2/([^/\s<>]+)/([^\s<>()\[\]]*[^\s<>()\[\].,;:!?'"])"#).unwrap(),
@@ -301,9 +304,15 @@ fn patterns() -> &'static Patterns {
 
 /// One line of prose (its pipes already doubled) as WoW markup: links, emphasis and bullets
 /// simplified, a heading in gold. Inline code goes through `code` ("$1" is the code).
-fn prose_line(line: &str, code: &str) -> String {
+fn prose_line(line: &str, code: &str, shown: &[String]) -> String {
     let p = patterns();
-    let l = inline(line, code);
+    // A line that was only embeds shown after the message (a list of them, say) goes, its
+    // bullet or emphasis marks with it.
+    let rest = shown.iter().fold(line.to_string(), |rest, s| rest.replace(s.as_str(), ""));
+    if rest != line && p.bare.is_match(&rest) {
+        return String::new();
+    }
+    let l = inline(line, code, shown);
     let l = p.bullet.replacen(&l, 1, "$1• ").into_owned();
     match p.heading.captures(&l) {
         Some(heading) => color_runs(&heading[1], HEAD),
@@ -312,15 +321,24 @@ fn prose_line(line: &str, code: &str) -> String {
 }
 
 /// Links and emphasis simplified, inline code through `code` ("$1" is the code). Code is
-/// set aside first (as \u{3}n\u{3}), so `__init__` or a link in it stays as written.
-fn inline(line: &str, code: &str) -> String {
+/// set aside first (as \u{3}n\u{3}), so `__init__` or a link in it stays as written. An
+/// image is its alt text in brackets, or nothing when it is one of the embeds in `shown`
+/// (as written, pipes doubled): those show after the message, where T3 shows them.
+fn inline(line: &str, code: &str, shown: &[String]) -> String {
     let p = patterns();
     let mut spans: Vec<String> = Vec::new();
     let l = p.code.replace_all(line, |c: &regex::Captures| {
         spans.push(c[1].to_string());
         format!("\u{3}{}\u{3}", spans.len() - 1)
     });
-    let l = p.image.replace_all(&l, "[$1]");
+    let l = p.image.replace_all(&l, |c: &regex::Captures| {
+        // As written: with the code in its alt text put back.
+        let written = p.span.replace_all(&c[0], |s: &regex::Captures| match s[1].parse::<usize>().ok().and_then(|n| spans.get(n)) {
+            Some(span) => format!("`{span}`"),
+            None => s[0].to_string(),
+        });
+        if shown.iter().any(|s| *s == written) { String::new() } else { format!("[{}]", &c[1]) }
+    });
     let l = p.link.replace_all(&l, "$1");
     let l = p.thread.replace_all(&l, |c: &regex::Captures| {
         let (env, thread) = match (c.get(1), c.get(2)) {
@@ -361,7 +379,19 @@ fn color_runs(text: &str, color: &str) -> String {
 /// Markdown to WoW FontString markup, for the game to draw: as `wow_markup`, with the marks
 /// and emoji its fonts can't draw put as ones they can, or left out (`drawable`).
 pub fn wow_text(markdown: &str, max_length: usize) -> String {
-    prose_drawable(&wow_markup(markdown, max_length))
+    view_text(markdown, max_length, &[])
+}
+
+/// `wow_text` less the embeds in `shown` (`![alt](path)` as the message writes them): the
+/// files the view shows after the message as a picture, a video's frame or an audio card.
+/// T3 shows its player in their place and no alt text, so no "[alt]" line is left for them.
+pub fn view_text(markdown: &str, max_length: usize, shown: &[String]) -> String {
+    prose_drawable(&wow_markup(markdown, max_length, &doubled(shown)))
+}
+
+/// Embeds as a prose line has them: its pipes doubled.
+fn doubled(shown: &[String]) -> Vec<String> {
+    shown.iter().map(|s| s.replace('|', "||")).collect()
 }
 
 /// Prose made drawable (`drawable` in the text font), without the empty lines an emoji
@@ -374,7 +404,7 @@ fn prose_drawable(text: &str) -> String {
 /// Markdown to WoW FontString markup, every character as T3 has it (`wow_text` then makes it
 /// drawable). `|` starts an escape sequence in WoW text, so literal pipes are doubled before
 /// any color codes are added.
-fn wow_markup(markdown: &str, max_length: usize) -> String {
+fn wow_markup(markdown: &str, max_length: usize, shown: &[String]) -> String {
     let p = patterns();
     let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([LINK_MARK, MODEL_MARK], "");
     if text.chars().count() > max_length {
@@ -392,7 +422,7 @@ fn wow_markup(markdown: &str, max_length: usize) -> String {
             lines.push(format!("{CODE}{line}|r"));
             continue;
         }
-        lines.push(prose_line(line, &format!("{CODE}$1|r")));
+        lines.push(prose_line(line, &format!("{CODE}$1|r"), shown));
     }
     p.gaps.replace_all(&lines.join("\n"), "\n\n").trim().to_string()
 }
@@ -512,7 +542,7 @@ pub fn name_model_refs(text: &str, name: impl Fn(&str, &str) -> Option<String>) 
 }
 
 /// A table row's cells: pipes split them unless escaped (`\|`); the outer ones are optional.
-fn table_cells(line: &str) -> Vec<String> {
+fn table_cells(line: &str, shown: &[String]) -> Vec<String> {
     let line = line.trim();
     let line = line.strip_prefix('|').unwrap_or(line);
     let line = if line.ends_with('|') && !line.ends_with("\\|") { &line[..line.len() - 1] } else { line };
@@ -528,25 +558,27 @@ fn table_cells(line: &str) -> Vec<String> {
             c => cells.last_mut().unwrap().push(c),
         }
     }
-    cells.iter().map(|cell| cell_text(cell)).collect()
+    cells.iter().map(|cell| cell_text(cell, shown)).collect()
 }
 
-/// A cell as plain text, not game markup: the addon pads it, then escapes it.
-fn cell_text(cell: &str) -> String {
+/// A cell as plain text, not game markup: the addon pads it, then escapes it. The embeds in
+/// `shown` (as written) are left out, as in prose.
+fn cell_text(cell: &str, shown: &[String]) -> String {
     let p = patterns();
-    inline(&p.br.replace_all(cell, " "), "$1").replace('\t', " ").trim().to_string()
+    inline(&p.br.replace_all(cell, " "), "$1", shown).replace('\t', " ").trim().to_string()
 }
 
 /// The table that starts at `lines[at]`, if one does (a header row, then a delimiter row
 /// with as many cells), and the line after it. Its body runs to the first line without a
-/// pipe; a row's missing cells are empty and its extra ones dropped.
-fn table_at(lines: &[&str], at: usize) -> Option<(Value, usize)> {
+/// pipe; a row's missing cells are empty and its extra ones dropped. Its cells leave out the
+/// embeds in `shown`.
+fn table_at(lines: &[&str], at: usize, shown: &[String]) -> Option<(Value, usize)> {
     let p = patterns();
     let (head, delimiter) = (lines[at], *lines.get(at + 1)?);
     if !head.contains('|') || !delimiter.contains('|') || !p.delimiter.is_match(delimiter) || p.fence.is_match(head) {
         return None;
     }
-    let header = table_cells(head);
+    let header = table_cells(head, shown);
     let marks: Vec<&str> = delimiter.trim().trim_start_matches('|').trim_end_matches('|').split('|').map(str::trim).collect();
     if marks.len() != header.len() {
         return None;
@@ -562,7 +594,7 @@ fn table_at(lines: &[&str], at: usize) -> Option<(Value, usize)> {
     let mut rows = vec![header];
     let mut end = at + 2;
     while end < lines.len() && lines[end].contains('|') && !p.fence.is_match(lines[end]) {
-        let mut row = table_cells(lines[end]);
+        let mut row = table_cells(lines[end], shown);
         row.resize(marks.len(), String::new());
         rows.push(row);
         end += 1;
@@ -578,9 +610,11 @@ fn table_at(lines: &[&str], at: usize) -> Option<(Value, usize)> {
 /// inline code between CODE_OPEN and CODE_CLOSE), code blocks ({ c = code }) and tables
 /// ({ t = rows, the header first; a = each column's alignment, "l", "c" or "r", when one
 /// isn't "l" }). Code and cells are plain text, not markup. Empty when the message has no
-/// code and no table: its `wow_text` draws it the same.
-pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
+/// code and no table: its `view_text` draws it the same. The embeds in `shown` are left out,
+/// as there.
+pub fn wow_segments(markdown: &str, max_length: usize, shown: &[String]) -> Vec<Value> {
     let p = patterns();
+    let prose_shown = doubled(shown);
     let text = segment_source(markdown, max_length);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut segments = Vec::new();
@@ -618,7 +652,7 @@ pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
             }
             continue;
         }
-        if let Some((table, end)) = table_at(&lines, i) {
+        if let Some((table, end)) = table_at(&lines, i, shown) {
             flush(&mut prose, &mut segments);
             special = true;
             segments.push(table);
@@ -634,7 +668,7 @@ pub fn wow_segments(markdown: &str, max_length: usize) -> Vec<Value> {
             i += 1;
             continue;
         }
-        let l = prose_line(&line.replace('|', "||"), &format!("{CODE_OPEN}$1{CODE_CLOSE}"));
+        let l = prose_line(&line.replace('|', "||"), &format!("{CODE_OPEN}$1{CODE_CLOSE}"), &prose_shown);
         special |= l.contains(CODE_OPEN);
         prose.push(l);
         i += 1;
@@ -712,7 +746,7 @@ pub fn code_blocks(markdown: &str) -> Vec<(usize, String)> {
         }
         // A table's rows can't hold a fence (they end at one), so they are passed over as
         // `wow_segments` takes them.
-        match table_at(&lines, i) {
+        match table_at(&lines, i, &[]) {
             Some((_, end)) => i = end,
             None => i += 1,
         }
@@ -740,11 +774,34 @@ mod tests {
     }
 
     #[test]
+    fn an_embed_the_view_shows_leaves_no_alt_text_and_code_keeps_it() {
+        let shown = vec![r"![chime](C:\a\chime.wav)".to_string(), "![a|b](C:/c.png)".to_string()];
+        let text = "Here:\n\n![chime](C:\\a\\chime.wav)\n\n![web](https://x/y.png) ![a|b](C:/c.png) `![chime](C:\\a\\chime.wav)`";
+        assert_eq!(view_text(text, 6000, &shown), "Here:\n\n[web]  |cffc8c8a0![chime](C:\\a\\chime.wav)|r");
+        assert_eq!(wow_text(text, 6000), "Here:\n\n[chime]\n\n[web] [a||b] |cffc8c8a0![chime](C:\\a\\chime.wav)|r", "everything else as before");
+        let segments = wow_segments(&format!("{text}\n```\n![chime](C:\\a\\chime.wav)\n```"), 6000, &shown);
+        assert_eq!(segments[0], json!(format!("Here:\n\n[web]  {CODE_OPEN}![chime](C:\\a\\chime.wav){CODE_CLOSE}")));
+        assert_eq!(segments[1], json!({ "c": "![chime](C:\\a\\chime.wav)" }));
+
+        // Written as the bridge finds it: with a title, with code in the alt text; in a table
+        // cell too; and a list of them leaves no bullets behind.
+        let titled = r#"![tone](C:\a\t.wav "short")"#;
+        let coded = r"![`App.tsx` layout](C:\a\app.png)";
+        let shown = vec![titled.to_string(), coded.to_string()];
+        assert_eq!(view_text(&format!("A {titled} B\n\n- {coded}\n- {titled}\n\nC"), 6000, &shown), "A  B\n\nC");
+        assert_eq!(view_text(&format!("1. {coded}\n2) **{titled}**\n> {coded}\n+ {titled} 2024"), 6000, &shown), "+  2024");
+        let table = wow_segments(&format!("| Sound | File |\n|---|---|\n| Alert | {titled} |"), 6000, &shown);
+        assert_eq!(table, vec![json!({ "t": [["Sound", "File"], ["Alert", ""]] })]);
+        // A line that ends up as bare marks with no embed taken out stays as it was.
+        assert_eq!(view_text(&format!("[-](https://x/rule)\n{coded} [+](https://x)"), 6000, &shown), "-\n +");
+    }
+
+    #[test]
     fn code_and_tables_become_segments() {
         let cases: Value = serde_json::from_str(include_str!("../tests/fixtures/segments.json")).unwrap();
         for case in cases.as_array().unwrap() {
             let input = case["input"].as_str().unwrap();
-            assert_eq!(json!(wow_segments(input, 6000)), case["segments"], "{input}");
+            assert_eq!(json!(wow_segments(input, 6000, &[])), case["segments"], "{input}");
         }
     }
 
@@ -754,7 +811,7 @@ mod tests {
         let cases: Value = serde_json::from_str(include_str!("../tests/fixtures/segments.json")).unwrap();
         for case in cases.as_array().unwrap() {
             let input = case["input"].as_str().unwrap();
-            let drawn = wow_segments(input, 6000).iter().filter(|s| s["c"].is_string()).count();
+            let drawn = wow_segments(input, 6000, &[]).iter().filter(|s| s["c"].is_string()).count();
             assert_eq!(code_blocks(input).len(), drawn, "{input}");
         }
         let text = "Intro\n\n```rust\nfn main() {\n\tprintln!(\"|\");  \n}\n\n```\n\n| a | b |\n|---|---|\n| ``` | x |\n\n```\n\n```\n\n- item\n  ```sh\n  npm test\n    --watch\n  ```\nAfter";
@@ -762,7 +819,7 @@ mod tests {
         // indent goes, and a table's cell that looks like a fence is still a cell.
         // Each with the line its opening fence is on.
         assert_eq!(code_blocks(text), [(2, "fn main() {\n\tprintln!(\"|\");  \n}".to_string()), (18, "npm test\n  --watch".to_string())]);
-        assert_eq!(wow_segments(text, 6000).iter().filter(|s| s["c"].is_string()).count(), 2);
+        assert_eq!(wow_segments(text, 6000, &[]).iter().filter(|s| s["c"].is_string()).count(), 2);
         // A block the game cuts short is copied whole; one left open runs to the end.
         let long = format!("```\n{}\n```", "x".repeat(7000));
         assert_eq!(code_blocks(&long), [(0, "x".repeat(7000))]);
@@ -780,7 +837,7 @@ mod tests {
         assert_eq!(wow_text(&format!("[{link}]({link})"), 6000), marked);
         assert_eq!(wow_text(&format!("`<{link}>`"), 6000), format!("{CODE}<{link}>|r"));
         assert_eq!(wow_text("a \u{4}x/y\u{4} b", 6000), "a x/y b");
-        let segments = wow_segments(&format!("in <{link}> and `code`"), 6000);
+        let segments = wow_segments(&format!("in <{link}> and `code`"), 6000, &[]);
         assert_eq!(segments, vec![json!(format!("in {marked} and {CODE_OPEN}code{CODE_CLOSE}"))]);
         let named = name_thread_links(&format!("in {marked}, then"), |env, thread| format!("[{env}|{thread}]"));
         assert_eq!(named, "in [e1|thread:delegated-task:command%3Amcp%3Ax%3Adelegate-task%3Ar1], then");
@@ -800,7 +857,7 @@ mod tests {
         assert_eq!(wow_text("mymodel:a/b and model:1a/b and model:a/", 6000), "mymodel:a/b and model:1a/b and model:a/");
         // Code keeps it as written.
         assert_eq!(wow_text("`model:a/b`", 6000), format!("{CODE}model:a/b|r"));
-        assert_eq!(wow_segments("run `x` on model:a/b", 6000), vec![json!(format!("run {CODE_OPEN}x{CODE_CLOSE} on {}", m("model:a/b")))]);
+        assert_eq!(wow_segments("run `x` on model:a/b", 6000, &[]), vec![json!(format!("run {CODE_OPEN}x{CODE_CLOSE} on {}", m("model:a/b")))]);
         // T3's text can't hold the mark.
         assert_eq!(wow_text("a \u{5}b", 6000), "a b");
 
@@ -854,18 +911,18 @@ mod tests {
         // A model reference is looked up as written.
         assert_eq!(wow_text("ask model:example/foo🚀 now ⏲️", 6000), "ask \u{5}model:example/foo🚀\u{5} now");
         // A joiner left dangling at the end of inline code doesn't take the code's end.
-        let dangling = wow_segments("`go 🚀\u{200D}` later ➜ next", 6000);
+        let dangling = wow_segments("`go 🚀\u{200D}` later ➜ next", 6000, &[]);
         assert_eq!(dangling, vec![json!("\u{1}go  \u{2} later → next")]);
         assert_eq!(wow_text("🚀\u{200D}élan", 6000), "élan", "nor a letter after it");
-        let table = wow_segments("| A | 🚀 |\n| --- | --- |\n| ✅ | x |", 6000);
+        let table = wow_segments("| A | 🚀 |\n| --- | --- |\n| ✅ | x |", 6000, &[]);
         assert_eq!(table, vec![json!({ "t": [["A", "🚀"], ["✓", "x"]] })], "a cell left with nothing stays");
-        let code = wow_segments("the `🚀` and `npm test`\n```\n❌ fail ➜ retry\n```", 6000);
+        let code = wow_segments("the `🚀` and `npm test`\n```\n❌ fail ➜ retry\n```", 6000, &[]);
         assert_eq!(code, vec![json!("the \u{1} \u{2} and \u{1}npm test\u{2}"), json!({ "c": "✗ fail ➜ retry" })]);
         assert_eq!(preview_text("⚠️ careful | 🚀 go", 200, 12), "⚠ careful ||   go");
         // A symbol the font has keeps its place, written as an emoji or not.
         assert_eq!(wow_text("↔️ ©️ ™️ ✓️", 6000), "↔ © ™ ✓");
         // The markup as T3 has it, before the marks are put.
-        assert_eq!(wow_markup("✅ `cat logs/✅.txt`", 6000), "✅ |cffc8c8a0cat logs/✅.txt|r");
+        assert_eq!(wow_markup("✅ `cat logs/✅.txt`", 6000, &[]), "✅ |cffc8c8a0cat logs/✅.txt|r");
         // One-line fields (titles, paths) stay as T3 has them.
         assert_eq!(plain("logs/✅.txt", 200), "logs/✅.txt");
     }
