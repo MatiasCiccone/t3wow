@@ -32,7 +32,7 @@ pub const KEYCHAIN_SEALED: &str = "keychain-aes256gcm:";
 
 /// The key file's name in the config folder. Never renamed: a new name would mean a new key,
 /// and every saved sign-in lost.
-pub const FILE_NAME: &str = "token.key";
+const FILE_NAME: &str = "token.key";
 
 const KEY_LEN: usize = 32;
 type Key = [u8; KEY_LEN];
@@ -256,6 +256,15 @@ pub mod test_support {
         pub static ACTIVE: RefCell<Arc<Keyring>> = RefCell::new(Arc::new(Keyring::new(temp_key_path("default"))));
     }
 
+    /// A keyring holding the key from the file in `dir`, read without changing the file: no
+    /// key is made when it's missing and its permissions are left as they are. The live tests
+    /// read the app's own sign-in with it. None when there is no key to read.
+    pub fn existing_keyring(dir: &Path) -> Option<Arc<Keyring>> {
+        let text = fs::read_to_string(dir.join(FILE_NAME)).ok()?;
+        let key = Key::try_from(STANDARD.decode(text.trim()).ok()?.as_slice()).ok()?;
+        Some(Arc::new(Keyring { path: dir.join(FILE_NAME), key: Mutex::new(Some(key)), logged: Mutex::new(None) }))
+    }
+
     /// Makes `keyring` the one this test's `seal`, `open` and `problem` use.
     pub fn use_keyring(keyring: Arc<Keyring>) {
         ACTIVE.with(|active| *active.borrow_mut() = keyring);
@@ -289,6 +298,19 @@ mod tests {
         let second = Keyring::new(path.clone());
         assert_eq!(second.open(encoded(&stored)).as_deref(), Some("the token"), "a second run reads the same key");
         assert_eq!(fs::read_to_string(&path).unwrap(), text, "and doesn't rewrite it");
+    }
+
+    #[test]
+    fn an_existing_key_is_read_without_touching_its_file() {
+        let path = temp_key_path("existing");
+        let dir = path.parent().unwrap();
+        assert!(super::test_support::existing_keyring(dir).is_none(), "no key, no keyring");
+        assert!(!dir.exists(), "and nothing made");
+        let stored = Keyring::new(path.clone()).seal("the token").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let keyring = super::test_support::existing_keyring(dir).unwrap();
+        assert_eq!(keyring.open(encoded(&stored)).as_deref(), Some("the token"));
+        assert_eq!(mode(&path), 0o644, "left as it was; the app narrows it");
     }
 
     #[test]
