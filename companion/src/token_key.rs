@@ -32,7 +32,7 @@ pub const KEYCHAIN_SEALED: &str = "keychain-aes256gcm:";
 
 /// The key file's name in the config folder. Never renamed: a new name would mean a new key,
 /// and every saved sign-in lost.
-const FILE_NAME: &str = "token.key";
+pub const FILE_NAME: &str = "token.key";
 
 const KEY_LEN: usize = 32;
 type Key = [u8; KEY_LEN];
