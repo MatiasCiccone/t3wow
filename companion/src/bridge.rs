@@ -7,7 +7,7 @@ use crate::clip::{self, Clipped};
 use crate::codec::{decode_cells, Unreadable};
 use crate::config::Trust;
 use crate::made_for::{self, older_t3, OlderT3};
-use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, segment_source, to_lua, wow_markup, wow_segments, wow_text, Font, MODEL_MARK};
+use crate::lua::{drawable, name_model_refs, name_thread_links, plain, preview_text, segment_source, to_lua, wow_segments, wow_text, Font, MODEL_MARK};
 use crate::render::{page_height, tga, Bitmap, Painter, DRAWING_VERSION};
 use crate::slots::{SlotWriter, IMAGE_COUNT, SIGNAL_COUNT, SLOT_COUNT};
 use crate::snooze::{civil_from_days, days_from_civil};
@@ -427,16 +427,16 @@ fn view_markdown(message: &Value, cut: bool) -> String {
 }
 
 /// A message's text with each quote's mark (see cites::take_cites) put as the quote, its
-/// lines after "> " in a dim color, then its comment. An addon older than quotes draws it
-/// (`drawn`: in what the game's fonts have); copying takes it as T3 has it.
-fn quotes_in_text(text: &str, cites: &[cites::Cite], drawn: bool) -> String {
+/// lines after "> " in a dim color, then its comment, in what the game's fonts have. An addon
+/// older than quotes draws it, and the copy box shows it.
+fn quotes_in_text(text: &str, cites: &[cites::Cite]) -> String {
     if cites.is_empty() {
         return text.to_string();
     }
     let mut out = String::new();
     for (n, part) in text.split(QUOTE_MARK).enumerate() {
         match part.parse::<usize>().ok().filter(|_| n % 2 == 1).and_then(|i| cites.get(i)) {
-            Some(cite) => out.push_str(&cites::markup(cite, "|cff808080", drawn)),
+            Some(cite) => out.push_str(&cites::markup(cite, "|cff808080")),
             None => out.push_str(part),
         }
     }
@@ -4686,23 +4686,18 @@ impl Bridge {
             let cut_here = !cites.is_empty() && raw.chars().count() > VIEW_TEXT_CHARS;
             let raw = if cites.is_empty() { raw } else { cites::capped(&raw, VIEW_TEXT_CHARS) };
             let more_mark = if truncated && !cut_here { "\n…" } else { "" };
-            let text = quotes_in_text(&wow_text(&raw, VIEW_TEXT_CHARS), &cites, true) + more_mark;
+            let text = quotes_in_text(&wow_text(&raw, VIEW_TEXT_CHARS), &cites) + more_mark;
             let mut length = text.encode_utf16().count();
             let mut shown = json!({ "r": if kind == "user_message" { "u" } else { "a" }, "x": text });
             // Where it is in the thread: what the game's copy icon names it by.
             if let Some(position) = item["position"].as_u64() {
                 shown["p"] = json!(position);
             }
-            // Copying gives every character as T3 has it, those the game draws as others or
-            // leaves out included.
-            let written = quotes_in_text(&wow_markup(&raw, VIEW_TEXT_CHARS), &cites, false) + more_mark;
-            if written != text {
-                length += written.encode_utf16().count();
-                shown["cx"] = json!(written);
-            }
+            // The copy box shows this text too, with the marks the game draws for emoji: its
+            // font can't draw an emoji either, and the copy icon copies T3's own text.
             // A message with code, a table or a quote also comes cut into segments, which this
-            // addon draws in its own fonts. Copying reads the text; an addon older than quotes
-            // leaves a quote out of the segments (it shows after a /reload with this one).
+            // addon draws in its own fonts. The copy box reads the text; an addon older than
+            // quotes leaves a quote out of the segments (it shows after a /reload with this one).
             let mut segments = wow_segments(&raw, VIEW_TEXT_CHARS);
             for seg in segments.iter_mut().filter(|s| s["q"].is_u64()) {
                 *seg = cites.get(seg["q"].as_u64().unwrap_or(0) as usize).map_or(Value::Null, cites::segment);
@@ -5345,17 +5340,14 @@ impl Bridge {
             }
         }
         for item in items {
-            // Copying keeps each model T3 names as T3 has it (model:...), which the view
-            // shows by name.
-            // The copy text (cx), when the view's text leaves characters out, already has them.
-            let marked = item["cx"].as_str().or(item["x"].as_str()).filter(|x| x.contains(MODEL_MARK)).map(str::to_string);
+            // The copy box (cx) keeps each model T3 names as T3 has it (model:...), which the
+            // view shows by name.
+            let marked = item["x"].as_str().filter(|x| x.contains(MODEL_MARK)).map(str::to_string);
             walk(item, &name, &prose, &cells);
             if let Some(text) = marked {
                 let copy = name_thread_links(&name_model_refs(&text, |_, _| None), name);
                 if item["x"] != copy.as_str() {
                     item["cx"] = json!(copy);
-                } else if let Some(fields) = item.as_object_mut() {
-                    fields.remove("cx");
                 }
             }
         }

@@ -371,10 +371,10 @@ fn prose_drawable(text: &str) -> String {
     if out == text { out } else { patterns().gaps.replace_all(&out, "\n\n").trim().to_string() }
 }
 
-/// Markdown to WoW FontString markup, every character as T3 has it (for copying). `|` starts
-/// an escape sequence in WoW text, so literal pipes are doubled before any color codes are
-/// added.
-pub fn wow_markup(markdown: &str, max_length: usize) -> String {
+/// Markdown to WoW FontString markup, every character as T3 has it (`wow_text` then makes it
+/// drawable). `|` starts an escape sequence in WoW text, so literal pipes are doubled before
+/// any color codes are added.
+fn wow_markup(markdown: &str, max_length: usize) -> String {
     let p = patterns();
     let mut text = markdown.replace("\r\n", "\n").replace('\r', "\n").replace([LINK_MARK, MODEL_MARK], "");
     if text.chars().count() > max_length {
@@ -842,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn what_the_fonts_lack_is_put_after_the_markdown_is_read_and_copying_keeps_it() {
+    fn what_the_fonts_lack_is_put_after_the_markdown_is_read() {
         // Markdown is read from T3's text: a dropped emoji or a stand-in can't make or break it.
         assert_eq!(wow_text("**✅ Done** ➜ next", 6000), "✓ Done → next");
         assert_eq!(wow_text("⭐ Recommended, **⭐⭐ great ⭐⭐**", 6000), "◆ Recommended, ◆◆ great ◆◆");
@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(preview_text("⚠️ careful | 🚀 go", 200, 12), "⚠ careful ||   go");
         // A symbol the font has keeps its place, written as an emoji or not.
         assert_eq!(wow_text("↔️ ©️ ™️ ✓️", 6000), "↔ © ™ ✓");
-        // The markup as T3 has it, for copying.
+        // The markup as T3 has it, before the marks are put.
         assert_eq!(wow_markup("✅ `cat logs/✅.txt`", 6000), "✅ |cffc8c8a0cat logs/✅.txt|r");
         // One-line fields (titles, paths) stay as T3 has them.
         assert_eq!(plain("logs/✅.txt", 200), "logs/✅.txt");

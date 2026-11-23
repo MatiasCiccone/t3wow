@@ -274,10 +274,10 @@ pub fn sent(seg: &Value) -> std::borrow::Cow<'_, Value> {
     }
 }
 
-/// A quote in game markup, for the message's text (what copying takes, and an older addon
-/// draws): its lines after "> ", then the comment.
-pub fn markup(cite: &Cite, dim: &str, drawn: bool) -> String {
-    let fit = |t: String| if drawn { drawable(&t, Font::Text) } else { t };
+/// A quote in game markup, for the message's text (what the copy box shows, and an older
+/// addon draws): its lines after "> ", then the comment, in what the game's fonts have.
+pub fn markup(cite: &Cite, dim: &str) -> String {
+    let fit = |t: String| drawable(&t, Font::Text);
     let quote: Vec<String> = shown(&cite.text).split('\n').map(|l| format!("{dim}> {}|r", fit(l.replace('|', "||")))).collect();
     let mut out = quote.join("\n");
     if let Some(comment) = cite.comment.as_deref().map(shown).filter(|c| !c.is_empty()) {

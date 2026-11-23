@@ -2027,7 +2027,7 @@ fn a_message_with_code_also_comes_in_segments_and_its_text_stays_as_before() {
 }
 
 #[test]
-fn a_message_shows_what_the_fonts_draw_and_copies_as_t3_has_it() {
+fn a_message_and_its_copy_box_show_what_the_fonts_draw() {
     let mut rig = Rig::new(23_000_000);
     rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["plain", "✅ done: `cat logs/🚀.txt`"]));
     rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
@@ -2035,7 +2035,8 @@ fn a_message_shows_what_the_fonts_draw_and_copies_as_t3_has_it() {
     let items = rig.bridge.snapshot()["view"]["items"].clone();
     assert!(items[0]["cx"].is_null(), "no copy text when nothing changed");
     assert_eq!(items[1]["x"], "✓ done: |cffc8c8a0cat logs/.txt|r");
-    assert_eq!(items[1]["cx"], "✅ done: |cffc8c8a0cat logs/🚀.txt|r");
+    // The copy box's font can't draw an emoji either: it shows the view's text.
+    assert!(items[1]["cx"].is_null(), "the copy box has emoji: {}", items[1]["cx"]);
 }
 
 /// A rig with thread t1 open and every copy recorded instead of reaching the clipboard.
@@ -4612,6 +4613,20 @@ fn a_model_named_in_a_message_reads_as_its_name_when_the_machine_has_it() {
     let table = items[1]["g"].as_array().unwrap().iter().find(|s| s["t"].is_array()).unwrap();
     assert_eq!(table["t"][1], json!(["gpt-luna", "model:codex/gpt-luna"]));
     assert!(!rig.bridge.snapshot().to_string().contains('\u{5}'), "a mark left in");
+}
+
+#[test]
+fn the_copy_box_keeps_a_model_reference_with_the_marks_drawn_for_emoji() {
+    let mut rig = Rig::new(43_500_000);
+    *rig.t3.capabilities.lock().unwrap() = capabilities();
+    rig.t3.messages.lock().unwrap().insert("t1".into(), conversation(&["✅ ask model:codex/gpt-luna 🚀 now"]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+    let items = view_items(&rig);
+    assert_eq!(items[0]["x"], "✓ ask gpt-luna now");
+    assert_eq!(items[0]["cx"], "✓ ask model:codex/gpt-luna now");
 }
 
 #[test]

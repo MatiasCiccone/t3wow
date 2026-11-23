@@ -3813,8 +3813,9 @@ function renderView()
             end
             -- A message, and a turn's changed files, can be copied: by the companion, or in the
             -- copy box, which takes the message's text, not its segments (the code with its
-            -- markdown). cx is that text as T3 has it, where the view's differs: each model T3
-            -- names written as model:..., and the marks and emoji the game's fonts can't draw.
+            -- markdown). cx is that text with each model T3 names written as model:..., where
+            -- the view shows its name. Emoji are as the view draws them: the box's font can't
+            -- draw them either.
             -- A companion that copies says where each message is (p): a line with none is
             -- a picture's placeholder, not a message.
             local copyable = not work and not rule and not card and not lost and not picture and not play
