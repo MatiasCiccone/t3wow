@@ -702,6 +702,47 @@ fn live_a_page_an_agent_shows_reaches_the_game() {
     live.finish();
 }
 
+/// The notices T3 put in thread `id`'s activity (`system_notice`): their titles and texts.
+fn notices(live: &Live, id: &str) -> Vec<(String, String)> {
+    let read = live.t3.client.call("t3_thread_read", json!({ "threadId": id, "view": "activity", "afterPosition": -1, "limit": 100, "maxCharsPerItem": 200 })).expect("thread read");
+    let items = read["items"].as_array().into_iter().flatten();
+    // A notice cut short shows in the game with "…" after it.
+    let text = |i: &Value| str_of(&i["text"]).to_string() + if i["textTruncated"] == true { "…" } else { "" };
+    items.filter(|i| i["type"] == "system_notice").map(|i| (str_of(&i["title"]).to_string(), text(i))).collect()
+}
+
+/// The notices T3 puts in a thread reach the game in their own words, and one about an MCP
+/// server that needs a sign-in says so. T3 0.1.12 adds that one at the end of a Claude turn
+/// when one of the agent's MCP servers isn't signed in to, which depends on this machine's
+/// agent setup: with no notice in the thread, there is nothing to check.
+#[test]
+#[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
+fn live_t3s_notices_reach_the_game() {
+    let mut live = Live::start("notices");
+    let id = live.new_thread("Reply with only the word KIWI, in capital letters. Do not use any tools.");
+    live.wait("the reply", REPLY_TIMEOUT, |live| live.agent_said(&id, "KIWI") && !working(str_of(&live.thread(&id)["status"])));
+    let found = notices(&live, &id);
+    if found.is_empty() {
+        eprintln!("  T3 put no notice in the thread (no MCP server here needs a sign-in): nothing to check");
+        live.finish();
+        return;
+    }
+    eprintln!("  T3's notices: {found:?}");
+    for (title, text) in &found {
+        let sign_in = title.ends_with(" needs a sign-in");
+        let words = crate::lua::plain(text, 201);
+        let shown = |live: &Live| {
+            let view = live.snapshot()["view"].clone();
+            view["id"] == id.as_str() && view["items"].as_array().into_iter().flatten().any(|i| i["nt"] == 1 && i["x"] == words.as_str() && (!sign_in || i["si"] == 1))
+        };
+        live.wait(&format!("the notice \"{text}\" in the game"), STATE_TIMEOUT, shown);
+        if sign_in {
+            live.checkpoint("a server that needs a sign-in", &id, &["needs a sign-in"], &[]);
+        }
+    }
+    live.finish();
+}
+
 /// A quote made with T3's Cite in composer reaches the game as a quote, tied to the words it
 /// quotes in the agent's reply. The game can't make one, so the test writes the link as T3's
 /// composer does and sends it as a message: T3 keeps it in the message's text as it is.
