@@ -502,9 +502,20 @@ fn green_image() -> Clipped {
 fn live_a_thread_from_the_game_round_trips() {
     let mut live = Live::start("round-trip");
     // Replies the prompts don't contain, so the replay can't find them in your own words.
-    let id = live.new_thread("What is the capital of France? Reply with only the city's name, in capital letters. Do not use any tools.");
+    let opening = "What is the capital of France? Reply with only the city's name, in capital letters. Do not use any tools.";
+    let id = live.new_thread(opening);
     live.wait("the reply to New Thread", REPLY_TIMEOUT, |live| live.agent_said(&id, "PARIS") && !working(str_of(&live.thread(&id)["status"])));
     live.wait("the thread in the game's list", STATE_TIMEOUT, |live| live.row(&id)["s"] == "completed");
+    // A T3 that generates titles replaces the seed (the message's first 60 chars) with its own.
+    let local = live.bridge.local_env_id.clone().unwrap_or_default();
+    if live.bridge.runs_at_least_on(&local, GENERATE_TITLE_SINCE) {
+        let seed: String = opening.chars().take(60).collect();
+        live.wait("T3's generated title in the game's list", STATE_TIMEOUT, |live| {
+            let title = str_of(&live.row(&id)["t"]).to_string();
+            !title.is_empty() && title != seed
+        });
+        eprintln!("  generated title: {}", live.row(&id)["t"]);
+    }
     assert!(live.said(&id, "u").iter().any(|x| x.contains("France")), "the opening message isn't in the view");
     live.checkpoint("the reply to a new thread", &id, &["PARIS"], &[]);
 

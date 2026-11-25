@@ -571,19 +571,23 @@ fn compact_picks(cache: &Value) -> Vec<Value> {
     picks
 }
 
-/// The first T3 whose sends take `freshContext` (T3 Code 0.1.8).
-/// MCP doesn't list a server's capabilities, so its version stands in for that one.
+/// The first T3 whose sends take `freshContext` (T3 Code 0.1.8). MCP doesn't list a
+/// server's capabilities, so its version stands in for them.
 const FRESH_CONTEXT_SINCE: [u64; 3] = [0, 1, 8];
 
-/// Whether a T3 that reports this server version starts fresh sessions. A version that
-/// doesn't read as numbers (none, from a T3 too old to say) doesn't.
-fn takes_fresh_context(version: &str) -> bool {
+/// The first T3 whose launches take `generateTitle` (T3 Code 0.1.12). An older one refuses
+/// an input it doesn't know, and so does a linked machine's older T3 a launch is passed on to.
+const GENERATE_TITLE_SINCE: [u64; 3] = [0, 1, 12];
+
+/// Whether a T3 that reports this server version is `since` or later. A version that
+/// doesn't read as numbers (none, from a T3 too old to say) isn't.
+fn runs_at_least(version: &str, since: [u64; 3]) -> bool {
     let core = version.trim().trim_start_matches('v').split(['-', '+']).next().unwrap_or("");
     let parts: Option<Vec<u64>> = core.split('.').map(|part| part.parse().ok()).collect();
     match parts {
         Some(mut parts) if !parts.is_empty() => {
             parts.resize(3, 0);
-            parts[..3] >= FRESH_CONTEXT_SINCE[..]
+            parts[..3] >= since[..]
         }
         _ => false,
     }
@@ -985,9 +989,9 @@ pub struct Bridge {
     /// Per machine: whether its new threads start in a new worktree by default (T3's
     /// "New thread mode" preference), for projects that don't set their own.
     new_worktrees: BTreeMap<String, bool>,
-    /// The machines whose T3 can start a fresh provider session in a thread (`freshContext`
-    /// on a send, T3's /clear), by the version each one reports.
-    fresh_context: HashSet<String>,
+    /// The T3 Code version each machine reports, for the inputs only a newer T3 takes
+    /// (`freshContext` on a send, `generateTitle` on a launch).
+    server_versions: HashMap<String, String>,
     /// The T3 the companion talks to runs an older T3 Code than this release is made for (by
     /// the version it reports): the tray and the game suggest updating it.
     older_t3: Option<OlderT3>,
@@ -2235,7 +2239,7 @@ impl Bridge {
             threads: BTreeMap::new(),
             projects: BTreeMap::new(),
             new_worktrees: BTreeMap::new(),
-            fresh_context: HashSet::new(),
+            server_versions: HashMap::new(),
             older_t3: None,
             catalogs: BTreeMap::new(),
             provider_caches: None,
@@ -2439,7 +2443,7 @@ impl Bridge {
         self.run_starts.clear();
         self.activity.clear();
         self.new_worktrees.clear();
-        self.fresh_context.clear();
+        self.server_versions.clear();
         self.older_t3 = None;
         self.catalogs.clear();
         self.settled_totals.clear();
@@ -2937,6 +2941,11 @@ impl Bridge {
                     let attachments = if with_images { self.upload_draft(&draft)? } else { Vec::new() };
                     if !attachments.is_empty() {
                         args["attachments"] = json!(attachments);
+                    }
+                    // T3 then titles it as it does a thread started in its window, a few seconds
+                    // later; until then it has the seed above. It refuses that without words or images.
+                    if (!message.trim().is_empty() || !attachments.is_empty()) && self.runs_at_least_on(&env, GENERATE_TITLE_SINCE) {
+                        args["generateTitle"] = json!(true);
                     }
                     let launched = match self.client.call("t3_thread_launch", with_args(args, &env_arg)) {
                         Ok(launched) => launched,
@@ -4103,7 +4112,7 @@ impl Bridge {
             Ok(read) => {
                 let local = self.local_env_id.clone().unwrap_or_default();
                 self.new_worktrees.insert(local.clone(), read["preferences"]["defaultThreadEnvMode"] == "worktree");
-                self.note_fresh_context(&local, &read);
+                self.note_server_version(&local, &read);
                 self.note_t3_version(&read);
                 read["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string)
             }
@@ -4142,7 +4151,7 @@ impl Bridge {
         self.threads.retain(|env, _| linked(env));
         self.projects.retain(|env, _| linked(env));
         self.new_worktrees.retain(|env, _| linked(env));
-        self.fresh_context.retain(|env| linked(env));
+        self.server_versions.retain(|env, _| linked(env));
         self.catalogs.retain(|env, _| linked(env));
         self.settled_totals.retain(|env, _| linked(env));
         self.list_more.retain(|env, _| linked(env));
@@ -4165,13 +4174,9 @@ impl Bridge {
         }
     }
 
-    /// Notes from a machine's `t3_environment_read` whether its T3 starts fresh sessions.
-    fn note_fresh_context(&mut self, env: &str, read: &Value) {
-        if takes_fresh_context(str_of(&read["serverVersion"])) {
-            self.fresh_context.insert(env.to_string());
-        } else {
-            self.fresh_context.remove(env);
-        }
+    /// Notes the T3 Code version a machine's `t3_environment_read` reports.
+    fn note_server_version(&mut self, env: &str, read: &Value) {
+        self.server_versions.insert(env.to_string(), str_of(&read["serverVersion"]).to_string());
     }
 
     /// Notes from the server's `t3_environment_read` whether it runs an older T3 Code than
@@ -4188,11 +4193,16 @@ impl Bridge {
         }
     }
 
-    /// Whether a send to this machine can start a fresh session: the T3 it goes through (this
-    /// server, which passes a linked machine's on) has to take `freshContext` too.
+    /// Whether a send to this machine can start a fresh session.
     fn fresh_context_on(&self, env: &str) -> bool {
+        self.runs_at_least_on(env, FRESH_CONTEXT_SINCE)
+    }
+
+    /// Whether a call to this machine can carry an input added in T3 Code `since`: the T3 it
+    /// goes through (this server, which passes a linked machine's on) has to take it too.
+    fn runs_at_least_on(&self, env: &str, since: [u64; 3]) -> bool {
         let local = self.local_env_id.as_deref().unwrap_or_default();
-        self.fresh_context.contains(local) && self.fresh_context.contains(env)
+        [local, env].iter().all(|machine| self.server_versions.get(*machine).is_some_and(|v| runs_at_least(v, since)))
     }
 
     fn refresh_projects(&mut self, env: &str) {
@@ -4215,7 +4225,7 @@ impl Bridge {
             match self.client.call("t3_environment_read", Value::Object(env_arg)) {
                 Ok(read) => {
                     self.new_worktrees.insert(env.to_string(), read["preferences"]["defaultThreadEnvMode"] == "worktree");
-                    self.note_fresh_context(env, &read);
+                    self.note_server_version(env, &read);
                 }
                 Err(error) => self.log(&format!("preferences ({env}): {error}")),
             }

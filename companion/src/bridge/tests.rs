@@ -47,7 +47,18 @@ struct FakeT3 {
     runs: Mutex<Value>,
     /// A read of an item from this offset on fails, once.
     fail_offset_once: Mutex<Option<u64>>,
+    /// The title T3 generates for a thread launched with `generateTitle`, and when (on the
+    /// rig's clock) it replaces the seed.
+    generating: Mutex<Option<(String, String, i64)>>,
 }
+
+/// Inputs T3 added after the T3 Code the tool fixture was recorded from, by tool, and the
+/// version that added each: a machine on an older T3 refuses them as it does any input it
+/// doesn't know, and so does this server passing a call on to a linked machine.
+const NEWER_INPUTS: [(&str, &str, [u64; 3]); 1] = [("t3_thread_launch", "generateTitle", [0, 1, 12])];
+
+/// How long T3 takes to generate a launched thread's title.
+const TITLE_GENERATION_MS: i64 = 4_000;
 
 /// A read of the open thread's activity for its pictures and cards, not a working thread's
 /// pending check (which reads only its latest few items).
@@ -107,6 +118,7 @@ impl FakeT3 {
             capabilities: Mutex::new(json!({})),
             runs: Mutex::new(json!([])),
             fail_offset_once: Mutex::new(None),
+            generating: Mutex::new(None),
         })
     }
 
@@ -148,7 +160,8 @@ impl FakeT3 {
 fn undeclared_argument(name: &str, args: &Value) -> Option<String> {
     static TOOLS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| serde_json::from_str(include_str!("../../tests/fixtures/t3-tools.json")).unwrap());
     let inputs = TOOLS["tools"][name]["inputs"].as_object()?;
-    let unknown = args.as_object()?.keys().find(|k| !inputs.contains_key(*k))?;
+    let newer = |k: &str| NEWER_INPUTS.iter().any(|(tool, input, _)| *tool == name && *input == k);
+    let unknown = args.as_object()?.keys().find(|k| !inputs.contains_key(*k) && !newer(k))?;
     let accepted: Vec<&str> = inputs.keys().map(String::as_str).collect();
     Some(format!("Invalid parameters for tool '{name}': Unknown argument \"{unknown}\". Accepted arguments: {}.", accepted.join(", ")))
 }
@@ -163,6 +176,21 @@ impl T3 for FakeT3 {
         }
         if let Some(message) = undeclared_argument(name, &args) {
             return Err(T3Error::Other(message));
+        }
+        let target = args["environmentId"].as_str().unwrap_or("local").to_string();
+        for (tool, input, since) in NEWER_INPUTS {
+            let versions = self.versions.lock().unwrap();
+            let takes = |env: &str| versions.get(env).is_some_and(|v| runs_at_least(v, since));
+            if tool == name && !args[input].is_null() && !(takes("local") && takes(&target)) {
+                return Err(T3Error::Other(format!("Invalid parameters for tool '{name}': Unknown argument \"{input}\". Accepted arguments: ...")));
+            }
+        }
+        let now = self.clock.lock().unwrap().as_ref().map_or(0, |clock| *clock.lock().unwrap());
+        let due = self.generating.lock().unwrap().take_if(|(_, _, at)| *at <= now);
+        if let Some((id, title, _)) = due {
+            if let Some(thread) = self.threads.lock().unwrap().iter_mut().find(|t| t["threadId"] == id.as_str()) {
+                thread["title"] = json!(title);
+            }
         }
         if let (Some(ms), Some(clock)) = (self.delays.lock().unwrap().get(name), self.clock.lock().unwrap().as_ref()) {
             *clock.lock().unwrap() += ms;
@@ -212,6 +240,18 @@ impl T3 for FakeT3 {
                 };
                 if worktree {
                     self.worktree_launches.lock().unwrap().push(str_of(&args["title"]).to_string());
+                }
+                // As T3 Code 0.1.12 launches with generateTitle: the thread has the title it was
+                // given, then the one generated from its first message, a few seconds later.
+                if args["generateTitle"] == true {
+                    if str_of(&args["message"]).trim().is_empty() && args["attachments"].as_array().is_none_or(Vec::is_empty) {
+                        return Err(T3Error::Other("Title generation requires a message or attachments. No thread was created.".into()));
+                    }
+                    self.threads.lock().unwrap().push(json!({
+                        "threadId": "new1", "projectId": args["projectId"], "title": args["title"], "status": "running",
+                        "createdBy": "agent", "settled": false, "updatedAt": "2026-11-06T10:00:00Z", "itemCount": 1,
+                    }));
+                    *self.generating.lock().unwrap() = Some(("new1".into(), "Generated Title".into(), now + TITLE_GENERATION_MS));
                 }
                 json!({ "threadId": "new1" })
             }
@@ -2595,7 +2635,7 @@ fn fresh_sessions_need_t3_code_0_18_on_every_server_a_send_goes_through() {
         ("0.1.8", true), ("0.1.9", true), ("0.2.0", true), ("1.0", true), ("v0.1.8", true), ("0.1.8-nightly.3", true),
         ("0.1.7", false), ("0.0.99", false), ("", false), ("dev", false), ("0.1.x", false),
     ] {
-        assert_eq!(takes_fresh_context(version), takes, "{version:?}");
+        assert_eq!(runs_at_least(version, FRESH_CONTEXT_SINCE), takes, "{version:?}");
     }
 }
 
@@ -2631,6 +2671,60 @@ fn a_send_from_the_games_clear_starts_a_fresh_session_where_t3_can() {
     rig.bridge.tick();
     let envs = rig.bridge.snapshot()["envs"].clone();
     assert!(envs[0]["fc"].is_null() && envs[1]["fc"].is_null(), "{envs}");
+}
+
+#[test]
+fn a_new_thread_gets_t3s_generated_title_where_every_t3_on_the_way_takes_it() {
+    let mut rig = Rig::new(27_600_000);
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.12"), ("mac".to_string(), "0.1.11")]);
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }] }));
+    rig.bridge.tick();
+    rig.advance(61_000);
+    rig.bridge.tick();
+
+    let message = "Make the bridge's poll skip a machine that stopped answering for a minute
+and say so";
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [
+        { "s": 2, "t": "new", "e": "mac", "p": "p1", "m": "Over there" },
+        { "s": 3, "t": "new", "p": "p1", "m": "  " },
+        { "s": 4, "t": "new", "p": "p1", "m": message },
+    ] }));
+    rig.bridge.tick();
+    // The Mac's older T3 would refuse an input it doesn't know: its launch goes without one.
+    let launches = rig.t3.calls_to("t3_thread_launch");
+    assert_eq!(launches.len(), 3);
+    assert!(launches[0]["generateTitle"].is_null(), "{}", launches[0]);
+    assert_eq!(outcome(&rig, 2)["ok"], true, "{}", outcome(&rig, 2));
+    // T3 refuses to generate a title from no words.
+    assert!(launches[1]["generateTitle"].is_null(), "{}", launches[1]);
+    assert_eq!(outcome(&rig, 3)["ok"], true, "{}", outcome(&rig, 3));
+    let launches = &launches[1..];
+    // The message's first line, cut to 60, is the seed T3 shows until its own title comes.
+    let seed = "Make the bridge's poll skip a machine that stopped answering";
+    assert_eq!((&launches[1]["generateTitle"], &launches[1]["title"]), (&json!(true), &json!(seed)), "{}", launches[1]);
+    assert_eq!(outcome(&rig, 4), json!({ "s": 4, "ok": true, "env": "local", "id": "new1" }));
+    let listed = |rig: &Rig| rig.bridge.snapshot()["threads"].as_array().unwrap().iter().find(|t| t["id"] == "new1").map(|t| t["t"].clone());
+    assert_eq!(listed(&rig), Some(json!(seed)));
+
+    // The generated title replaces it in the list; the game stays on the thread it started.
+    rig.advance(5_000);
+    rig.bridge.tick();
+    assert_eq!(listed(&rig), Some(json!("Generated Title")));
+    assert_eq!(rig.bridge.snapshot()["view"]["id"], "new1");
+    assert!(!marked_agent_made(&rig, "new1"), "a thread started from the game is still yours");
+
+    // This server on an older T3 refuses it for every machine.
+    rig.t3.versions.lock().unwrap().extend([("local".to_string(), "0.1.11"), ("mac".to_string(), "0.1.12")]);
+    rig.advance(61_000);
+    rig.bridge.tick();
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 3, "q": [
+        { "s": 5, "t": "new", "p": "p1", "m": "Here" },
+        { "s": 6, "t": "new", "e": "mac", "p": "p1", "m": "There" },
+    ] }));
+    rig.bridge.tick();
+    let launches = rig.t3.calls_to("t3_thread_launch");
+    assert!(launches[3..].iter().all(|l| l["generateTitle"].is_null()), "{launches:?}");
+    assert_eq!((outcome(&rig, 5)["ok"].clone(), outcome(&rig, 6)["ok"].clone()), (json!(true), json!(true)));
 }
 
 #[test]
