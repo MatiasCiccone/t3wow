@@ -5507,6 +5507,66 @@ fn change_reads(rig: &Rig) -> Vec<Value> {
     rig.t3.calls_to("t3_thread_read").into_iter().filter(|a| str_of(&a["itemId"]).starts_with("checkpoint")).collect()
 }
 
+/// A notice T3 puts in a thread's timeline, as T3 0.1.12's read gives it: its title, and
+/// its message as the text.
+fn notice(position: u64, title: &str, text: &str) -> Value {
+    json!({
+        "position": position, "itemId": format!("notice{position}"), "type": "system_notice", "status": "completed", "visibility": "local",
+        "title": title, "text": text, "textTruncated": false, "updatedAt": "2026-11-06T10:02:47Z", "runId": "r1",
+    })
+}
+
+#[test]
+fn t3s_notices_show_where_t3_shows_them_outside_the_fold_and_a_sign_in_says_to_sign_in_in_t3() {
+    let mut activity = a_turn();
+    // T3 0.1.12 adds one when the turn ends and the agent's MCP server needs a sign-in.
+    activity.push(notice(5, "MCP server plugin:vercel:vercel needs a sign-in", "The plugin:vercel:vercel MCP server needs a sign-in before Claude can use it."));
+    // And one between two tools, which keeps them from folding into one row, as in T3.
+    activity.insert(4, in_run(tool_item(4, "Grep", None), "r1"));
+    activity.insert(4, notice(4, "Steer delivery not confirmed", "The agent did not confirm reading your steer before Stop."));
+    for (n, item) in activity.iter_mut().enumerate() {
+        item["position"] = json!(n);
+        item["itemId"] = json!(format!("i{n}"));
+    }
+    let rig = fold_rig(62_500_000, "completed", activity, json!([run_of("r1", "completed")]));
+    let items = view_items(&rig);
+    assert_eq!(
+        texts(&rig),
+        [
+            "go",
+            "Worked for 2m 47s",
+            "thinking it over",
+            "working on it",
+            "Read 1 file",
+            "The agent did not confirm reading your steer before Stop.",
+            "Ran 1 search",
+            "all done",
+            "The plugin:vercel:vercel MCP server needs a sign-in before Claude can use it.",
+        ]
+    );
+    assert_eq!(items[5], json!({ "r": "a", "x": "The agent did not confirm reading your steer before Stop.", "nt": 1 }));
+    assert_eq!(items[8], json!({ "r": "a", "x": "The plugin:vercel:vercel MCP server needs a sign-in before Claude can use it.", "nt": 1, "si": 1 }));
+    // The rows fold under Worked for; the notices stay out, as T3 keeps them.
+    assert_eq!(items[6]["f"], items[1]["w"]["l"]);
+    assert!(items[5]["f"].is_null() && items[8]["f"].is_null(), "{items:?}");
+}
+
+#[test]
+fn a_codex_server_that_says_to_log_in_is_a_sign_in_too() {
+    let codex = "The planetscale MCP server is not logged in. Run `codex mcp login planetscale`.";
+    let mut activity = a_turn();
+    activity.push(notice(5, "MCP server planetscale failed to start", codex));
+    let expired = "The axiom MCP server requires OAuth reauthentication. Use your client's MCP OAuth sign-in flow.";
+    activity.push(notice(6, "MCP server axiom failed to start", expired));
+    let failed = "MCP server sentry failed to start: connection refused";
+    activity.push(notice(7, "MCP server sentry failed to start", failed));
+    let rig = fold_rig(62_600_000, "completed", activity, json!([run_of("r1", "completed")]));
+    let items = view_items(&rig);
+    assert_eq!(items[6], json!({ "r": "a", "x": codex, "nt": 1, "si": 1 }));
+    assert_eq!(items[7], json!({ "r": "a", "x": expired, "nt": 1, "si": 1 }));
+    assert_eq!(items[8], json!({ "r": "a", "x": failed, "nt": 1 }));
+}
+
 #[test]
 fn a_turn_that_changed_files_lists_them_after_its_last_message_outside_the_fold() {
     let files = [("companion/src/bridge.rs", 9, 2), ("companion/src/bridge/tests.rs", 18, 2), ("README.md", 1, 0)];

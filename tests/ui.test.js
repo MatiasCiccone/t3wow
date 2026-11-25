@@ -1834,6 +1834,47 @@ return "ok"
   assert.equal(out, "ok");
 });
 
+test("T3's notice is a warning row of its own, and one that needs a sign-in says to sign in from T3 Code", () => {
+  const out = run(SHOWN + `
+local thread = { e = 1, id = "t1", t = "Thread", s = "completed", set = false, at = time(), p = "" }
+local items = {
+  { r = "a", x = "all done", p = 4 },
+  { r = "a", x = "The plugin:vercel:vercel MCP server needs a sign-in before Claude can use it.", nt = 1, si = 1 },
+  { r = "a", x = "The agent did not confirm reading your steer before Stop.", nt = 1 },
+}
+inboxWith(ENVS, { cp = 1, threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = items } })
+UI.Select(thread)
+local warn, muted = ns.Skin.Hex("warn"), ns.Skin.Hex("muted")
+local signIn = shownString("needs a sign%-in before")
+assert(signIn, "no notice")
+assert(signIn.text == "|cff" .. warn .. "The plugin:vercel:vercel MCP server needs a sign-in before Claude can use it.|r |cff" .. muted .. "Sign in from T3 Code: the game can't.|r", signIn.text)
+local steer = shownString("did not confirm")
+assert(steer.text == "|cff" .. warn .. "The agent did not confirm reading your steer before Stop.|r", steer.text)
+assert(below(signIn, shownString("all done")) and below(steer, signIn), "not each below the one before")
+-- Each with T3's alert icon at its left, in the warning color.
+for _, fs in ipairs({ signIn, steer }) do
+  local icon
+  for _, f in ipairs(frames) do
+    local point = rawget(f, "point")
+    if f.kind == "Texture" and f.shown and point and point[2] == fs then icon = f end
+  end
+  assert(icon and icon.texturePath:find("alert") and icon.colorKey == "warn", "no alert icon")
+end
+-- Nothing to open or copy.
+for _, f in ipairs(frames) do
+  assert(not (f.kind == "Button" and f.shown and (rawget(f, "copyText") or ""):find("MCP server")), "it can be copied")
+end
+-- Another thread's view leaves no icon behind.
+inboxWith(ENVS, { cp = 1, threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "completed", items = { { r = "a", x = "all done", p = 4 } } } })
+for _, f in ipairs(frames) do
+  local path = rawget(f, "texturePath")
+  assert(not (f.kind == "Texture" and f.shown and path and path:find("alert")), "an icon left behind")
+end
+return "ok"
+`);
+  assert.equal(out, "ok");
+});
+
 test("a question still waiting is a row saying so, with nothing to open", () => {
   const out = run(SHOWN + `
 local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }

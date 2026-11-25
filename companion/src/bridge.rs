@@ -1177,9 +1177,52 @@ struct ScanCache {
     changes: Vec<FoundChanges>,
     /// What it did between its messages, by position.
     work: Vec<FoundWork>,
+    /// What T3 told the thread (its notices), by position.
+    notices: Vec<FoundNotice>,
     /// The run each item read belongs to and when it was last touched, by position: what
     /// a finished turn folds, and for how long a steered part of it went on.
     runs: BTreeMap<u64, (String, i64)>,
+}
+
+/// A notice T3 put in the thread (a `system_notice`: a server that needs a sign-in, a usage
+/// limit, a steer it couldn't confirm…), which T3 draws as a warning row of its own, never
+/// grouped with tools nor folded under "Worked for".
+#[derive(Clone)]
+struct FoundNotice {
+    position: u64,
+    text: String,
+    /// An MCP server that needs a sign-in: T3 puts a Sign in button on it, which the game
+    /// can't offer. T3's read leaves out what tells it (`mcpSignIn`), so this goes by its
+    /// words: Claude's title, or Codex's own message, as T3 tells a Codex one (it says to run
+    /// `codex mcp login`, or that the server requires OAuth reauthentication).
+    sign_in: bool,
+}
+
+impl FoundNotice {
+    fn from_item(item: &Value, position: u64) -> Option<FoundNotice> {
+        if item["type"] != "system_notice" {
+            return None;
+        }
+        let text = str_of(&item["text"]);
+        let words = if text.trim().is_empty() { str_of(&item["title"]) } else { text };
+        let mut text = plain(words, NOTICE_CHARS);
+        if text.is_empty() {
+            return None;
+        }
+        if item["textTruncated"] == true {
+            text.push('…');
+        }
+        let sign_in = str_of(&item["title"]).ends_with(" needs a sign-in") || words.contains("mcp login") || words.contains("requires OAuth reauthentication");
+        Some(FoundNotice { position, text, sign_in })
+    }
+
+    fn shown(&self) -> Value {
+        let mut shown = json!({ "r": "a", "x": self.text, "nt": 1 });
+        if self.sign_in {
+            shown["si"] = json!(1);
+        }
+        shown
+    }
 }
 
 /// What an activity item did, for the row T3 folds it into.
@@ -1851,6 +1894,8 @@ const CARD_BODY_CHARS: usize = 400;
 const SCAN_PAGES: usize = 4;
 /// How long a row's one line can be.
 const WORK_LABEL_CHARS: usize = 140;
+/// As much of a notice as the scan reads (its maxCharsPerItem).
+const NOTICE_CHARS: usize = 200;
 /// A tool call still "running" this long was left behind: it's treated as ended.
 const WORK_STALE_MS: i64 = 600_000;
 /// How much of a row is read and sent when it is opened, how long each code box of it is
@@ -4905,7 +4950,7 @@ impl Bridge {
         let View { env, id, .. } = read.view.clone();
         let mut cache = match self.scan.take().filter(|c| c.env == env && c.id == id && c.from <= first) {
             Some(cache) => cache,
-            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new(), changes: Vec::new(), work: Vec::new(), runs: BTreeMap::new() },
+            None => ScanCache { env: env.clone(), id: id.clone(), from: first, upto: None, pages: Vec::new(), cards: Vec::new(), compactions: Vec::new(), changes: Vec::new(), work: Vec::new(), notices: Vec::new(), runs: BTreeMap::new() },
         };
         // Back to what was still under way, whose title and text may have come since.
         let unfinished = cache.work.iter().filter(|w| !w.ended).map(|w| w.position).min().and_then(|p| p.checked_sub(1));
@@ -4934,6 +4979,10 @@ impl Bridge {
                     }
                     None => cache.work.push(work),
                 }
+            }
+            if let Some(notice) = FoundNotice::from_item(item, position) {
+                cache.notices.retain(|n| n.position != position);
+                cache.notices.push(notice);
             }
             if item["type"] == "subagent" {
                 let card = FoundCard::from_item(item, position);
@@ -5292,6 +5341,9 @@ impl Bridge {
             // Each finished turn's changed files, where T3 shows them: after its last message.
             for changes in self.scan.iter().flat_map(|s| s.changes.iter()).filter(|c| c.full && c.position >= first && !c.files.is_empty()) {
                 placed.push((changes.position * 2, changes.shown()));
+            }
+            for notice in self.scan.iter().flat_map(|s| s.notices.iter()).filter(|n| n.position >= first) {
+                placed.push((notice.position * 2, notice.shown()));
             }
             let Some(read) = self.view_read() else { return };
             let still_working = read.built.as_ref().is_some_and(|built| working(str_of(&built["s"])));

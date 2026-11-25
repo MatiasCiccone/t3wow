@@ -3445,6 +3445,31 @@ do
         Mono.Place(shown, false)
         flow.gap = flow.gap - (18 - GROUP_GAP)
     end
+
+    -- A notice T3 put in the thread (item.nt): a row of its own, as T3 draws it, its alert icon
+    -- and its words in the warning color, whole. T3 puts a Sign in button on a server that
+    -- needs one (item.si), which the game can't offer: it says where to sign in instead.
+    function Work.Notice(fs, text, signIn)
+        if not rawget(fs, "noticeIcon") then
+            fs.noticeIcon = Skin.Glyph(messageChild, "alert", 14, "warn", "OVERLAY")
+        end
+        fs.bubble:Hide()
+        fs:SetFontObject(Skin.fonts.text)
+        fs:SetWidth(messageWidth() - 8 - 20)
+        local hint = signIn and (" |cff" .. Skin.Hex("muted") .. "Sign in from T3 Code: the game can't.|r") or ""
+        fs:SetText("|cff" .. Skin.Hex("warn") .. text .. "|r" .. hint)
+        if flow.last then flow.gap = flow.rowLast == flow.last and ROW_GAP or flow.gap - (18 - GROUP_GAP) end
+        place(fs, 24, GROUP_GAP)
+        flow.rowLast = fs
+        local icon = fs.noticeIcon
+        icon:ClearAllPoints()
+        icon:SetPoint("TOPRIGHT", fs, "TOPLEFT", -6, 0)
+        -- The game finds a new file only when it starts: one started before this version
+        -- draws no icon rather than a square.
+        local file = not icon.GetTextureFilePath or icon:GetTextureFilePath()
+        icon:SetAlpha((file ~= nil and file ~= "") and 1 or 0)
+        icon:Show()
+    end
 end
 
 -- What the conversation was last drawn from. An update that left out the open thread and
@@ -3703,6 +3728,7 @@ function renderView()
             fs.audioIcon:Hide()
             fs:SetWordWrap(true)
         end
+        if rawget(fs, "noticeIcon") then fs.noticeIcon:Hide() end
         if rawget(fs, "chevron") then
             fs.chevron:Hide()
             fs.workText:Hide()
@@ -3787,6 +3813,7 @@ function renderView()
             if item.ho then Handoff.Place("Context handoff · " .. item.ho) end
             local rule = item.rule == 1
             local work = type(item.w) == "table" and item.w or false
+            local notice = not work and item.nt == 1
             local card = type(item.d) == "table"
             local changes = not card and type(item.cf) == "table" and item.cf
             local lost = not card and item.lost == 1
@@ -3796,6 +3823,8 @@ function renderView()
             local audio = play and not play.v and item.im == nil
             if work then
                 UI.Work.Place(fs, work, item.x)
+            elseif notice then
+                UI.Work.Notice(fs, item.x, item.si == 1)
             elseif rule then
                 Handoff.Place(item.x)
             elseif card then
@@ -3818,7 +3847,7 @@ function renderView()
             -- draw them either.
             -- A companion that copies says where each message is (p): a line with none is
             -- a picture's placeholder, not a message.
-            local copyable = not work and not rule and not card and not lost and not picture and not play
+            local copyable = not work and not notice and not rule and not card and not lost and not picture and not play
                 and (type(item.p) == "number" or not (inbox and inbox.cp))
             fs.hit.copyText = copyable and (item.cx or item.x) or false
             fs.copyIcon = false
@@ -3831,7 +3860,7 @@ function renderView()
             fs.hit.work = work
             -- A picture that couldn't be loaded has nothing to enlarge or copy; a delegated
             -- task's card isn't a message to copy.
-            fs.hit:SetShown((play or not lost) and not rule and not card and not (work and work.still))
+            fs.hit:SetShown((play or not lost) and not rule and not notice and not card and not (work and work.still))
             -- A quote's source, while it's shown, has the hover tint.
             if UI.Quote.On(i) then fs.hover:Show() end
         end

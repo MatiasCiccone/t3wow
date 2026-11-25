@@ -99,6 +99,8 @@ strokes("alarm.tga", 2.4, [alarmFace, [[16, 12], [16, 17.5], [19, 20]], [[6.7, 4
 // A thread waiting on your input: a question mark in a circle.
 const hook = Array.from({ length: 25 }, (_, i) => [16 + 3.6 * Math.cos(Math.PI + (i * Math.PI * 1.3) / 24), 12.6 + 3.6 * Math.sin(Math.PI + (i * Math.PI * 1.3) / 24)]);
 strokes("question.tga", 2.4, [face, [...hook, [16, 18]], [[16, 22], [16, 22.4]]]);
+// A notice T3 put in a thread: an exclamation mark in a circle (T3's circle-alert).
+strokes("alert.tga", 2.4, [face, [[16, 10], [16, 17.5]], [[16, 22], [16, 22.4]]]);
 // The window's three actions. Refresh: a circle nearly closed, with its arrowhead at the top right.
 const refreshArc = Array.from({ length: 41 }, (_, i) => { const a = ((30 + (i * 300) / 40) * Math.PI) / 180; return [16 + 9.5 * Math.cos(a), 16 + 9.5 * Math.sin(a)]; });
 strokes("refresh.tga", 2.4, [refreshArc, [[25.5, 5], [25.5, 11.5], [19, 11.5]]]);
