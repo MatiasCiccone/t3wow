@@ -93,6 +93,8 @@ impl SlotWriter for RecordingSlots {
 const OPTIONAL: &[&str] = &[
     // Codex's questions leave it out (single choice); Claude's say it.
     "t3_pending_request.questions[].multiSelect",
+    // Only on an option the agent gave a preview.
+    "t3_pending_request.questions[].options[].preview",
 ];
 
 /// The JSON kind of a value, for messages.
@@ -640,6 +642,49 @@ fn live_an_answer_from_the_game_reaches_the_agent() {
         assert!(view["approval"] != true, "the agent's question came as an approval, which T3's tools can't answer: {view:#}");
         assert!(attempt < TRIES, "the agent never asked: {:?}", live.said(&id, "a"));
         eprintln!("  try {attempt}: the agent didn't ask, asking it again");
+        let s = live.command(json!({ "t": "send", "id": id, "m": ask }));
+        live.expect_no_failure(s);
+    }
+}
+
+/// A multi-select submitted from the game with nothing checked goes to T3 as an empty list,
+/// which T3 0.1.12 takes as an answer of none: the question is resolved and the agent's run
+/// goes on, not refused for want of a pick. (T3 hands Claude an empty list as an empty
+/// answer, which Claude's tool reports as the question not answered, from T3's own window
+/// too, so the reply's words aren't checked.)
+#[test]
+#[ignore = "live: starts agent runs on the T3 the companion is signed in to (npm run test:live)"]
+fn live_a_multi_select_answered_with_nothing_checked_reaches_the_agent() {
+    let mut live = Live::start("answer-none");
+    let ask = "Use your tool for asking the user a question (AskUserQuestion) to ask me exactly one question,                \"Which extras do you want?\", that allows several answers (multiSelect), with three options: Lint, Tests and CI.                Once I answer, reply with one short sentence that starts with the word TALLYHO and quotes what the tool returned.                Do not use any other tools, and do not ask again.";
+    let id = live.new_thread(ask);
+    for attempt in 1..=TRIES {
+        let asked = live.try_wait(REPLY_TIMEOUT, |live| {
+            let view = live.snapshot()["view"].clone();
+            (view["id"] == id.as_str() && view["ask"].is_object()) || (!working(str_of(&live.thread(&id)["status"])) && live.thread(&id)["status"] != "waiting")
+        });
+        let view = live.snapshot()["view"].clone();
+        if asked.is_ok() && view["ask"].is_object() && view["ask"]["qs"][0]["m"] == true {
+            assert!(view["ask"]["qs"][0]["r"].is_null(), "the agent's question came as required: {:#}", view["ask"]);
+            // A reply after the answer: the agent may name the word while asking, too.
+            let replies = |live: &Live| live.said(&id, "a").iter().filter(|x| x.to_lowercase().contains("tallyho")).count();
+            let before = replies(&live);
+            // Nothing checked and nothing typed, as the game sends it.
+            let s = live.command(json!({ "t": "answer", "id": id, "k": view["ask"]["k"], "a": [false] }));
+            live.expect_no_failure(s);
+            let responds: Vec<Value> = live.t3.calls.lock().unwrap().iter().filter(|(n, a, _)| n == "t3_pending_request" && a["action"] == "respond").map(|(_, a, _)| a["answers"].clone()).collect();
+            assert_eq!(responds.len(), 1, "{responds:?}");
+            let answers: Vec<&Value> = responds[0].as_object().unwrap().values().collect();
+            assert_eq!(answers, vec![&json!([])], "not an empty list: {:#}", responds[0]);
+            live.wait("the reply to an answer of none", REPLY_TIMEOUT, |live| replies(live) > before);
+            live.wait("the question to go", STATE_TIMEOUT, |live| live.snapshot()["view"]["ask"].is_null());
+            eprintln!("  the agent: {:?}", live.said(&id, "a").last());
+            live.checkpoint("the reply to an answer of none", &id, &["TALLYHO"], &[]);
+            return live.finish();
+        }
+        assert!(view["approval"] != true, "the agent's question came as an approval, which T3's tools can't answer: {view:#}");
+        assert!(attempt < TRIES, "the agent never asked a multi-select question: {:?} {:#}", live.said(&id, "a"), view["ask"]);
+        eprintln!("  try {attempt}: the agent didn't ask a multi-select question, asking it again");
         let s = live.command(json!({ "t": "send", "id": id, "m": ask }));
         live.expect_no_failure(s);
     }
