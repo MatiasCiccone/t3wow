@@ -50,6 +50,8 @@ struct FakeT3 {
     /// The title T3 generates for a thread launched with `generateTitle`, and when (on the
     /// rig's clock) it replaces the seed.
     generating: Mutex<Option<(String, String, i64)>>,
+    /// The pending request's questions, as T3 reads them.
+    asked: Mutex<Value>,
 }
 
 /// Inputs T3 added after the T3 Code the tool fixture was recorded from, by tool, and the
@@ -119,6 +121,17 @@ impl FakeT3 {
             runs: Mutex::new(json!([])),
             fail_offset_once: Mutex::new(None),
             generating: Mutex::new(None),
+            asked: Mutex::new(json!([
+                { "id": "Which color?", "header": "Color", "question": "Which color?", "multiSelect": false,
+                  "options": [{ "label": "Red", "description": "Warm" },
+                              { "label": "Blue", "description": "Cool", "preview": "```css
+.sky | .sea {
+  color: blue;
+}
+```" }] },
+                { "id": "Which extras?", "header": "Extras", "question": "Which extras?", "multiSelect": true,
+                  "options": [{ "label": "Sound", "description": "" }, { "label": "Chat line", "description": "" }] },
+            ])),
         })
     }
 
@@ -383,20 +396,20 @@ impl T3 for FakeT3 {
             "t3_pending_request" => match args["action"].as_str() {
                 Some("list") if !*self.questions.lock().unwrap() => json!({ "requestIds": [] }),
                 Some("list") => json!({ "requestIds": *self.request_ids.lock().unwrap() }),
-                Some("read") => json!({
-                    "requestId": args["requestId"],
-                    "questions": [
-                        { "id": "Which color?", "header": "Color", "question": "Which color?", "multiSelect": false,
-                          "options": [{ "label": "Red", "description": "Warm" },
-                                      { "label": "Blue", "description": "Cool", "preview": "```css
-.sky | .sea {
-  color: blue;
-}
-```" }] },
-                        { "id": "Which extras?", "header": "Extras", "question": "Which extras?", "multiSelect": true,
-                          "options": [{ "label": "Sound", "description": "" }, { "label": "Chat line", "description": "" }] },
-                    ],
-                }),
+                Some("read") => json!({ "requestId": args["requestId"], "questions": *self.asked.lock().unwrap() }),
+                // As T3 0.1.12: an empty list answers an optional multi-select ("none of
+                // these"); a single-select or a required question still needs a choice.
+                Some("respond") => {
+                    let asked = self.asked.lock().unwrap().clone();
+                    let refused = asked.as_array().into_iter().flatten().any(|q| {
+                        let empty = args["answers"][str_of(&q["id"])].as_array().is_some_and(Vec::is_empty);
+                        empty && (q["multiSelect"] != true || q["required"] == true)
+                    });
+                    if refused {
+                        return Err(T3Error::Other("Answer each question before sending.".into()));
+                    }
+                    json!({ "sequence": 1 })
+                }
                 _ => json!({ "sequence": 1 }),
             },
             _ => json!({}),
@@ -990,6 +1003,79 @@ fn a_pending_question_reaches_the_game_and_its_answer_goes_back_by_label() {
     assert_eq!(rig.t3.calls_to("t3_pending_request").into_iter().filter(|a| a["action"] == "respond").count(), 1);
 }
 
+/// A thread waiting on the fake's questions (`asked`), open in the game: the inbox and the
+/// question's token.
+fn asking(asked: Value) -> (Rig, String, String) {
+    let mut rig = Rig::new(5_000_000);
+    {
+        let mut threads = rig.t3.threads.lock().unwrap();
+        threads[0]["status"] = json!("waiting");
+        threads[0]["pendingRequestCount"] = json!(1);
+    }
+    *rig.t3.asked.lock().unwrap() = asked;
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 1, "q": [{ "s": 1, "t": "ui", "o": true }, { "s": 2, "t": "open", "id": "t1" }] }));
+    rig.bridge.tick();
+    let inbox = rig.slot(1);
+    let at = inbox.find("ask={k=\"").expect("no question in the inbox") + 8;
+    let token = inbox[at..at + 8].to_string();
+    (rig, inbox, token)
+}
+
+fn responds(rig: &Rig) -> Vec<Value> {
+    rig.t3.calls_to("t3_pending_request").into_iter().filter(|a| a["action"] == "respond").map(|a| a["answers"].clone()).collect()
+}
+
+#[test]
+fn a_multi_select_with_nothing_checked_answers_none_unless_it_is_required() {
+    let extras = json!({ "id": "Which extras?", "header": "Extras", "question": "Which extras?", "multiSelect": true,
+                         "options": [{ "label": "Sound", "description": "" }, { "label": "Chat line", "description": "" }] });
+    let color = json!({ "id": "Which color?", "header": "Color", "question": "Which color?", "multiSelect": false,
+                        "options": [{ "label": "Red", "description": "" }, { "label": "Blue", "description": "" }] });
+
+    // Nothing checked, nothing typed: an empty list, as T3 0.1.12 sends it.
+    let (mut rig, inbox, token) = asking(json!([extras]));
+    assert!(!inbox.contains("r=true"), "an optional question went as required: {inbox}");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [false] }] }));
+    rig.bridge.tick();
+    assert_eq!(responds(&rig), vec![json!({ "Which extras?": [] })]);
+
+    // Only a pick past its options: nothing to send, not an answer of none.
+    let (mut rig, _, token) = asking(json!([extras]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [9] }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3)["ok"], false);
+    assert!(responds(&rig).is_empty(), "an answer went with no pick");
+
+    // Text typed with no pick still answers it in your own words.
+    let (mut rig, _, token) = asking(json!([extras]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": ["none of them"] }] }));
+    rig.bridge.tick();
+    assert_eq!(responds(&rig), vec![json!({ "Which extras?": "none of them" })]);
+
+    // A pick on another question: the multi-select left alone answers none with it.
+    let (mut rig, _, token) = asking(json!([color, extras]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [2, false] }] }));
+    rig.bridge.tick();
+    assert_eq!(responds(&rig), vec![json!({ "Which color?": "Blue", "Which extras?": [] })]);
+
+    // A single-select left alone still needs a pick.
+    let (mut rig, _, token) = asking(json!([color, extras]));
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [false, false] }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3)["ok"], false);
+    assert!(responds(&rig).is_empty(), "an answer went with no pick");
+
+    // A required multi-select: the game hears it is, and it still needs a pick.
+    let mut required = extras.clone();
+    required["required"] = json!(true);
+    let (mut rig, inbox, token) = asking(json!([required]));
+    assert!(inbox.contains(",r=true}}}"), "the game isn't told it's required: {inbox}");
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [false] }] }));
+    rig.bridge.tick();
+    assert_eq!(outcome(&rig, 3)["ok"], false);
+    assert!(responds(&rig).is_empty(), "a required question went unanswered");
+}
+
 #[test]
 fn an_options_preview_reaches_the_game_with_its_lines_as_in_t3() {
     let mut rig = Rig::new(5_000_000);
@@ -1352,7 +1438,7 @@ fn typed_text_answers_a_question_in_your_own_words() {
         thread: "t1".into(),
         token: "x".into(),
         request_id: "r".into(),
-        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], multi: false }],
+        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], multi: false, required: false }],
     };
     assert_eq!(Bridge::answers_for(&ask, &json!(["  my own words "])), json!({ "Name?": "my own words" }).as_object().unwrap().clone());
     assert!(Bridge::answers_for(&ask, &json!([9])).is_empty(), "an index past the options is ignored");
@@ -1360,7 +1446,7 @@ fn typed_text_answers_a_question_in_your_own_words() {
 
 #[test]
 fn typed_text_with_a_pick_goes_in_the_answer_as_a_note() {
-    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), multi };
+    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), multi, required: false };
     let ask = PendingAsk {
         env: String::new(),
         thread: "t1".into(),
@@ -1377,6 +1463,9 @@ fn typed_text_with_a_pick_goes_in_the_answer_as_a_note() {
     assert_eq!(answers["Sizes"], json!(["M"]));
     // Only text left (a pick past the options): it answers on its own.
     assert_eq!(Bridge::answers_for(&ask, &json!([[9, "mine"]]))["Look?"], json!("mine"));
+    // A multi-select answers none only when the game left it alone, not for a pick past its options.
+    assert_eq!(Bridge::answers_for(&ask, &json!([1, false]))["Sizes"], json!([]));
+    assert!(Bridge::answers_for(&ask, &json!([1, 9])).get("Sizes").is_none());
 }
 
 #[test]

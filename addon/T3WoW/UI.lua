@@ -2928,8 +2928,10 @@ end
 
 -- Sends the picks, and typed text for the first question without a pick. With every
 -- question picked, the text goes with the last one's pick as a note ({ picks..., text }),
--- never dropped. The companion turns the indexes back into T3's ids and labels. Returns
--- true when it used the input.
+-- never dropped. A multi-select left with nothing checked answers none, as in T3, unless
+-- it's required (q.r); with nothing picked or typed, it goes only when every question is
+-- such a multi-select. The companion turns the indexes back into T3's ids and labels.
+-- Returns true when it used the input.
 local function sendAnswer(text)
     local ask = pendingAsk()
     if not ask then return false end
@@ -2938,7 +2940,7 @@ local function sendAnswer(text)
         UI.Notice(why)
         return false -- what you typed stays
     end
-    local answers, any, typedUsed = {}, false, false
+    local answers, any, typedUsed, needsPick = {}, false, false, false
     local typed = text and text ~= ""
     for qi, q in ipairs(ask.qs or {}) do
         local list = {}
@@ -2953,6 +2955,7 @@ local function sendAnswer(text)
             typedUsed, any = true, true
         else
             answers[qi] = false -- keeps the list in step with the questions
+            if not q.m or q.r then needsPick = true end
         end
     end
     local last = #(ask.qs or {})
@@ -2962,7 +2965,7 @@ local function sendAnswer(text)
         note[#note + 1] = text
         answers[last], typedUsed = note, true
     end
-    if not any then
+    if not any and needsPick then
         UI.Notice("Pick an answer, or type one below.")
         return true
     end

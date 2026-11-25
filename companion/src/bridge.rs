@@ -2004,6 +2004,16 @@ struct PendingQuestion {
     key: String,
     labels: Vec<String>,
     multi: bool,
+    /// T3 0.1.12 marks a question the provider requires an answer to; a multi-select
+    /// without it may be answered with nothing checked.
+    required: bool,
+}
+
+impl PendingQuestion {
+    /// A multi-select answered with nothing checked: "none of these", an empty list.
+    fn none_allowed(&self) -> bool {
+        self.multi && !self.required
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3153,7 +3163,7 @@ impl Bridge {
                         .filter(|a| a.thread == id && a.env == env && a.token == str_of(&command["k"]))
                         .ok_or_else(|| T3Error::Other("that question was already answered or has changed".into()))?;
                     let answers = Self::answers_for(&ask, &command["a"]);
-                    if answers.is_empty() {
+                    if !Self::answer_complete_enough(&ask, &answers) {
                         return Err(T3Error::Other("pick an answer first".into()));
                     }
                     let args = json!({ "action": "respond", "threadId": id, "requestId": ask.request_id, "answers": answers });
@@ -5540,8 +5550,9 @@ impl Bridge {
             let key = q["id"].as_str().unwrap_or(text).to_string();
             let options: Vec<&Value> = q["options"].as_array().map(|o| o.iter().collect()).unwrap_or_default();
             let multi = q["multiSelect"] == true;
-            questions.push(PendingQuestion { key, labels: options.iter().map(|o| str_of(&o["label"]).to_string()).collect(), multi });
-            shown.push(json!({
+            let required = q["required"] == true;
+            questions.push(PendingQuestion { key, labels: options.iter().map(|o| str_of(&o["label"]).to_string()).collect(), multi, required });
+            let mut question = json!({
                 "h": plain(str_of(&q["header"]), 40),
                 // Not in the view, which names models: a model reference stays as written.
                 "q": name_model_refs(&wow_text(text, 1000), |_, _| None),
@@ -5555,7 +5566,11 @@ impl Bridge {
                     }
                     shown
                 }).collect::<Vec<_>>(),
-            }));
+            });
+            if required {
+                question["r"] = json!(true);
+            }
+            shown.push(question);
         }
         if questions.is_empty() {
             return None;
@@ -5568,7 +5583,9 @@ impl Bridge {
     /// Turns the game's answer (per question: a 1-based option index, a list of them, or
     /// typed text) into T3's answers, keyed by question id with option labels. A list may
     /// end with typed text, a note on the picks: T3's answers have no place for one (its own
-    /// window sends either), so it goes in the answer after them, as "Note: ...".
+    /// window sends either), so it goes in the answer after them, as "Note: ...". A
+    /// multi-select left with nothing checked (`false`) answers none, as in T3 0.1.12, unless it's
+    /// required.
     fn answers_for(ask: &PendingAsk, given: &Value) -> Map<String, Value> {
         let mut answers = Map::new();
         for (i, q) in ask.questions.iter().enumerate() {
@@ -5598,11 +5615,25 @@ impl Bridge {
                 }
                 _ => None,
             };
-            if let Some(value) = value {
-                answers.insert(q.key.clone(), value);
+            match value {
+                Some(value) => {
+                    answers.insert(q.key.clone(), value);
+                }
+                // `false`: the game's question left alone, not an option it couldn't name.
+                None if q.none_allowed() && given[i] == false => {
+                    answers.insert(q.key.clone(), json!([]));
+                }
+                None => {}
             }
         }
         answers
+    }
+
+    /// Whether the game's answer picks or says something, or leaves alone only questions
+    /// that may go unpicked: T3 needs a choice for a single-select or a required question.
+    fn answer_complete_enough(ask: &PendingAsk, answers: &Map<String, Value>) -> bool {
+        let chose = answers.values().any(|v| v.as_array().is_none_or(|list| !list.is_empty()));
+        chose || (!answers.is_empty() && ask.questions.iter().all(PendingQuestion::none_allowed))
     }
 
     // ---- writing into the game ----

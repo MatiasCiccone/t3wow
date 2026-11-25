@@ -4662,6 +4662,57 @@ return "ok"
 `);
 });
 
+test("a multi-select with nothing checked submits as none, unless it's required or a single-select is left alone", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local function asking(ask)
+  inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+  UI.Select(thread)
+end
+local extras = { h = "Extras", q = "Which extras?", m = true, o = { { l = "Lint", d = "" }, { l = "Tests", d = "" } } }
+local said
+local notice = UI.Notice
+UI.Notice = function(text) said = text; notice(text) end
+
+-- Nothing checked: it goes, and the companion answers none.
+asking({ k = "beef0010", qs = { extras } })
+local before = #queue()
+click("Submit answer")
+assert(#queue() == before + 1 and sent().t == "answer" and sent().a[1] == false, "an empty multi-select didn't go")
+
+-- Checked, then unchecked: the same.
+asking({ k = "beef0011", qs = { extras } })
+click("Lint")
+click("Lint")
+before = #queue()
+click("Submit answer")
+assert(#queue() == before + 1 and sent().a[1] == false, "unchecking left it unsendable")
+
+-- Text typed with nothing checked answers it in your own words, as before.
+asking({ k = "beef0012", qs = { extras } })
+typeText("none of them")
+click("Submit answer")
+assert(sent().a[1] == "none of them", "the text didn't answer it")
+
+-- Required: it still needs a pick.
+asking({ k = "beef0013", qs = { { h = "Extras", q = "Which extras?", m = true, r = true, o = extras.o } } })
+before = #queue()
+click("Submit answer")
+assert(#queue() == before, "a required question went with nothing picked")
+assert(said == "Pick an answer, or type one below.", "no word on why it didn't go: " .. tostring(said))
+
+-- A single-select left alone with it: still needs a pick.
+asking({ k = "beef0014", qs = { { h = "Color", q = "Which?", m = false, o = { { l = "Red", d = "" } } }, extras } })
+before = #queue()
+click("Submit answers")
+assert(#queue() == before, "an unpicked single-select went")
+click("Red")
+click("Submit answers")
+assert(#queue() == before + 1 and sent().a[1] == 1 and sent().a[2] == false, "the pick didn't go with the empty multi-select")
+return "ok"
+`);
+});
+
 test("a question is laid out as in T3: a quiet header, then options stacked with what they mean and a number", () => {
   run(`
 local ask = { k = "abcd1234", qs = { { h = "Input test", q = "Does it look right?", m = false, o = { { l = "Looks right", d = "The row shows Input" }, { l = "Needs changes", d = "" } } } } }
