@@ -1,5 +1,5 @@
 {
-  "t3": "0.1.11",
+  "t3": "0.1.12",
   "tools": {
     "list_thread_pull_requests": {
       "inputs": {
@@ -94,6 +94,7 @@
         "projectId": [],
         "scratch": [],
         "title": [],
+        "generateTitle": [],
         "modelSelection": [],
         "runtimeMode": [
           "approval-required",
@@ -108,8 +109,10 @@
         "workspaceStrategy": [],
         "message": [],
         "attachments": [],
+        "outputSchema": [],
         "clientRequestId": [],
-        "delegatedFrom": []
+        "delegatedFrom": [],
+        "workflowRun": []
       },
       "required": [
         "title"
@@ -183,6 +186,7 @@
           "steer"
         ],
         "freshContext": [],
+        "outputSchema": [],
         "clientRequestId": []
       },
       "required": [
