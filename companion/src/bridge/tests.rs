@@ -400,17 +400,30 @@ impl T3 for FakeT3 {
                 // As T3 0.1.13: an empty list answers a multi-select the provider doesn't
                 // require ("none of these"), and a question marked `required: false` may have
                 // no entry at all (skipped, as T3's window sends it). Any other question needs
-                // a choice or words.
+                // a choice or words. An option with a `value` (an ACP agent's choice) is
+                // answered by that value, as T3's window sends it: its label fails the agent's
+                // form (T3 cancels it, or drops an optional answer; refused here, to be seen).
                 Some("respond") => {
                     let asked = self.asked.lock().unwrap().clone();
-                    let refused = asked.as_array().into_iter().flatten().any(|q| {
+                    let unanswered = asked.as_array().into_iter().flatten().any(|q| {
                         let answer = &args["answers"][str_of(&q["id"])];
                         let said = answer.as_str().is_some_and(|t| !t.is_empty()) || answer.as_array().is_some_and(|l| !l.is_empty());
                         let none = answer.as_array().is_some_and(Vec::is_empty) && q["multiSelect"] == true && q["required"] != true;
                         !said && !none && q["required"] != false
                     });
-                    if refused {
+                    if unanswered {
                         return Err(T3Error::Other("Answer each question before sending.".into()));
+                    }
+                    let by_label = asked.as_array().into_iter().flatten().any(|q| {
+                        let options = q["options"].as_array().cloned().unwrap_or_default();
+                        let answer = &args["answers"][str_of(&q["id"])];
+                        let given = answer.as_array().cloned().unwrap_or_else(|| vec![answer.clone()]);
+                        given.iter().any(|g| {
+                            options.iter().any(|o| o["value"].is_string() && o["label"] == *g) && !options.iter().any(|o| o["value"] == *g)
+                        })
+                    });
+                    if by_label {
+                        return Err(T3Error::Other("The agent's form takes the option's value, not its label.".into()));
                     }
                     json!({ "sequence": 1 })
                 }
@@ -1081,6 +1094,32 @@ fn a_multi_select_with_nothing_checked_answers_none_unless_it_is_required() {
 }
 
 #[test]
+fn an_acp_choice_is_answered_by_its_option_value_as_in_t3() {
+    // An ACP agent's form, as T3 0.1.13 asks it: a titled `oneOf` choice and titled array
+    // items carry the title as the label and the `const` as the value.
+    let plan = json!({ "id": "plan", "header": "Plan", "question": "Which plan?", "multiSelect": false,
+                       "options": [{ "label": "Pro plan", "description": "", "value": "pro" }, { "label": "Free plan", "description": "", "value": "free" }] });
+    let targets = json!({ "id": "targets", "header": "Targets", "question": "Which targets?", "multiSelect": true,
+                          "options": [{ "label": "Web app", "description": "", "value": "web" }, { "label": "Command line", "description": "", "value": "cli" }] });
+    let answer = |a: Value| {
+        let (mut rig, inbox, token) = asking(json!([plan, targets]));
+        assert!(inbox.contains("{l=\"Pro plan\",d=\"\"}"), "the game shows the label: {inbox}");
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": a }] }));
+        rig.bridge.tick();
+        assert_ne!(outcome(&rig, 3)["ok"], false, "{:?}", outcome(&rig, 3));
+        responds(&rig).pop().unwrap()
+    };
+
+    // Picks go as the options' values, as T3's window sends them.
+    assert_eq!(answer(json!([1, [2, 1]])), json!({ "plan": "pro", "targets": ["cli", "web"] }));
+    assert_eq!(answer(json!([2, 1])), json!({ "plan": "free", "targets": ["web"] }));
+    // A note on multi-select picks follows their values.
+    assert_eq!(answer(json!([1, [1, "and docs"]])), json!({ "plan": "pro", "targets": ["web", "Note: and docs"] }));
+    // Typed words go as typed.
+    assert_eq!(answer(json!(["Enterprise", false])), json!({ "plan": "Enterprise", "targets": [] }));
+}
+
+#[test]
 fn an_optional_single_choice_left_alone_is_skipped_as_in_t3() {
     // An ACP agent's choice its form leaves optional: T3 0.1.13 marks it `required: false`.
     let size = json!({ "id": "size", "header": "Size", "question": "Which size?", "multiSelect": false, "required": false,
@@ -1498,7 +1537,7 @@ fn typed_text_answers_a_question_in_your_own_words() {
         thread: "t1".into(),
         token: "x".into(),
         request_id: "r".into(),
-        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], multi: false, required: None }],
+        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], values: vec!["A".into()], multi: false, required: None }],
     };
     assert_eq!(Bridge::answers_for(&ask, &json!(["  my own words "])), json!({ "Name?": "my own words" }).as_object().unwrap().clone());
     assert!(Bridge::answers_for(&ask, &json!([9])).is_empty(), "an index past the options is ignored");
@@ -1506,13 +1545,16 @@ fn typed_text_answers_a_question_in_your_own_words() {
 
 #[test]
 fn typed_text_with_a_pick_goes_in_the_answer_as_a_note() {
-    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), multi, required: None };
+    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), values: labels.iter().map(|l| l.to_string()).collect(), multi, required: None };
+    // Words, not a pick: the note follows the option as it reads, not its value.
+    let mut look = question("Look?", &["Looks right", "Ship it?"], false);
+    look.values = vec!["right".into(), "ship".into()];
     let ask = PendingAsk {
         env: String::new(),
         thread: "t1".into(),
         token: "x".into(),
         request_id: "r".into(),
-        questions: vec![question("Look?", &["Looks right", "Ship it?"], false), question("Sizes", &["S", "M"], true)],
+        questions: vec![look, question("Sizes", &["S", "M"], true)],
     };
     let answers = Bridge::answers_for(&ask, &json!([[1, " too big "], [1, 2, "and soon"]]));
     assert_eq!(answers["Look?"], json!("Looks right. Note: too big"));

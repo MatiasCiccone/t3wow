@@ -2003,6 +2003,9 @@ struct Card {
 struct PendingQuestion {
     key: String,
     labels: Vec<String>,
+    /// What a pick of each option answers, as T3's window sends it: the option's `value`
+    /// when it has one (an ACP agent's choice), its label otherwise.
+    values: Vec<String>,
     multi: bool,
     /// T3's `required`: `Some(true)` for a question the provider requires an answer to
     /// (0.1.12), `Some(false)` for one it leaves optional (0.1.13, an ACP agent's form),
@@ -5553,7 +5556,9 @@ impl Bridge {
             let options: Vec<&Value> = q["options"].as_array().map(|o| o.iter().collect()).unwrap_or_default();
             let multi = q["multiSelect"] == true;
             let required = q["required"].as_bool();
-            questions.push(PendingQuestion { key, labels: options.iter().map(|o| str_of(&o["label"]).to_string()).collect(), multi, required });
+            let labels = options.iter().map(|o| str_of(&o["label"]).to_string()).collect();
+            let values = options.iter().map(|o| o["value"].as_str().unwrap_or(str_of(&o["label"])).to_string()).collect();
+            questions.push(PendingQuestion { key, labels, values, multi, required });
             let mut question = json!({
                 "h": plain(str_of(&q["header"]), 40),
                 // Not in the view, which names models: a model reference stays as written.
@@ -5583,7 +5588,8 @@ impl Bridge {
     }
 
     /// Turns the game's answer (per question: a 1-based option index, a list of them, or
-    /// typed text) into T3's answers, keyed by question id with option labels. A list may
+    /// typed text) into T3's answers, keyed by question id: a pick as T3's window sends it, the
+    /// option's value when it has one (an ACP agent's choice) and its label otherwise. A list may
     /// end with typed text, a note on the picks: T3's answers have no place for one (its own
     /// window sends either), so it goes in the answer after them, as "Note: ...". A
     /// multi-select left with nothing checked (`false`) answers none, as in T3 0.1.12, unless it's
@@ -5592,28 +5598,30 @@ impl Bridge {
     fn answers_for(ask: &PendingAsk, given: &Value) -> Map<String, Value> {
         let mut answers = Map::new();
         for (i, q) in ask.questions.iter().enumerate() {
-            let pick = |v: &Value| v.as_u64().and_then(|n| q.labels.get((n as usize).wrapping_sub(1))).cloned();
+            let index = |v: &Value| v.as_u64().map(|n| (n as usize).wrapping_sub(1)).filter(|&n| n < q.values.len());
+            let pick = |v: &Value| index(v).map(|n| q.values[n].clone());
             let value = match &given[i] {
                 Value::String(text) if !text.trim().is_empty() => Some(json!(text.trim())),
-                Value::Number(_) if q.multi => pick(&given[i]).map(|l| json!([l])),
+                Value::Number(_) if q.multi => pick(&given[i]).map(|v| json!([v])),
                 Value::Number(_) => pick(&given[i]).map(Value::String),
                 Value::Array(list) => {
-                    let mut labels: Vec<String> = list.iter().filter_map(pick).collect();
+                    let mut values: Vec<String> = list.iter().filter_map(pick).collect();
                     let note = list.iter().filter_map(Value::as_str).map(str::trim).find(|t| !t.is_empty());
-                    match (labels.is_empty(), note) {
+                    match (values.is_empty(), note) {
                         (true, None) => None,
                         (true, Some(note)) => Some(json!(note)),
                         (false, Some(note)) if q.multi => {
-                            labels.push(format!("Note: {note}"));
-                            Some(json!(labels))
+                            values.push(format!("Note: {note}"));
+                            Some(json!(values))
                         }
+                        // Words, not a pick: the option as it reads, then the note.
                         (false, Some(note)) => {
-                            let label = &labels[0];
+                            let label = list.iter().find_map(index).map_or("", |n| q.labels[n].as_str());
                             let stop = if label.ends_with(['.', '!', '?']) { "" } else { "." };
                             Some(json!(format!("{label}{stop} Note: {note}")))
                         }
-                        (false, None) if q.multi => Some(json!(labels)),
-                        (false, None) => Some(json!(labels[0])),
+                        (false, None) if q.multi => Some(json!(values)),
+                        (false, None) => Some(json!(values[0])),
                     }
                 }
                 _ => None,
