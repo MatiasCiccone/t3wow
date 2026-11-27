@@ -1176,6 +1176,25 @@ fn an_optional_single_choice_left_alone_is_skipped_as_in_t3() {
 }
 
 #[test]
+fn a_choice_that_takes_only_its_options_says_so_to_the_game_and_the_words_answer_the_field_that_takes_them() {
+    // T3's mock ACP agent's form, as T3 0.1.13 asks it: an optional choice with no free-text
+    // field (`allowCustomAnswer: false`), a required titled choice, and an optional number.
+    let flavor = json!({ "id": "flavor", "header": "Flavor", "question": "Which flavor?", "required": false, "allowCustomAnswer": false,
+                         "options": [{ "label": "vanilla", "description": "vanilla", "value": "vanilla" }, { "label": "chocolate", "description": "chocolate", "value": "chocolate" }] });
+    let size = json!({ "id": "size", "header": "Size", "question": "Which size?", "allowCustomAnswer": false,
+                       "options": [{ "label": "Small", "description": "Small", "value": "sz-s" }, { "label": "Medium", "description": "Medium", "value": "sz-m" }, { "label": "Large", "description": "Large", "value": "sz-l" }] });
+    let count = json!({ "id": "count", "header": "Count", "question": "How many?", "required": false, "options": [] });
+    let (mut rig, inbox, token) = asking(json!([flavor, size, count]));
+    assert_eq!(inbox.matches("c=false").count(), 2, "the game isn't told which questions take only their options: {inbox}");
+
+    // Flavor left alone, Medium picked, and the words for Count: they reach it.
+    rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": [false, 2, "5"] }] }));
+    rig.bridge.tick();
+    assert_ne!(outcome(&rig, 3)["ok"], false, "{:?}", outcome(&rig, 3));
+    assert_eq!(responds(&rig), vec![json!({ "size": "sz-m", "count": "5" })]);
+}
+
+#[test]
 fn an_options_preview_reaches_the_game_with_its_lines_as_in_t3() {
     let mut rig = Rig::new(5_000_000);
     {

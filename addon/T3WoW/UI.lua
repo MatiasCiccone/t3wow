@@ -2926,12 +2926,15 @@ local function pendingAsk()
     if isSelectedView(view) and view.ask then return view.ask end
 end
 
--- Sends the picks, and typed text for the first question without a pick (the first one that
--- needs an answer, when there is one). With every question picked, the text goes with the
--- last one's pick as a note ({ picks..., text }), never dropped. A multi-select left with
--- nothing checked answers none, as in T3, unless it's required (q.r true), and a
--- single-select T3 marks optional (q.r false) may be left alone, as T3 skips it. As in T3, it goes only once each question that needs a pick has
--- one, or the typed text. The companion turns the indexes back into T3's ids and labels.
+-- Sends the picks, and typed text for the first question without a pick that takes words (the
+-- first one that needs an answer, when there is one): as in T3, words never answer a question
+-- that takes only its options (q.c false, an ACP agent's choice with no free-text field). With
+-- every question picked, the text goes with the last one's pick as a note ({ picks..., text }),
+-- never dropped: where that one takes only its options, nothing goes and the text stays. A
+-- multi-select left with nothing checked answers none, as in T3, unless it's required (q.r
+-- true), and a single-select T3 marks optional (q.r false) may be left alone, as T3 skips it.
+-- As in T3, it goes only once each question that needs a pick has one, or the typed text. The
+-- companion turns the indexes back into T3's ids and labels.
 -- Returns true when it used the input.
 local function sendAnswer(text)
     local ask = pendingAsk()
@@ -2945,7 +2948,10 @@ local function sendAnswer(text)
     local function askNeedsPick(q)
         return q.r == true or (not q.m and q.r ~= false)
     end
-    local answers, typedUsed, needsPick = {}, false, false
+    local function takesWords(q)
+        return q.c ~= false
+    end
+    local answers, typedUsed, needsPick, needsOption = {}, false, false, false
     local typed = text and text ~= ""
     local lists, typedFor = {}, nil
     for qi, q in ipairs(ask.qs or {}) do
@@ -2954,8 +2960,9 @@ local function sendAnswer(text)
             if askState.picks[qi] and askState.picks[qi][oi] then list[#list + 1] = oi end
         end
         lists[qi] = list
-        -- The text answers the first unpicked question that needs an answer, else the first unpicked.
-        if typed and #list == 0 and (not typedFor or (not askNeedsPick(ask.qs[typedFor]) and askNeedsPick(q))) then
+        -- The text answers the first unpicked question that takes words and needs an answer,
+        -- else the first unpicked one that takes words.
+        if typed and #list == 0 and takesWords(q) and (not typedFor or (not askNeedsPick(ask.qs[typedFor]) and askNeedsPick(q))) then
             typedFor = qi
         end
     end
@@ -2968,19 +2975,27 @@ local function sendAnswer(text)
             typedUsed = true
         else
             answers[qi] = false -- keeps the list in step with the questions
-            if askNeedsPick(q) then needsPick = true end
+            if askNeedsPick(q) then
+                needsPick = true
+                needsOption = needsOption or not takesWords(q)
+            end
         end
+    end
+    if needsPick then
+        UI.Notice(needsOption and "Pick an answer." or "Pick an answer, or type one below.")
+        return false -- what you typed stays
     end
     local last = #(ask.qs or {})
     if typed and not typedUsed and last > 0 then
+        if not takesWords(ask.qs[last]) then
+            UI.Notice(last == 1 and "This question takes only its options, as in T3: clear the box to send."
+                or "Typed words can't go with these answers, as in T3: clear the box to send.")
+            return false -- what you typed stays
+        end
         local picks = answers[last]
         local note = type(picks) == "table" and { unpack(picks) } or { picks }
         note[#note + 1] = text
         answers[last], typedUsed = note, true
-    end
-    if needsPick then
-        UI.Notice("Pick an answer, or type one below.")
-        return false -- what you typed stays
     end
     local command = { t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers }
     local fits, why = ns.Link.Fits(command)
