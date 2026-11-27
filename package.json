@@ -1,7 +1,7 @@
 {
   "name": "t3wow",
-  "version": "0.14.0",
-  "t3Code": "0.1.12",
+  "version": "0.15.0",
+  "t3Code": "0.1.13",
   "license": "MIT",
   "private": true,
   "description": "T3 Code inside World of Warcraft: Forever.",
