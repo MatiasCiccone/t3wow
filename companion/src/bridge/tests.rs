@@ -397,13 +397,17 @@ impl T3 for FakeT3 {
                 Some("list") if !*self.questions.lock().unwrap() => json!({ "requestIds": [] }),
                 Some("list") => json!({ "requestIds": *self.request_ids.lock().unwrap() }),
                 Some("read") => json!({ "requestId": args["requestId"], "questions": *self.asked.lock().unwrap() }),
-                // As T3 0.1.12: an empty list answers an optional multi-select ("none of
-                // these"); a single-select or a required question still needs a choice.
+                // As T3 0.1.13: an empty list answers a multi-select the provider doesn't
+                // require ("none of these"), and a question marked `required: false` may have
+                // no entry at all (skipped, as T3's window sends it). Any other question needs
+                // a choice or words.
                 Some("respond") => {
                     let asked = self.asked.lock().unwrap().clone();
                     let refused = asked.as_array().into_iter().flatten().any(|q| {
-                        let empty = args["answers"][str_of(&q["id"])].as_array().is_some_and(Vec::is_empty);
-                        empty && (q["multiSelect"] != true || q["required"] == true)
+                        let answer = &args["answers"][str_of(&q["id"])];
+                        let said = answer.as_str().is_some_and(|t| !t.is_empty()) || answer.as_array().is_some_and(|l| !l.is_empty());
+                        let none = answer.as_array().is_some_and(Vec::is_empty) && q["multiSelect"] == true && q["required"] != true;
+                        !said && !none && q["required"] != false
                     });
                     if refused {
                         return Err(T3Error::Other("Answer each question before sending.".into()));
@@ -1077,6 +1081,62 @@ fn a_multi_select_with_nothing_checked_answers_none_unless_it_is_required() {
 }
 
 #[test]
+fn an_optional_single_choice_left_alone_is_skipped_as_in_t3() {
+    // An ACP agent's choice its form leaves optional: T3 0.1.13 marks it `required: false`.
+    let size = json!({ "id": "size", "header": "Size", "question": "Which size?", "multiSelect": false, "required": false,
+                       "options": [{ "label": "Small", "description": "" }, { "label": "Large", "description": "" }] });
+    let color = json!({ "id": "color", "header": "Color", "question": "Which color?", "multiSelect": false,
+                        "options": [{ "label": "Red", "description": "" }, { "label": "Blue", "description": "" }] });
+    let answer = |rig: &mut Rig, token: &str, a: Value| {
+        rig.frame(json!({ "k": "c1", "u": "ui1", "n": 0, "l": 2, "q": [{ "s": 3, "t": "answer", "id": "t1", "k": token, "a": a }] }));
+        rig.bridge.tick();
+    };
+
+    // Left alone: no entry for it, as T3's window sends a skipped question.
+    let (mut rig, inbox, token) = asking(json!([size]));
+    assert!(inbox.contains(",r=false}}}"), "the game isn't told it's optional: {inbox}");
+    answer(&mut rig, &token, json!([false]));
+    assert_eq!(responds(&rig), vec![json!({})]);
+
+    // Picked: it goes as before.
+    let (mut rig, _, token) = asking(json!([size]));
+    answer(&mut rig, &token, json!([2]));
+    assert_eq!(responds(&rig), vec![json!({ "size": "Large" })]);
+
+    // Skipped beside a choice the provider needs: only that one's answer goes.
+    let (mut rig, inbox, token) = asking(json!([size, color]));
+    assert!(inbox.matches("r=false").count() == 1 && !inbox.contains("r=true"), "only the optional question says so: {inbox}");
+    answer(&mut rig, &token, json!([false, 1]));
+    assert_eq!(responds(&rig), vec![json!({ "color": "Red" })]);
+
+    // The optional one picked and the needed one left alone: still a pick to make, as in
+    // T3's window (an ACP agent's form is cancelled for a missing required field).
+    let (mut rig, _, token) = asking(json!([size, color]));
+    answer(&mut rig, &token, json!([2, false]));
+    assert_eq!(outcome(&rig, 3)["ok"], false);
+    assert!(responds(&rig).is_empty(), "an answer went with a needed choice unpicked");
+
+    // Optional with no options to pick (a number or text field): an empty answer, as T3's
+    // window sends it.
+    let blank = json!({ "id": "count", "header": "Count", "question": "How many?", "required": false, "options": [] });
+    let (mut rig, _, token) = asking(json!([blank, color]));
+    answer(&mut rig, &token, json!([false, 1]));
+    assert_eq!(responds(&rig), vec![json!({ "count": "", "color": "Red" })]);
+
+    // The needed one left alone too: still a pick to make.
+    let (mut rig, _, token) = asking(json!([size, color]));
+    answer(&mut rig, &token, json!([false, false]));
+    assert_eq!(outcome(&rig, 3)["ok"], false);
+    assert!(responds(&rig).is_empty(), "an answer went with a needed choice unpicked");
+
+    // Only a pick past its options: not the question left alone.
+    let (mut rig, _, token) = asking(json!([size]));
+    answer(&mut rig, &token, json!([9]));
+    assert_eq!(outcome(&rig, 3)["ok"], false);
+    assert!(responds(&rig).is_empty(), "an answer went with no pick");
+}
+
+#[test]
 fn an_options_preview_reaches_the_game_with_its_lines_as_in_t3() {
     let mut rig = Rig::new(5_000_000);
     {
@@ -1438,7 +1498,7 @@ fn typed_text_answers_a_question_in_your_own_words() {
         thread: "t1".into(),
         token: "x".into(),
         request_id: "r".into(),
-        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], multi: false, required: false }],
+        questions: vec![PendingQuestion { key: "Name?".into(), labels: vec!["A".into()], multi: false, required: None }],
     };
     assert_eq!(Bridge::answers_for(&ask, &json!(["  my own words "])), json!({ "Name?": "my own words" }).as_object().unwrap().clone());
     assert!(Bridge::answers_for(&ask, &json!([9])).is_empty(), "an index past the options is ignored");
@@ -1446,7 +1506,7 @@ fn typed_text_answers_a_question_in_your_own_words() {
 
 #[test]
 fn typed_text_with_a_pick_goes_in_the_answer_as_a_note() {
-    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), multi, required: false };
+    let question = |key: &str, labels: &[&str], multi: bool| PendingQuestion { key: key.into(), labels: labels.iter().map(|l| l.to_string()).collect(), multi, required: None };
     let ask = PendingAsk {
         env: String::new(),
         thread: "t1".into(),
