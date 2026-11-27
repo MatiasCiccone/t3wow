@@ -4765,6 +4765,51 @@ return "ok"
 `);
 });
 
+test("typed words skip a choice that takes only its options, as in T3, and answer the field that takes them", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local function asking(ask)
+  inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+  UI.Select(thread)
+end
+local said
+local notice = UI.Notice
+UI.Notice = function(text) said = text; notice(text) end
+-- T3's mock ACP agent's form: an optional choice and a needed one, both taking only their
+-- options, and an optional number.
+local flavor = { h = "Flavor", q = "Which flavor?", m = false, r = false, c = false, o = { { l = "vanilla", d = "" }, { l = "chocolate", d = "" } } }
+local size = { h = "Size", q = "Which size?", m = false, c = false, o = { { l = "Small", d = "" }, { l = "Medium", d = "" }, { l = "Large", d = "" } } }
+local count = { h = "Count", q = "How many?", m = false, r = false, o = {} }
+
+-- Flavor left alone, Medium picked, 5 typed: the 5 answers Count, not Flavor.
+asking({ k = "beef0030", qs = { flavor, size, count } })
+click("Medium")
+typeText("5")
+local before = #queue()
+click("Submit answers")
+local a = sent().a
+assert(#queue() == before + 1 and a[1] == false and a[2] == 2 and a[3] == "5", "the 5 didn't answer Count: " .. tostring(a[1]) .. ", " .. tostring(a[3]))
+
+-- Size left alone: typing can't answer it, so the window asks only for a pick.
+asking({ k = "beef0032", qs = { flavor, size, count } })
+typeText("5")
+before = #queue()
+click("Submit answers")
+assert(#queue() == before, "a needed choice went unpicked")
+assert(said == "Pick an answer.", "the window asked for words that can't answer it: " .. tostring(said))
+
+-- Only choices that take their options left: the words don't go, and stay in the box.
+asking({ k = "beef0031", qs = { flavor } })
+typeText("5")
+before = #queue()
+click("Submit answer")
+assert(#queue() == before, "words went to a choice that takes only its options")
+assert(composer().text == "5", "what you typed was dropped: " .. tostring(composer().text))
+assert(said == "This question takes only its options, as in T3: clear the box to send.", "no word on why it didn't go: " .. tostring(said))
+return "ok"
+`);
+});
+
 test("a question is laid out as in T3: a quiet header, then options stacked with what they mean and a number", () => {
   run(`
 local ask = { k = "abcd1234", qs = { { h = "Input test", q = "Does it look right?", m = false, o = { { l = "Looks right", d = "The row shows Input" }, { l = "Needs changes", d = "" } } } } }

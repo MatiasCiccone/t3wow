@@ -5577,6 +5577,11 @@ impl Bridge {
             if let Some(required) = required {
                 question["r"] = json!(required);
             }
+            // Only its options answer it (an ACP agent's choice with no free-text field): T3's
+            // window takes no words for it, and T3 drops words sent for it.
+            if q["allowCustomAnswer"] == false {
+                question["c"] = json!(false);
+            }
             shown.push(question);
         }
         if questions.is_empty() {
