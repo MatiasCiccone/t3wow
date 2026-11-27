@@ -2926,11 +2926,12 @@ local function pendingAsk()
     if isSelectedView(view) and view.ask then return view.ask end
 end
 
--- Sends the picks, and typed text for the first question without a pick. With every
--- question picked, the text goes with the last one's pick as a note ({ picks..., text }),
--- never dropped. A multi-select left with nothing checked answers none, as in T3, unless
--- it's required (q.r); with nothing picked or typed, it goes only when every question is
--- such a multi-select. The companion turns the indexes back into T3's ids and labels.
+-- Sends the picks, and typed text for the first question without a pick (the first one that
+-- needs an answer, when there is one). With every question picked, the text goes with the
+-- last one's pick as a note ({ picks..., text }), never dropped. A multi-select left with
+-- nothing checked answers none, as in T3, unless it's required (q.r true), and a
+-- single-select T3 marks optional (q.r false) may be left alone, as T3 skips it. As in T3, it goes only once each question that needs a pick has
+-- one, or the typed text. The companion turns the indexes back into T3's ids and labels.
 -- Returns true when it used the input.
 local function sendAnswer(text)
     local ask = pendingAsk()
@@ -2940,22 +2941,34 @@ local function sendAnswer(text)
         UI.Notice(why)
         return false -- what you typed stays
     end
-    local answers, any, typedUsed, needsPick = {}, false, false, false
+    -- Whether a question left alone holds the answer back.
+    local function askNeedsPick(q)
+        return q.r == true or (not q.m and q.r ~= false)
+    end
+    local answers, typedUsed, needsPick = {}, false, false
     local typed = text and text ~= ""
+    local lists, typedFor = {}, nil
     for qi, q in ipairs(ask.qs or {}) do
         local list = {}
         for oi = 1, #(q.o or {}) do
             if askState.picks[qi] and askState.picks[qi][oi] then list[#list + 1] = oi end
         end
+        lists[qi] = list
+        -- The text answers the first unpicked question that needs an answer, else the first unpicked.
+        if typed and #list == 0 and (not typedFor or (not askNeedsPick(ask.qs[typedFor]) and askNeedsPick(q))) then
+            typedFor = qi
+        end
+    end
+    for qi, q in ipairs(ask.qs or {}) do
+        local list = lists[qi]
         if #list > 0 then
             answers[qi] = q.m and list or list[1]
-            any = true
-        elseif typed and not typedUsed then
+        elseif qi == typedFor then
             answers[qi] = text
-            typedUsed, any = true, true
+            typedUsed = true
         else
             answers[qi] = false -- keeps the list in step with the questions
-            if not q.m or q.r then needsPick = true end
+            if askNeedsPick(q) then needsPick = true end
         end
     end
     local last = #(ask.qs or {})
@@ -2965,9 +2978,9 @@ local function sendAnswer(text)
         note[#note + 1] = text
         answers[last], typedUsed = note, true
     end
-    if not any and needsPick then
+    if needsPick then
         UI.Notice("Pick an answer, or type one below.")
-        return true
+        return false -- what you typed stays
     end
     local command = { t = "answer", e = selected.env, id = selected.id, k = ask.k, a = answers }
     local fits, why = ns.Link.Fits(command)

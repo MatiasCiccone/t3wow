@@ -4713,6 +4713,58 @@ return "ok"
 `);
 });
 
+test("a single-select T3 marks optional can be left alone, as T3 skips it; one it doesn't mark still needs a pick", () => {
+  run(`
+local thread = { e = 1, id = "t1", t = "Thread", s = "waiting", set = false, at = time(), p = "" }
+local function asking(ask)
+  inboxWith(ENVS, { threads = { thread }, view = { e = 1, id = "t1", t = "Thread", s = "waiting", items = {}, ask = ask } })
+  UI.Select(thread)
+end
+local size = { h = "Size", q = "Which size?", m = false, r = false, o = { { l = "Small", d = "" }, { l = "Large", d = "" } } }
+local color = { h = "Color", q = "Which color?", m = false, o = { { l = "Red", d = "" }, { l = "Blue", d = "" } } }
+
+-- Alone and left alone: it goes, and the companion skips it.
+asking({ k = "beef0020", qs = { size } })
+local before = #queue()
+click("Submit answer")
+assert(#queue() == before + 1 and sent().t == "answer" and sent().a[1] == false, "an optional question left alone didn't go")
+
+-- Beside one that needs a pick: that one still does.
+asking({ k = "beef0021", qs = { size, color } })
+before = #queue()
+click("Submit answers")
+assert(#queue() == before, "a needed single-select went unpicked")
+-- The optional one picked and the needed one left alone: still a pick to make, as in T3.
+asking({ k = "beef0022", qs = { size, color } })
+click("Large")
+click("Submit answers")
+assert(#queue() == before, "a needed single-select went unpicked beside a picked optional one")
+
+-- Two that need an answer left alone and words typed: the words answer the first, the
+-- second still needs a pick, and the words stay.
+asking({ k = "beef0023", qs = { size, color, color } })
+typeText("Green")
+click("Submit answers")
+assert(#queue() == before, "a needed single-select went unpicked beside typed words")
+assert(composer().text == "Green", "what you typed was dropped: " .. tostring(composer().text))
+
+-- Words with an optional choice before a question that needs an answer: they answer that one.
+local name = { h = "Name", q = "Your name?", m = false, r = true, o = {} }
+asking({ k = "beef0025", qs = { size, name } })
+typeText("Ada")
+before = #queue()
+click("Submit answers")
+assert(#queue() == before + 1 and sent().a[1] == false and sent().a[2] == "Ada", "the words didn't answer the needed question")
+
+asking({ k = "beef0024", qs = { size, color } })
+click("Red")
+before = #queue()
+click("Submit answers")
+assert(#queue() == before + 1 and sent().a[1] == false and sent().a[2] == 1, "the pick didn't go with the skipped question")
+return "ok"
+`);
+});
+
 test("a question is laid out as in T3: a quiet header, then options stacked with what they mean and a number", () => {
   run(`
 local ask = { k = "abcd1234", qs = { { h = "Input test", q = "Does it look right?", m = false, o = { { l = "Looks right", d = "The row shows Input" }, { l = "Needs changes", d = "" } } } } }

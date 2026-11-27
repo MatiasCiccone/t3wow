@@ -2004,16 +2004,18 @@ struct PendingQuestion {
     key: String,
     labels: Vec<String>,
     multi: bool,
-    /// T3 0.1.12 marks a question the provider requires an answer to; a multi-select
-    /// without it may be answered with nothing checked.
-    required: bool,
+    /// T3's `required`: `Some(true)` for a question the provider requires an answer to
+    /// (0.1.12), `Some(false)` for one it leaves optional (0.1.13, an ACP agent's form),
+    /// `None` when T3 doesn't say.
+    required: Option<bool>,
 }
 
 impl PendingQuestion {
     /// A multi-select answered with nothing checked: "none of these", an empty list.
     fn none_allowed(&self) -> bool {
-        self.multi && !self.required
+        self.multi && self.required != Some(true)
     }
+
 }
 
 #[derive(Clone, Debug)]
@@ -3163,7 +3165,7 @@ impl Bridge {
                         .filter(|a| a.thread == id && a.env == env && a.token == str_of(&command["k"]))
                         .ok_or_else(|| T3Error::Other("that question was already answered or has changed".into()))?;
                     let answers = Self::answers_for(&ask, &command["a"]);
-                    if !Self::answer_complete_enough(&ask, &answers) {
+                    if !Self::answer_complete_enough(&ask, &command["a"], &answers) {
                         return Err(T3Error::Other("pick an answer first".into()));
                     }
                     let args = json!({ "action": "respond", "threadId": id, "requestId": ask.request_id, "answers": answers });
@@ -5550,7 +5552,7 @@ impl Bridge {
             let key = q["id"].as_str().unwrap_or(text).to_string();
             let options: Vec<&Value> = q["options"].as_array().map(|o| o.iter().collect()).unwrap_or_default();
             let multi = q["multiSelect"] == true;
-            let required = q["required"] == true;
+            let required = q["required"].as_bool();
             questions.push(PendingQuestion { key, labels: options.iter().map(|o| str_of(&o["label"]).to_string()).collect(), multi, required });
             let mut question = json!({
                 "h": plain(str_of(&q["header"]), 40),
@@ -5567,8 +5569,8 @@ impl Bridge {
                     shown
                 }).collect::<Vec<_>>(),
             });
-            if required {
-                question["r"] = json!(true);
+            if let Some(required) = required {
+                question["r"] = json!(required);
             }
             shown.push(question);
         }
@@ -5585,7 +5587,8 @@ impl Bridge {
     /// end with typed text, a note on the picks: T3's answers have no place for one (its own
     /// window sends either), so it goes in the answer after them, as "Note: ...". A
     /// multi-select left with nothing checked (`false`) answers none, as in T3 0.1.12, unless it's
-    /// required.
+    /// required. Another question left alone that T3 marks optional gets no entry: T3 0.1.13
+    /// takes that as skipped, as its own window sends it.
     fn answers_for(ask: &PendingAsk, given: &Value) -> Map<String, Value> {
         let mut answers = Map::new();
         for (i, q) in ask.questions.iter().enumerate() {
@@ -5623,17 +5626,21 @@ impl Bridge {
                 None if q.none_allowed() && given[i] == false => {
                     answers.insert(q.key.clone(), json!([]));
                 }
+                // Optional and without options: T3's window sends an empty answer for it.
+                None if q.required == Some(false) && q.labels.is_empty() && given[i] == false => {
+                    answers.insert(q.key.clone(), json!(""));
+                }
                 None => {}
             }
         }
         answers
     }
 
-    /// Whether the game's answer picks or says something, or leaves alone only questions
-    /// that may go unpicked: T3 needs a choice for a single-select or a required question.
-    fn answer_complete_enough(ask: &PendingAsk, answers: &Map<String, Value>) -> bool {
-        let chose = answers.values().any(|v| v.as_array().is_none_or(|list| !list.is_empty()));
-        chose || (!answers.is_empty() && ask.questions.iter().all(PendingQuestion::none_allowed))
+    /// Whether the game's answer answers every question, or leaves alone (`false`) one T3
+    /// marks optional: as T3's window, which sends nothing until each question that needs a
+    /// choice has one (an ACP agent's form is cancelled for a missing required field).
+    fn answer_complete_enough(ask: &PendingAsk, given: &Value, answers: &Map<String, Value>) -> bool {
+        ask.questions.iter().enumerate().all(|(i, q)| answers.contains_key(&q.key) || (given[i] == false && q.required == Some(false)))
     }
 
     // ---- writing into the game ----
